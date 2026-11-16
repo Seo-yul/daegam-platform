@@ -1,0 +1,83 @@
+[project]
+name = "daegam-agent-runtime"
+version = "0.1.0"
+description = "daegam agent-runtime: fixed image that turns /config/agent.json into a deepagents graph and serves it as an SSE chat service"
+requires-python = ">=3.12"
+license = "LicenseRef-PolyForm-Strict-1.0.0"
+# deepagents 는 0.7.20 에 핀한다(D26). 나머지는 그 버전이 끌어오는 범위 안에서 잠근다(uv.lock).
+dependencies = [
+    "deepagents==0.7.20",
+    # langchain 과 langchain-core 의 하한은 deepagents 0.7.20 의 요구(langchain>=1.4.3,
+    # langchain-core>=1.6.6)다. 플랫폼은 deepagents 를 쓰지 않아 langchain-core 가 >=1.6 그대로라 두
+    # 레포의 범위가 다르다 (D29). langchain-anthropic 은 anthropic 2.x 를 받는 판(1.7.7 부터 상한이
+    # 없다) 가운데 시험한 판이 하한이고, 범위는 platform 과 같다
+    "langchain-anthropic>=1.7.10,<2",
+    "langchain-openai>=1.6,<2",
+    # deepagents 가 끌어오지만 직접 import 하므로 직접 적는다 (D29).
+    # mcp extra 는 langchain.mcp(MCPAdapter)를 쓰려고 넣은 것이고 fastmcp client 를 끌어온다 (T6)
+    "langchain[mcp]>=1.4.3,<2",
+    "langchain-core>=1.6.6,<2",
+    "langgraph>=1.2,<2",
+    # MCP 클라이언트 타입을 직접 쓴다. platform·mcp-runtime 과 같은 2.x 다 (T6)
+    "mcp>=2,<3",
+    "langgraph-checkpoint-postgres>=3.1,<4",
+    # AsyncPostgresSaver 가 psycopg 3 을 쓴다. distroless 이미지에 libpq 가 없으므로 binary 휠을 쓴다.
+    "psycopg[binary,pool]>=3.2",
+    # memory 노드의 Redis 8 체크포인터(D33). 색인·카운터가 redis.asyncio 를 직접 import 하므로
+    # redis 도 직접 적는다. 스레드를 다 지웠는지는 체크포인터의 adelete_thread 와 같은 redisvl
+    # 질의로 세므로 redisvl 도 직접 적는다. 범위는 체크포인터의 요구와 같다 (D29)
+    "langgraph-checkpoint-redis>=0.5,<0.6",
+    "redis>=6.3,<9",
+    "redisvl>=0.15,<1",
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    # 모델·설정 스키마와 CORS 미들웨어를 직접 import 한다 (D29)
+    "pydantic>=2",
+    "starlette>=1,<2",
+    # 끊긴 턴의 마감이 CancelScope(shield=True)·move_on_after 를 직접 쓴다(D65). starlette 가
+    # 끌어오지만 직접 적는다 (D29)
+    "anyio>=4,<5",
+    "httpx>=0.28",
+    # MCP 전송이 받는 인증 타입이라 runtime/mcp.py 가 httpx2.Auth 를 직접 상속한다. mcp 가 끌어오지만
+    # 직접 적고, 범위는 platform 과 같다 (D29)
+    "httpx2>=2,<3",
+    # LLM 전송 규칙(runtime/llm_http.py, P37)이 SDK 예외와 클라이언트를 직접 쓴다. langchain-openai·
+    # langchain-anthropic 이 끌어오지만 직접 적고, 범위는 platform 과 같다 (D29). anthropic 의
+    # 범위가 2.x 인 까닭은 platform/pyproject.toml 의 주석이다
+    "openai>=3.8.0",
+    "anthropic>=2.7.0,<3",
+    "jsonschema>=4.23",
+    # 인바운드 OIDC 검증(runtime/oidc.py, D27). mcp 의 전이 의존성에 기대지 않고 직접 적는다
+    "PyJWT[crypto]>=2.14",
+    # 웹 가드가 URL 호스트를 IDNA 2008 A-label 로 맞춘다(runtime/web_guard.py, D64). httpx 가 끌어오지만
+    # 직접 적는다 (D29)
+    "idna>=3.7",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.6",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["runtime"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

@@ -1,0 +1,15 @@
+{
+  "type": "invoke",
+  "name": "adaptiveCard/action",
+  "value": {
+    "action": {
+      "type": "Action.Execute",
+      "id": "",
+      "verb": "editOrResolveView",
+      "data": {
+        "refresh info": "<refresh info>"
+      }
+    },
+    "trigger": "automatic"
+  }
+}

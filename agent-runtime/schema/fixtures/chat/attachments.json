@@ -1,0 +1,38 @@
+{
+  "events": {
+    "done": {
+      "session_id": "5b0c8f3a9d2e4c7f8a1b6e0d3c9f2a71",
+      "turn": 1,
+      "turn_id": "6c1d2e3f4a5b46c7d8e9f0a1b2c3d4e5",
+      "trace_id": "1d3b5f7a9c2e4f6081a3c5e7f9b2d4f6",
+      "usage": {"input_tokens": 2610, "output_tokens": 42, "total_tokens": 2652, "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0},
+      "tool_calls": 1,
+      "text": "보고서 12쪽에 따르면 환불은 7일 안에 신청합니다. 화면의 오류는 결제 단계에서 났습니다.",
+      "attachments_received": 3
+    }
+  },
+  "transcript": [
+    {
+      "kind": "user",
+      "text": "보고서와 화면을 보고 정리해 줘",
+      "attachments": [
+        {"name": "보고서.pdf", "kind": "text", "bytes": 98213, "pages": 12},
+        {"name": "매출.xlsx", "kind": "text", "bytes": 1500000, "sheets": 3, "truncated": true},
+        {"name": "화면.png", "kind": "image", "bytes": 204800}
+      ]
+    },
+    {
+      "kind": "assistant",
+      "text": "보고서 12쪽에 따르면 환불은 7일 안에 신청합니다. 화면의 오류는 결제 단계에서 났습니다.",
+      "streaming": false
+    },
+    {
+      "kind": "done",
+      "usage": {"input_tokens": 2610, "output_tokens": 42, "total_tokens": 2652, "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0},
+      "turn": 1,
+      "tool_calls": 1,
+      "turn_id": "6c1d2e3f4a5b46c7d8e9f0a1b2c3d4e5",
+      "trace_id": "1d3b5f7a9c2e4f6081a3c5e7f9b2d4f6"
+    }
+  ]
+}

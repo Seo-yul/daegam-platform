@@ -1,0 +1,112 @@
+{
+  "schema_version": "1",
+  "features": ["skills"],
+  "profile": {
+    "id": "ai-skills-0001",
+    "name": "skills",
+    "revision": 1
+  },
+  "instance": {
+    "id": "ai-skills-0001",
+    "name": "skills"
+  },
+  "main": {
+    "model": {
+      "provider": {
+        "name": "local-stub",
+        "kind": "stub",
+        "env_key": null,
+        "base_url": null
+      },
+      "name": "stub",
+      "params": {
+        "max_output_tokens": 2048,
+        "effort": "medium",
+        "temperature": null
+      }
+    },
+    "system_prompt": "너는 보고서를 쓰는 에이전트다. 자료 조사는 researcher 에게 맡기고 받은 자료로 보고서를 쓴다.",
+    "compaction": {
+      "trigger": { "kind": "fraction", "value": 0.85 },
+      "keep": { "kind": "fraction", "value": 0.1 }
+    },
+    "limits": {
+      "max_tool_calls_per_turn": 8,
+      "turn_timeout_seconds": 120,
+      "retries": 2
+    },
+    "fallback": null,
+    "response_format": { "kind": "text" },
+    "language": "ko",
+    "builtin_tools": { "filesystem": true },
+    "tools": [],
+    "subagents": ["researcher"],
+    "skills": ["report-style", "web-research"]
+  },
+  "subagents": [
+    {
+      "name": "researcher",
+      "description": "보고서에 쓸 자료를 모을 때 맡긴다.",
+      "system_prompt": "주제에 맞는 자료를 모아 출처와 함께 돌려준다.",
+      "model": {
+        "provider": {
+          "name": "local-stub",
+          "kind": "stub",
+          "env_key": null,
+          "base_url": null
+        },
+        "name": "stub",
+        "params": {
+          "max_output_tokens": 1024,
+          "effort": "low",
+          "temperature": null
+        }
+      },
+      "tools": [],
+      "skills": ["web-research"],
+      "limits": {
+        "max_tool_calls_per_turn": 4,
+        "turn_timeout_seconds": 60,
+        "retries": 0
+      },
+      "interrupt_on": {}
+    }
+  ],
+  "tools": [],
+  "skills": [
+    {
+      "name": "report-style",
+      "id": "sk-report-style",
+      "revision": 1,
+      "digest": "sha256:1cca3df35fe81c0dc743641f6b349260b554ca3897a30c438141de1473a60bd9",
+      "bytes": 474
+    },
+    {
+      "name": "web-research",
+      "id": "sk-web-research",
+      "revision": 1,
+      "digest": "sha256:f9b902b7100557e15492712aaa6017f62b6720b8ce381bc6f4db7f342a3ff70c",
+      "bytes": 512
+    }
+  ],
+  "memory": null,
+  "guardrails": [],
+  "entry": {
+    "session_ttl_seconds": 1800,
+    "max_turns": 20,
+    "rate_limit": null,
+    "max_concurrent_sessions": 10,
+    "max_input_chars": 4000,
+    "greeting": null
+  },
+  "service": {
+    "budget": {
+      "session_tokens": null,
+      "daily_tokens": null
+    },
+    "observability": {
+      "record_bodies": false
+    }
+  },
+  "stub": true
+}

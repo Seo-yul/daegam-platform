@@ -1,0 +1,9 @@
+.venv
+tests
+schema/check.py
+schema/fixtures
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.ruff_cache
+README.md

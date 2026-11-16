@@ -1,0 +1,130 @@
+{
+  "schema_version": "2",
+  "profile": {
+    "id": "ai-knowledge-0001",
+    "name": "knowledge",
+    "revision": 1
+  },
+  "instance": {
+    "id": "ai-knowledge-0001",
+    "name": "knowledge"
+  },
+  "main": {
+    "model": {
+      "provider": {
+        "name": "local-stub",
+        "kind": "stub",
+        "env_key": null,
+        "base_url": null
+      },
+      "name": "stub",
+      "params": {
+        "max_output_tokens": 2048,
+        "effort": "medium",
+        "temperature": null
+      }
+    },
+    "system_prompt": "너는 제품 FAQ 를 아는 상담 에이전트다. 제품에 관한 질문은 먼저 search_faq 로 관련 구절을 찾고 그 안에서만 답한다. 찾은 것이 없으면 모른다고 답한다.",
+    "compaction": {
+      "trigger": { "kind": "fraction", "value": 0.85 },
+      "keep": { "kind": "fraction", "value": 0.1 }
+    },
+    "limits": {
+      "max_tool_calls_per_turn": 8,
+      "turn_timeout_seconds": 120,
+      "retries": 2
+    },
+    "fallback": null,
+    "response_format": { "kind": "text" },
+    "language": "ko",
+    "builtin_tools": { "filesystem": true },
+    "tools": [],
+    "knowledge": ["kb-faq"],
+    "subagents": ["summarizer"]
+  },
+  "subagents": [
+    {
+      "name": "summarizer",
+      "description": "긴 답을 세 문장으로 줄일 때 맡긴다.",
+      "system_prompt": "받은 글을 세 문장 이하로 줄인다. 새 사실을 더하지 않는다.",
+      "model": {
+        "provider": {
+          "name": "local-stub",
+          "kind": "stub",
+          "env_key": null,
+          "base_url": null
+        },
+        "name": "stub",
+        "params": {
+          "max_output_tokens": 512,
+          "effort": "low",
+          "temperature": null
+        }
+      },
+      "tools": [],
+      "knowledge": [],
+      "limits": {
+        "max_tool_calls_per_turn": 2,
+        "turn_timeout_seconds": 60,
+        "retries": 0
+      },
+      "interrupt_on": {}
+    }
+  ],
+  "tools": [],
+  "knowledge": [
+    {
+      "ref": "kb-faq",
+      "base": {
+        "id": "3f2a9c1e5b7d4e8fa6c0b1d2e3f4a5b6",
+        "name": "faq"
+      },
+      "store": {
+        "kind": "postgres",
+        "dsn_env": "DAEGAM_DB_0_URL",
+        "table": "daegam_kb_3f2a9c1e5b7d4e8fa6c0b1d2e3f4a5b6",
+        "dimensions": 64
+      },
+      "embedding": {
+        "provider": {
+          "name": "local-stub",
+          "kind": "stub",
+          "env_key": null,
+          "base_url": null
+        },
+        "model": "stub"
+      },
+      "tool": {
+        "name": "search_faq",
+        "description": "Search the knowledge base 'faq' for passages relevant to a query",
+        "top_k": 5,
+        "min_score": null
+      }
+    }
+  ],
+  "memory": {
+    "checkpointer": {
+      "kind": "postgres",
+      "dsn_env": "DAEGAM_DB_0_URL"
+    }
+  },
+  "guardrails": [],
+  "entry": {
+    "session_ttl_seconds": 3600,
+    "max_turns": 50,
+    "rate_limit": null,
+    "max_concurrent_sessions": 100,
+    "max_input_chars": 4000,
+    "greeting": "안녕하세요. 제품에 관해 무엇이든 물어보세요."
+  },
+  "service": {
+    "budget": {
+      "session_tokens": 200000,
+      "daily_tokens": null
+    },
+    "observability": {
+      "record_bodies": false
+    }
+  },
+  "stub": true
+}

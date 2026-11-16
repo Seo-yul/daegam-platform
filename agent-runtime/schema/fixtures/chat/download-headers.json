@@ -1,0 +1,64 @@
+{
+  "cases": [
+    {
+      "path": "/reports/보고서 \"초안\"\r\n.md",
+      "media_type": "application/octet-stream",
+      "filename": "보고서 초안.md",
+      "headers": {
+        "content-type": "application/octet-stream",
+        "content-disposition": "attachment; filename=\"___ __.md\"; filename*=UTF-8''%EB%B3%B4%EA%B3%A0%EC%84%9C%20%EC%B4%88%EC%95%88.md",
+        "x-content-type-options": "nosniff",
+        "cache-control": "no-store",
+        "content-security-policy": "sandbox; default-src 'none'"
+      }
+    },
+    {
+      "path": "/notes\\v1.txt",
+      "media_type": "application/octet-stream",
+      "filename": "notes\\v1.txt",
+      "headers": {
+        "content-type": "application/octet-stream",
+        "content-disposition": "attachment; filename=\"notes_v1.txt\"; filename*=UTF-8''notes%5Cv1.txt",
+        "x-content-type-options": "nosniff",
+        "cache-control": "no-store",
+        "content-security-policy": "sandbox; default-src 'none'"
+      }
+    },
+    {
+      "path": "/site/index.html",
+      "media_type": "application/octet-stream",
+      "filename": "index.html",
+      "headers": {
+        "content-type": "application/octet-stream",
+        "content-disposition": "attachment; filename=\"index.html\"; filename*=UTF-8''index.html",
+        "x-content-type-options": "nosniff",
+        "cache-control": "no-store",
+        "content-security-policy": "sandbox; default-src 'none'"
+      }
+    },
+    {
+      "path": "/dir/",
+      "media_type": "application/octet-stream",
+      "filename": "download",
+      "headers": {
+        "content-type": "application/octet-stream",
+        "content-disposition": "attachment; filename=\"download\"; filename*=UTF-8''download",
+        "x-content-type-options": "nosniff",
+        "cache-control": "no-store",
+        "content-security-policy": "sandbox; default-src 'none'"
+      }
+    },
+    {
+      "path": "feedback-support.ndjson",
+      "media_type": "application/x-ndjson",
+      "filename": "feedback-support.ndjson",
+      "headers": {
+        "content-type": "application/x-ndjson",
+        "content-disposition": "attachment; filename=\"feedback-support.ndjson\"; filename*=UTF-8''feedback-support.ndjson",
+        "x-content-type-options": "nosniff",
+        "cache-control": "no-store",
+        "content-security-policy": "sandbox; default-src 'none'"
+      }
+    }
+  ]
+}

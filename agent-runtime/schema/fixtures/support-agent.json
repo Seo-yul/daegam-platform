@@ -1,0 +1,106 @@
+{
+  "schema_version": "1",
+  "profile": {
+    "id": "ai-support-0001",
+    "name": "support",
+    "revision": 1
+  },
+  "instance": {
+    "id": "ai-support-0001",
+    "name": "support"
+  },
+  "main": {
+    "model": {
+      "provider": {
+        "name": "local-stub",
+        "kind": "stub",
+        "env_key": null,
+        "base_url": null
+      },
+      "name": "stub",
+      "params": {
+        "max_output_tokens": 2048,
+        "effort": "medium",
+        "temperature": null
+      }
+    },
+    "system_prompt": "너는 고객 상담 에이전트다. 계산이 필요하면 Tool 을 쓰고, 나눗셈은 승인을 받은 뒤에만 실행한다. 모르는 것은 모른다고 답한다.",
+    "compaction": {
+      "trigger": { "kind": "fraction", "value": 0.85 },
+      "keep": { "kind": "fraction", "value": 0.1 }
+    },
+    "limits": {
+      "max_tool_calls_per_turn": 8,
+      "turn_timeout_seconds": 120,
+      "retries": 2
+    },
+    "fallback": null,
+    "response_format": { "kind": "text" },
+    "language": "ko",
+    "builtin_tools": { "filesystem": true },
+    "tools": ["tools-calculator"],
+    "subagents": []
+  },
+  "subagents": [],
+  "tools": [
+    {
+      "ref": "tools-calculator",
+      "source": {
+        "kind": "gateway_instance",
+        "id": "gi-calc-0001",
+        "name": "calc"
+      },
+      "url": "http://agent-calc.tenant-a.svc.cluster.local:8080/mcp",
+      "transport": "streamable_http",
+      "auth": {
+        "kind": "oauth_client_credentials",
+        "client_id": "daegam-agent",
+        "token_url": "http://mock-oidc.daegam-system.svc.cluster.local:8080/oauth2/token",
+        "scope": "mcp",
+        "secret_env": "DAEGAM_AGENT_CLIENT_SECRET"
+      },
+      "allow": ["Add", "Divide"],
+      "approval": {
+        "Divide": ["approve", "reject"]
+      },
+      "timeouts": {
+        "Divide": 30
+      }
+    }
+  ],
+  "memory": {
+    "checkpointer": {
+      "kind": "postgres",
+      "dsn_env": "DAEGAM_DB_0_URL"
+    }
+  },
+  "guardrails": [
+    {
+      "position": "input",
+      "rules": [
+        { "kind": "max_length", "value": 4000 },
+        { "kind": "pii_mask", "value": { "types": ["credit_card"] } }
+      ],
+      "on_violation": "block",
+      "message": "카드 번호 같은 민감 정보는 보낼 수 없다. 지우고 다시 보내 달라."
+    }
+  ],
+  "entry": {
+    "session_ttl_seconds": 3600,
+    "max_turns": 50,
+    "rate_limit": { "per_user_per_minute": 20 },
+    "max_concurrent_sessions": 100,
+    "max_input_chars": 4000,
+    "greeting": "안녕하세요. 무엇을 도와드릴까요?"
+  },
+  "service": {
+    "budget": {
+      "session_tokens": 200000,
+      "daily_tokens": null
+    },
+    "observability": {
+      "record_bodies": false
+    }
+  },
+  "stub": true
+}

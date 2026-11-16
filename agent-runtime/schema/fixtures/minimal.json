@@ -1,0 +1,66 @@
+{
+  "schema_version": "1",
+  "profile": {
+    "id": "ai-minimal-0001",
+    "name": "minimal",
+    "revision": 1
+  },
+  "instance": {
+    "id": "ai-minimal-0001",
+    "name": "minimal"
+  },
+  "main": {
+    "model": {
+      "provider": {
+        "name": "local-anthropic",
+        "kind": "anthropic",
+        "env_key": "ANTHROPIC_API_KEY",
+        "base_url": null
+      },
+      "name": "claude-opus-5",
+      "params": {
+        "max_output_tokens": 1024,
+        "effort": "low",
+        "temperature": null
+      }
+    },
+    "system_prompt": "짧고 정확하게 답한다.",
+    "compaction": {
+      "trigger": { "kind": "fraction", "value": 0.85 },
+      "keep": { "kind": "fraction", "value": 0.1 }
+    },
+    "limits": {
+      "max_tool_calls_per_turn": 1,
+      "turn_timeout_seconds": 60,
+      "retries": 0
+    },
+    "fallback": null,
+    "response_format": { "kind": "text" },
+    "language": null,
+    "builtin_tools": { "filesystem": true },
+    "tools": [],
+    "subagents": []
+  },
+  "subagents": [],
+  "tools": [],
+  "memory": null,
+  "guardrails": [],
+  "entry": {
+    "session_ttl_seconds": 1800,
+    "max_turns": 20,
+    "rate_limit": null,
+    "max_concurrent_sessions": 10,
+    "max_input_chars": 2000,
+    "greeting": null
+  },
+  "service": {
+    "budget": {
+      "session_tokens": null,
+      "daily_tokens": null
+    },
+    "observability": {
+      "record_bodies": false
+    }
+  },
+  "stub": false
+}

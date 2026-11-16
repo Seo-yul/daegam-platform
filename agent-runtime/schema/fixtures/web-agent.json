@@ -1,0 +1,190 @@
+{
+  "schema_version": "1",
+  "features": [
+    "web_guard"
+  ],
+  "web_data_tools": true,
+  "profile": {
+    "id": "ai-web-0001",
+    "name": "web",
+    "revision": 1
+  },
+  "instance": {
+    "id": "ai-web-0001",
+    "name": "web"
+  },
+  "main": {
+    "model": {
+      "provider": {
+        "name": "local-stub",
+        "kind": "stub",
+        "env_key": null,
+        "base_url": null
+      },
+      "name": "stub",
+      "params": {
+        "max_output_tokens": 2048,
+        "effort": "medium",
+        "temperature": null
+      }
+    },
+    "system_prompt": "너는 계산과 자료 조사를 돕는 에이전트다. 웹 자료는 researcher 에게 맡긴다.",
+    "compaction": {
+      "trigger": {
+        "kind": "fraction",
+        "value": 0.85
+      },
+      "keep": {
+        "kind": "fraction",
+        "value": 0.1
+      }
+    },
+    "limits": {
+      "max_tool_calls_per_turn": 8,
+      "turn_timeout_seconds": 120,
+      "retries": 2
+    },
+    "fallback": null,
+    "response_format": {
+      "kind": "text"
+    },
+    "language": "ko",
+    "builtin_tools": {
+      "filesystem": true
+    },
+    "tools": [
+      "tools-calculator"
+    ],
+    "subagents": [
+      "researcher"
+    ]
+  },
+  "subagents": [
+    {
+      "name": "researcher",
+      "description": "웹에서 자료를 찾거나 페이지를 읽을 때 맡긴다.",
+      "system_prompt": "웹을 검색하고 페이지를 읽어 출처와 함께 돌려준다.",
+      "model": {
+        "provider": {
+          "name": "local-stub",
+          "kind": "stub",
+          "env_key": null,
+          "base_url": null
+        },
+        "name": "stub",
+        "params": {
+          "max_output_tokens": 1024,
+          "effort": "low",
+          "temperature": null
+        }
+      },
+      "tools": [
+        "tools-web"
+      ],
+      "limits": {
+        "max_tool_calls_per_turn": 4,
+        "turn_timeout_seconds": 60,
+        "retries": 0
+      },
+      "interrupt_on": {}
+    }
+  ],
+  "tools": [
+    {
+      "ref": "tools-calculator",
+      "source": {
+        "kind": "gateway_instance",
+        "id": "gi-calc-0001",
+        "name": "calc"
+      },
+      "url": "http://agent-calc.tenant-a.svc.cluster.local:8080/mcp",
+      "transport": "streamable_http",
+      "auth": {
+        "kind": "oauth_client_credentials",
+        "client_id": "daegam-agent",
+        "token_url": "http://mock-oidc.daegam-system.svc.cluster.local:8080/oauth2/token",
+        "scope": "mcp",
+        "secret_env": "DAEGAM_AGENT_CLIENT_SECRET"
+      },
+      "allow": [
+        "Add",
+        "Divide"
+      ],
+      "approval": {
+        "Add": [
+          "approve",
+          "edit",
+          "reject"
+        ],
+        "Divide": [
+          "approve",
+          "edit",
+          "reject"
+        ]
+      },
+      "timeouts": {
+        "Divide": 30
+      }
+    },
+    {
+      "ref": "tools-web",
+      "source": {
+        "kind": "gateway_instance",
+        "id": "gi-web-0001",
+        "name": "web"
+      },
+      "url": "http://vmcp-web.tenant-a.svc.cluster.local:4483/mcp",
+      "transport": "streamable_http",
+      "auth": {
+        "kind": "none"
+      },
+      "allow": [
+        "web_fetch",
+        "web_search"
+      ],
+      "approval": {},
+      "timeouts": {},
+      "web": {
+        "fetch": "web_fetch",
+        "search": "web_search",
+        "allow_domains": [
+          "docs.example.com"
+        ],
+        "block_domains": [
+          "internal.example.com"
+        ],
+        "per_user": {
+          "fetch_per_minute": 10,
+          "fetch_per_day": 200,
+          "search_per_minute": 10,
+          "search_per_day": 200
+        }
+      }
+    }
+  ],
+  "memory": {
+    "checkpointer": {
+      "kind": "postgres",
+      "dsn_env": "DAEGAM_DB_0_URL"
+    }
+  },
+  "guardrails": [],
+  "entry": {
+    "session_ttl_seconds": 1800,
+    "max_turns": 20,
+    "rate_limit": null,
+    "max_concurrent_sessions": 10,
+    "max_input_chars": 4000,
+    "greeting": null
+  },
+  "service": {
+    "budget": {
+      "session_tokens": null,
+      "daily_tokens": null
+    },
+    "observability": {
+      "record_bodies": false
+    }
+  },
+  "stub": true
+}

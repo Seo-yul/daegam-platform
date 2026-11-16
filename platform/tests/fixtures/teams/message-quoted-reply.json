@@ -1,0 +1,8 @@
+{
+  "type": "quotedReply",
+  "quotedReply": {
+    "messageId": "msg-123",
+    "senderId": "user-456",
+    "senderName": "Test User"
+  }
+}

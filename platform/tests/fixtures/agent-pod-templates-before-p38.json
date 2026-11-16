@@ -1,0 +1,1245 @@
+{
+ "deployment_gateway_token_telemetry": {
+  "apiVersion": "apps/v1",
+  "kind": "Deployment",
+  "metadata": {
+   "labels": {
+    "app.kubernetes.io/managed-by": "daegam",
+    "daegam.devops.ai.kr/agent-profile": "ag-1",
+    "daegam.devops.ai.kr/id": "ag-1",
+    "daegam.devops.ai.kr/profile-revision": "1",
+    "daegam.devops.ai.kr/resource": "agent-instance",
+    "daegam.devops.ai.kr/tenant": "acme"
+   },
+   "name": "agent-bot",
+   "namespace": "daegam-acme"
+  },
+  "spec": {
+   "replicas": 2,
+   "selector": {
+    "matchLabels": {
+     "daegam.devops.ai.kr/id": "ag-1",
+     "daegam.devops.ai.kr/resource": "agent-instance"
+    }
+   },
+   "template": {
+    "metadata": {
+     "annotations": {
+      "daegam.devops.ai.kr/config-sha": "55376e8b4d77668d",
+      "daegam.devops.ai.kr/svc-token-rev": "0"
+     },
+     "labels": {
+      "app.kubernetes.io/managed-by": "daegam",
+      "daegam.devops.ai.kr/agent-profile": "ag-1",
+      "daegam.devops.ai.kr/id": "ag-1",
+      "daegam.devops.ai.kr/profile-revision": "1",
+      "daegam.devops.ai.kr/resource": "agent-instance",
+      "daegam.devops.ai.kr/tenant": "acme"
+     }
+    },
+    "spec": {
+     "containers": [
+      {
+       "env": [
+        {
+         "name": "DAEGAM_AGENT_CONFIG",
+         "value": "/config/agent.json"
+        },
+        {
+         "name": "DAEGAM_TENANT",
+         "value": "acme"
+        },
+        {
+         "name": "DAEGAM_TRANSCRIPT_RETENTION_DAYS",
+         "value": "30"
+        },
+        {
+         "name": "DAEGAM_INSTANCE_TOKEN",
+         "valueFrom": {
+          "secretKeyRef": {
+           "key": "token",
+           "name": "agent-inst-ag-1-token"
+          }
+         }
+        },
+        {
+         "name": "DAEGAM_MCP_TOKEN",
+         "valueFrom": {
+          "secretKeyRef": {
+           "key": "mcp_token",
+           "name": "agent-inst-ag-1-token"
+          }
+         }
+        },
+        {
+         "name": "DAEGAM_GATEWAY_TOKEN",
+         "valueFrom": {
+          "secretKeyRef": {
+           "key": "gateway_token",
+           "name": "agent-inst-ag-1-token"
+          }
+         }
+        },
+        {
+         "name": "DAEGAM_LLM_OPENAI_MAIN_API_KEY",
+         "valueFrom": {
+          "secretKeyRef": {
+           "key": "api_key",
+           "name": "agent-bot-llm-openai-main"
+          }
+         }
+        },
+        {
+         "name": "DAEGAM_EVENTS_URL",
+         "value": "http://daegam-platform.daegam-system.svc:9000/api/telemetry/events"
+        },
+        {
+         "name": "DAEGAM_POD_NAME",
+         "valueFrom": {
+          "fieldRef": {
+           "fieldPath": "metadata.name"
+          }
+         }
+        },
+        {
+         "name": "DAEGAM_POD_UID",
+         "valueFrom": {
+          "fieldRef": {
+           "fieldPath": "metadata.uid"
+          }
+         }
+        },
+        {
+         "name": "TIKTOKEN_CACHE_DIR",
+         "value": "/tmp/tiktoken"
+        }
+       ],
+       "image": "registry.local/daegam-agent-runtime:0.2.0",
+       "imagePullPolicy": "IfNotPresent",
+       "lifecycle": {
+        "preStop": {
+         "sleep": {
+          "seconds": 5
+         }
+        }
+       },
+       "livenessProbe": {
+        "failureThreshold": 6,
+        "httpGet": {
+         "path": "/healthz",
+         "port": 8080
+        },
+        "initialDelaySeconds": 30,
+        "periodSeconds": 30
+       },
+       "name": "agent",
+       "ports": [
+        {
+         "containerPort": 8080,
+         "name": "http"
+        }
+       ],
+       "readinessProbe": {
+        "failureThreshold": 15,
+        "httpGet": {
+         "path": "/healthz?probe=ready",
+         "port": 8080
+        },
+        "initialDelaySeconds": 1,
+        "periodSeconds": 2
+       },
+       "resources": {
+        "limits": {
+         "cpu": "1"
+        }
+       },
+       "securityContext": {
+        "allowPrivilegeEscalation": false,
+        "capabilities": {
+         "drop": [
+          "ALL"
+         ]
+        },
+        "readOnlyRootFilesystem": true,
+        "runAsGroup": 1000,
+        "runAsNonRoot": true,
+        "runAsUser": 1000,
+        "seccompProfile": {
+         "type": "RuntimeDefault"
+        }
+       },
+       "volumeMounts": [
+        {
+         "mountPath": "/config",
+         "name": "config",
+         "readOnly": true
+        },
+        {
+         "mountPath": "/tmp",
+         "name": "tmp"
+        }
+       ]
+      }
+     ],
+     "imagePullSecrets": [
+      {
+       "name": "regcred"
+      }
+     ],
+     "initContainers": [
+      {
+       "args": [
+        "\nimport importlib, importlib.util, json, os, sys, urllib.request\nfrom http.client import HTTPException\nfrom urllib.error import HTTPError, URLError\n\nCONFIG_URL = os.environ[\"DAEGAM_AGENT_CONFIG_URL\"]\nBASE = os.environ[\"DAEGAM_CONFIG_BASE_URL\"]\nOUT = os.environ[\"DAEGAM_AGENT_CONFIG\"]\nCONFIG_DIR = os.path.dirname(OUT)\nTERMINATION_LOG = \"/dev/termination-log\"\n\n\nclass NoRedirect(urllib.request.HTTPRedirectHandler):\n    def redirect_request(self, *args):\n        return None\n\n\nOPENER = urllib.request.build_opener(NoRedirect)\n\n\ndef headers():\n    h = {\"Authorization\": \"Bearer \" + os.environ[\"DAEGAM_INSTANCE_TOKEN\"]}\n    table = os.environ.get(\"DAEGAM_MCP_TOKEN_TABLE\")\n    if table:\n        h[\"X-Daegam-Mcp-Token-Table\"] = table\n    try:\n        from runtime.features import KNOWN\n        h[\"X-Daegam-Runtime-Features\"] = \",\".join(sorted(KNOWN))\n    except ImportError:\n        pass\n    image = os.environ.get(\"DAEGAM_AGENT_IMAGE\")\n    if image:\n        h[\"X-Daegam-Runtime-Image\"] = image\n    return h\n\n\ndef open_url(url):\n    request = urllib.request.Request(url, headers=headers())\n    return OPENER.open(request, timeout=30)\n\n\ndef fetch(path):\n    return open_url(BASE + path)\n\n\ndef stop(code, message):\n    line = code + \": \" + message\n    sys.stderr.write(line + \"\\n\")\n    try:\n        with open(TERMINATION_LOG, \"w\") as f:\n            f.write(line)\n    except OSError:\n        pass\n    sys.exit(1)\n\n\ntry:\n    with open_url(CONFIG_URL) as response:\n        body = response.read()\nexcept HTTPError as e:\n    code, message = \"http_\" + str(e.code), str(e)\n    try:\n        detail = json.loads(e.read()).get(\"detail\") or {}\n        code, message = detail.get(\"code\") or code, detail.get(\"detail\") or message\n    except (OSError, HTTPException, ValueError, AttributeError):\n        pass\n    stop(code, message)\nexcept URLError as e:\n    stop(\"unreachable\", str(e.reason))\nexcept (OSError, HTTPException, ValueError) as e:\n    # 읽다 끊긴 본문(IncompleteRead)은 OSError 가 아니라 HTTPException 이다\n    stop(\"unreachable\", repr(e))\ntry:\n    features = json.loads(body).get(\"features\") or []\nexcept (ValueError, AttributeError) as e:\n    stop(\"agent_config_invalid\", repr(e))\nwith open(OUT, \"wb\") as f:\n    f.write(body)\nfor name in features:\n    module = \"runtime.init_steps.\" + name\n    try:\n        found = importlib.util.find_spec(module) is not None\n    except ModuleNotFoundError:\n        found = False\n    if found:\n        try:\n            importlib.import_module(module).run(CONFIG_DIR, fetch)\n        except Exception as e:\n            stop(\"init_step_failed\", name + \": \" + repr(e))\n"
+       ],
+       "command": [
+        "python",
+        "-c"
+       ],
+       "env": [
+        {
+         "name": "DAEGAM_INSTANCE_TOKEN",
+         "valueFrom": {
+          "secretKeyRef": {
+           "key": "token",
+           "name": "agent-inst-ag-1-token"
+          }
+         }
+        },
+        {
+         "name": "DAEGAM_AGENT_CONFIG",
+         "value": "/config/agent.json"
+        },
+        {
+         "name": "DAEGAM_AGENT_CONFIG_URL",
+         "value": "http://daegam-platform.daegam-system.svc:9000/api/agents/ag-1/agent.json"
+        },
+        {
+         "name": "DAEGAM_CONFIG_BASE_URL",
+         "value": "http://daegam-platform.daegam-system.svc:9000/api/agents/ag-1"
+        },
+        {
+         "name": "DAEGAM_AGENT_IMAGE",
+         "value": "registry.local/daegam-agent-runtime:0.2.0"
+        }
+       ],
+       "image": "registry.local/daegam-agent-runtime:0.2.0",
+       "imagePullPolicy": "IfNotPresent",
+       "name": "fetch-agent-config",
+       "resources": {
+        "limits": {
+         "cpu": "200m",
+         "memory": "64Mi"
+        },
+        "requests": {
+         "cpu": "10m",
+         "memory": "16Mi"
+        }
+       },
+       "securityContext": {
+        "allowPrivilegeEscalation": false,
+        "capabilities": {
+         "drop": [
+          "ALL"
+         ]
+        },
+        "readOnlyRootFilesystem": true,
+        "runAsGroup": 1000,
+        "runAsNonRoot": true,
+        "runAsUser": 1000,
+        "seccompProfile": {
+         "type": "RuntimeDefault"
+        }
+       },
+       "volumeMounts": [
+        {
+         "mountPath": "/config",
+         "name": "config"
+        },
+        {
+         "mountPath": "/tmp",
+         "name": "tmp"
+        }
+       ]
+      }
+     ],
+     "nodeSelector": {
+      "pool": "agents"
+     },
+     "priorityClassName": "low",
+     "securityContext": {
+      "fsGroup": 1000,
+      "runAsGroup": 1000,
+      "runAsNonRoot": true,
+      "runAsUser": 1000,
+      "seccompProfile": {
+       "type": "RuntimeDefault"
+      }
+     },
+     "tolerations": [
+      {
+       "key": "agents",
+       "operator": "Exists"
+      }
+     ],
+     "volumes": [
+      {
+       "emptyDir": {},
+       "name": "config"
+      },
+      {
+       "emptyDir": {},
+       "name": "tmp"
+      }
+     ]
+    }
+   }
+  }
+ },
+ "deployment_knowledge": {
+  "apiVersion": "apps/v1",
+  "kind": "Deployment",
+  "metadata": {
+   "labels": {
+    "app.kubernetes.io/managed-by": "daegam",
+    "daegam.devops.ai.kr/agent-profile": "ag-1",
+    "daegam.devops.ai.kr/id": "ag-1",
+    "daegam.devops.ai.kr/profile-revision": "1",
+    "daegam.devops.ai.kr/resource": "agent-instance",
+    "daegam.devops.ai.kr/tenant": "acme"
+   },
+   "name": "agent-bot",
+   "namespace": "daegam-acme"
+  },
+  "spec": {
+   "replicas": 2,
+   "selector": {
+    "matchLabels": {
+     "daegam.devops.ai.kr/id": "ag-1",
+     "daegam.devops.ai.kr/resource": "agent-instance"
+    }
+   },
+   "template": {
+    "metadata": {
+     "annotations": {
+      "daegam.devops.ai.kr/config-sha": "55376e8b4d77668d",
+      "daegam.devops.ai.kr/svc-token-rev": "0"
+     },
+     "labels": {
+      "app.kubernetes.io/managed-by": "daegam",
+      "daegam.devops.ai.kr/agent-profile": "ag-1",
+      "daegam.devops.ai.kr/id": "ag-1",
+      "daegam.devops.ai.kr/profile-revision": "1",
+      "daegam.devops.ai.kr/resource": "agent-instance",
+      "daegam.devops.ai.kr/tenant": "acme"
+     }
+    },
+    "spec": {
+     "containers": [
+      {
+       "env": [
+        {
+         "name": "DAEGAM_AGENT_CONFIG",
+         "value": "/config/agent.json"
+        },
+        {
+         "name": "DAEGAM_TENANT",
+         "value": "acme"
+        },
+        {
+         "name": "DAEGAM_TRANSCRIPT_RETENTION_DAYS",
+         "value": "30"
+        },
+        {
+         "name": "DAEGAM_INSTANCE_TOKEN",
+         "valueFrom": {
+          "secretKeyRef": {
+           "key": "token",
+           "name": "agent-inst-ag-1-token"
+          }
+         }
+        },
+        {
+         "name": "DAEGAM_MCP_TOKEN",
+         "valueFrom": {
+          "secretKeyRef": {
+           "key": "mcp_token",
+           "name": "agent-inst-ag-1-token"
+          }
+         }
+        },
+        {
+         "name": "DAEGAM_LLM_CLAUDE_API_KEY",
+         "valueFrom": {
+          "secretKeyRef": {
+           "key": "api_key",
+           "name": "agent-bot-llm-claude"
+          }
+         }
+        },
+        {
+         "name": "DAEGAM_KNOWLEDGE_0_API_KEY",
+         "valueFrom": {
+          "secretKeyRef": {
+           "key": "api_key",
+           "name": "agent-bot-llm-openai-main"
+          }
+         }
+        },
+        {
+         "name": "DAEGAM_KNOWLEDGE_1_API_KEY",
+         "valueFrom": {
+          "secretKeyRef": {
+           "key": "api_key",
+           "name": "agent-bot-llm-openai-main"
+          }
+         }
+        },
+        {
+         "name": "TIKTOKEN_CACHE_DIR",
+         "value": "/tmp/tiktoken"
+        }
+       ],
+       "image": "registry.local/daegam-agent-runtime:0.2.0",
+       "imagePullPolicy": "IfNotPresent",
+       "lifecycle": {
+        "preStop": {
+         "sleep": {
+          "seconds": 5
+         }
+        }
+       },
+       "livenessProbe": {
+        "failureThreshold": 6,
+        "httpGet": {
+         "path": "/healthz",
+         "port": 8080
+        },
+        "initialDelaySeconds": 30,
+        "periodSeconds": 30
+       },
+       "name": "agent",
+       "ports": [
+        {
+         "containerPort": 8080,
+         "name": "http"
+        }
+       ],
+       "readinessProbe": {
+        "failureThreshold": 15,
+        "httpGet": {
+         "path": "/healthz?probe=ready",
+         "port": 8080
+        },
+        "initialDelaySeconds": 1,
+        "periodSeconds": 2
+       },
+       "resources": {
+        "limits": {
+         "cpu": "1"
+        }
+       },
+       "securityContext": {
+        "allowPrivilegeEscalation": false,
+        "capabilities": {
+         "drop": [
+          "ALL"
+         ]
+        },
+        "readOnlyRootFilesystem": true,
+        "runAsGroup": 1000,
+        "runAsNonRoot": true,
+        "runAsUser": 1000,
+        "seccompProfile": {
+         "type": "RuntimeDefault"
+        }
+       },
+       "volumeMounts": [
+        {
+         "mountPath": "/config",
+         "name": "config",
+         "readOnly": true
+        },
+        {
+         "mountPath": "/tmp",
+         "name": "tmp"
+        }
+       ]
+      }
+     ],
+     "imagePullSecrets": [
+      {
+       "name": "regcred"
+      }
+     ],
+     "initContainers": [
+      {
+       "args": [
+        "\nimport importlib, importlib.util, json, os, sys, urllib.request\nfrom http.client import HTTPException\nfrom urllib.error import HTTPError, URLError\n\nCONFIG_URL = os.environ[\"DAEGAM_AGENT_CONFIG_URL\"]\nBASE = os.environ[\"DAEGAM_CONFIG_BASE_URL\"]\nOUT = os.environ[\"DAEGAM_AGENT_CONFIG\"]\nCONFIG_DIR = os.path.dirname(OUT)\nTERMINATION_LOG = \"/dev/termination-log\"\n\n\nclass NoRedirect(urllib.request.HTTPRedirectHandler):\n    def redirect_request(self, *args):\n        return None\n\n\nOPENER = urllib.request.build_opener(NoRedirect)\n\n\ndef headers():\n    h = {\"Authorization\": \"Bearer \" + os.environ[\"DAEGAM_INSTANCE_TOKEN\"]}\n    table = os.environ.get(\"DAEGAM_MCP_TOKEN_TABLE\")\n    if table:\n        h[\"X-Daegam-Mcp-Token-Table\"] = table\n    try:\n        from runtime.features import KNOWN\n        h[\"X-Daegam-Runtime-Features\"] = \",\".join(sorted(KNOWN))\n    except ImportError:\n        pass\n    image = os.environ.get(\"DAEGAM_AGENT_IMAGE\")\n    if image:\n        h[\"X-Daegam-Runtime-Image\"] = image\n    return h\n\n\ndef open_url(url):\n    request = urllib.request.Request(url, headers=headers())\n    return OPENER.open(request, timeout=30)\n\n\ndef fetch(path):\n    return open_url(BASE + path)\n\n\ndef stop(code, message):\n    line = code + \": \" + message\n    sys.stderr.write(line + \"\\n\")\n    try:\n        with open(TERMINATION_LOG, \"w\") as f:\n            f.write(line)\n    except OSError:\n        pass\n    sys.exit(1)\n\n\ntry:\n    with open_url(CONFIG_URL) as response:\n        body = response.read()\nexcept HTTPError as e:\n    code, message = \"http_\" + str(e.code), str(e)\n    try:\n        detail = json.loads(e.read()).get(\"detail\") or {}\n        code, message = detail.get(\"code\") or code, detail.get(\"detail\") or message\n    except (OSError, HTTPException, ValueError, AttributeError):\n        pass\n    stop(code, message)\nexcept URLError as e:\n    stop(\"unreachable\", str(e.reason))\nexcept (OSError, HTTPException, ValueError) as e:\n    # 읽다 끊긴 본문(IncompleteRead)은 OSError 가 아니라 HTTPException 이다\n    stop(\"unreachable\", repr(e))\ntry:\n    features = json.loads(body).get(\"features\") or []\nexcept (ValueError, AttributeError) as e:\n    stop(\"agent_config_invalid\", repr(e))\nwith open(OUT, \"wb\") as f:\n    f.write(body)\nfor name in features:\n    module = \"runtime.init_steps.\" + name\n    try:\n        found = importlib.util.find_spec(module) is not None\n    except ModuleNotFoundError:\n        found = False\n    if found:\n        try:\n            importlib.import_module(module).run(CONFIG_DIR, fetch)\n        except Exception as e:\n            stop(\"init_step_failed\", name + \": \" + repr(e))\n"
+       ],
+       "command": [
+        "python",
+        "-c"
+       ],
+       "env": [
+        {
+         "name": "DAEGAM_INSTANCE_TOKEN",
+         "valueFrom": {
+          "secretKeyRef": {
+           "key": "token",
+           "name": "agent-inst-ag-1-token"
+          }
+         }
+        },
+        {
+         "name": "DAEGAM_AGENT_CONFIG",
+         "value": "/config/agent.json"
+        },
+        {
+         "name": "DAEGAM_AGENT_CONFIG_URL",
+         "value": "http://daegam-platform.daegam-system.svc:9000/api/agents/ag-1/agent.json"
+        },
+        {
+         "name": "DAEGAM_CONFIG_BASE_URL",
+         "value": "http://daegam-platform.daegam-system.svc:9000/api/agents/ag-1"
+        },
+        {
+         "name": "DAEGAM_AGENT_IMAGE",
+         "value": "registry.local/daegam-agent-runtime:0.2.0"
+        }
+       ],
+       "image": "registry.local/daegam-agent-runtime:0.2.0",
+       "imagePullPolicy": "IfNotPresent",
+       "name": "fetch-agent-config",
+       "resources": {
+        "limits": {
+         "cpu": "200m",
+         "memory": "64Mi"
+        },
+        "requests": {
+         "cpu": "10m",
+         "memory": "16Mi"
+        }
+       },
+       "securityContext": {
+        "allowPrivilegeEscalation": false,
+        "capabilities": {
+         "drop": [
+          "ALL"
+         ]
+        },
+        "readOnlyRootFilesystem": true,
+        "runAsGroup": 1000,
+        "runAsNonRoot": true,
+        "runAsUser": 1000,
+        "seccompProfile": {
+         "type": "RuntimeDefault"
+        }
+       },
+       "volumeMounts": [
+        {
+         "mountPath": "/config",
+         "name": "config"
+        },
+        {
+         "mountPath": "/tmp",
+         "name": "tmp"
+        }
+       ]
+      }
+     ],
+     "nodeSelector": {
+      "pool": "agents"
+     },
+     "priorityClassName": "low",
+     "securityContext": {
+      "fsGroup": 1000,
+      "runAsGroup": 1000,
+      "runAsNonRoot": true,
+      "runAsUser": 1000,
+      "seccompProfile": {
+       "type": "RuntimeDefault"
+      }
+     },
+     "tolerations": [
+      {
+       "key": "agents",
+       "operator": "Exists"
+      }
+     ],
+     "volumes": [
+      {
+       "emptyDir": {},
+       "name": "config"
+      },
+      {
+       "emptyDir": {},
+       "name": "tmp"
+      }
+     ]
+    }
+   }
+  }
+ },
+ "deployment_no_providers": {
+  "apiVersion": "apps/v1",
+  "kind": "Deployment",
+  "metadata": {
+   "labels": {
+    "app.kubernetes.io/managed-by": "daegam",
+    "daegam.devops.ai.kr/agent-profile": "ag-1",
+    "daegam.devops.ai.kr/id": "ag-1",
+    "daegam.devops.ai.kr/profile-revision": "1",
+    "daegam.devops.ai.kr/resource": "agent-instance",
+    "daegam.devops.ai.kr/tenant": "acme"
+   },
+   "name": "agent-bot",
+   "namespace": "daegam-acme"
+  },
+  "spec": {
+   "replicas": 2,
+   "selector": {
+    "matchLabels": {
+     "daegam.devops.ai.kr/id": "ag-1",
+     "daegam.devops.ai.kr/resource": "agent-instance"
+    }
+   },
+   "template": {
+    "metadata": {
+     "annotations": {
+      "daegam.devops.ai.kr/config-sha": "0",
+      "daegam.devops.ai.kr/svc-token-rev": "0"
+     },
+     "labels": {
+      "app.kubernetes.io/managed-by": "daegam",
+      "daegam.devops.ai.kr/agent-profile": "ag-1",
+      "daegam.devops.ai.kr/id": "ag-1",
+      "daegam.devops.ai.kr/profile-revision": "1",
+      "daegam.devops.ai.kr/resource": "agent-instance",
+      "daegam.devops.ai.kr/tenant": "acme"
+     }
+    },
+    "spec": {
+     "containers": [
+      {
+       "env": [
+        {
+         "name": "DAEGAM_AGENT_CONFIG",
+         "value": "/config/agent.json"
+        },
+        {
+         "name": "DAEGAM_TENANT",
+         "value": "acme"
+        },
+        {
+         "name": "DAEGAM_TRANSCRIPT_RETENTION_DAYS",
+         "value": "30"
+        },
+        {
+         "name": "DAEGAM_INSTANCE_TOKEN",
+         "valueFrom": {
+          "secretKeyRef": {
+           "key": "token",
+           "name": "agent-inst-ag-1-token"
+          }
+         }
+        },
+        {
+         "name": "DAEGAM_MCP_TOKEN",
+         "valueFrom": {
+          "secretKeyRef": {
+           "key": "mcp_token",
+           "name": "agent-inst-ag-1-token"
+          }
+         }
+        },
+        {
+         "name": "TIKTOKEN_CACHE_DIR",
+         "value": "/tmp/tiktoken"
+        }
+       ],
+       "image": "registry.local/daegam-agent-runtime:0.2.0",
+       "imagePullPolicy": "IfNotPresent",
+       "lifecycle": {
+        "preStop": {
+         "sleep": {
+          "seconds": 5
+         }
+        }
+       },
+       "livenessProbe": {
+        "failureThreshold": 6,
+        "httpGet": {
+         "path": "/healthz",
+         "port": 8080
+        },
+        "initialDelaySeconds": 30,
+        "periodSeconds": 30
+       },
+       "name": "agent",
+       "ports": [
+        {
+         "containerPort": 8080,
+         "name": "http"
+        }
+       ],
+       "readinessProbe": {
+        "failureThreshold": 15,
+        "httpGet": {
+         "path": "/healthz?probe=ready",
+         "port": 8080
+        },
+        "initialDelaySeconds": 1,
+        "periodSeconds": 2
+       },
+       "resources": {
+        "limits": {
+         "cpu": "1"
+        }
+       },
+       "securityContext": {
+        "allowPrivilegeEscalation": false,
+        "capabilities": {
+         "drop": [
+          "ALL"
+         ]
+        },
+        "readOnlyRootFilesystem": true,
+        "runAsGroup": 1000,
+        "runAsNonRoot": true,
+        "runAsUser": 1000,
+        "seccompProfile": {
+         "type": "RuntimeDefault"
+        }
+       },
+       "volumeMounts": [
+        {
+         "mountPath": "/config",
+         "name": "config",
+         "readOnly": true
+        },
+        {
+         "mountPath": "/tmp",
+         "name": "tmp"
+        }
+       ]
+      }
+     ],
+     "imagePullSecrets": [
+      {
+       "name": "regcred"
+      }
+     ],
+     "initContainers": [
+      {
+       "args": [
+        "\nimport importlib, importlib.util, json, os, sys, urllib.request\nfrom http.client import HTTPException\nfrom urllib.error import HTTPError, URLError\n\nCONFIG_URL = os.environ[\"DAEGAM_AGENT_CONFIG_URL\"]\nBASE = os.environ[\"DAEGAM_CONFIG_BASE_URL\"]\nOUT = os.environ[\"DAEGAM_AGENT_CONFIG\"]\nCONFIG_DIR = os.path.dirname(OUT)\nTERMINATION_LOG = \"/dev/termination-log\"\n\n\nclass NoRedirect(urllib.request.HTTPRedirectHandler):\n    def redirect_request(self, *args):\n        return None\n\n\nOPENER = urllib.request.build_opener(NoRedirect)\n\n\ndef headers():\n    h = {\"Authorization\": \"Bearer \" + os.environ[\"DAEGAM_INSTANCE_TOKEN\"]}\n    table = os.environ.get(\"DAEGAM_MCP_TOKEN_TABLE\")\n    if table:\n        h[\"X-Daegam-Mcp-Token-Table\"] = table\n    try:\n        from runtime.features import KNOWN\n        h[\"X-Daegam-Runtime-Features\"] = \",\".join(sorted(KNOWN))\n    except ImportError:\n        pass\n    image = os.environ.get(\"DAEGAM_AGENT_IMAGE\")\n    if image:\n        h[\"X-Daegam-Runtime-Image\"] = image\n    return h\n\n\ndef open_url(url):\n    request = urllib.request.Request(url, headers=headers())\n    return OPENER.open(request, timeout=30)\n\n\ndef fetch(path):\n    return open_url(BASE + path)\n\n\ndef stop(code, message):\n    line = code + \": \" + message\n    sys.stderr.write(line + \"\\n\")\n    try:\n        with open(TERMINATION_LOG, \"w\") as f:\n            f.write(line)\n    except OSError:\n        pass\n    sys.exit(1)\n\n\ntry:\n    with open_url(CONFIG_URL) as response:\n        body = response.read()\nexcept HTTPError as e:\n    code, message = \"http_\" + str(e.code), str(e)\n    try:\n        detail = json.loads(e.read()).get(\"detail\") or {}\n        code, message = detail.get(\"code\") or code, detail.get(\"detail\") or message\n    except (OSError, HTTPException, ValueError, AttributeError):\n        pass\n    stop(code, message)\nexcept URLError as e:\n    stop(\"unreachable\", str(e.reason))\nexcept (OSError, HTTPException, ValueError) as e:\n    # 읽다 끊긴 본문(IncompleteRead)은 OSError 가 아니라 HTTPException 이다\n    stop(\"unreachable\", repr(e))\ntry:\n    features = json.loads(body).get(\"features\") or []\nexcept (ValueError, AttributeError) as e:\n    stop(\"agent_config_invalid\", repr(e))\nwith open(OUT, \"wb\") as f:\n    f.write(body)\nfor name in features:\n    module = \"runtime.init_steps.\" + name\n    try:\n        found = importlib.util.find_spec(module) is not None\n    except ModuleNotFoundError:\n        found = False\n    if found:\n        try:\n            importlib.import_module(module).run(CONFIG_DIR, fetch)\n        except Exception as e:\n            stop(\"init_step_failed\", name + \": \" + repr(e))\n"
+       ],
+       "command": [
+        "python",
+        "-c"
+       ],
+       "env": [
+        {
+         "name": "DAEGAM_INSTANCE_TOKEN",
+         "valueFrom": {
+          "secretKeyRef": {
+           "key": "token",
+           "name": "agent-inst-ag-1-token"
+          }
+         }
+        },
+        {
+         "name": "DAEGAM_AGENT_CONFIG",
+         "value": "/config/agent.json"
+        },
+        {
+         "name": "DAEGAM_AGENT_CONFIG_URL",
+         "value": "http://daegam-platform.daegam-system.svc:9000/api/agents/ag-1/agent.json"
+        },
+        {
+         "name": "DAEGAM_CONFIG_BASE_URL",
+         "value": "http://daegam-platform.daegam-system.svc:9000/api/agents/ag-1"
+        },
+        {
+         "name": "DAEGAM_AGENT_IMAGE",
+         "value": "registry.local/daegam-agent-runtime:0.2.0"
+        }
+       ],
+       "image": "registry.local/daegam-agent-runtime:0.2.0",
+       "imagePullPolicy": "IfNotPresent",
+       "name": "fetch-agent-config",
+       "resources": {
+        "limits": {
+         "cpu": "200m",
+         "memory": "64Mi"
+        },
+        "requests": {
+         "cpu": "10m",
+         "memory": "16Mi"
+        }
+       },
+       "securityContext": {
+        "allowPrivilegeEscalation": false,
+        "capabilities": {
+         "drop": [
+          "ALL"
+         ]
+        },
+        "readOnlyRootFilesystem": true,
+        "runAsGroup": 1000,
+        "runAsNonRoot": true,
+        "runAsUser": 1000,
+        "seccompProfile": {
+         "type": "RuntimeDefault"
+        }
+       },
+       "volumeMounts": [
+        {
+         "mountPath": "/config",
+         "name": "config"
+        },
+        {
+         "mountPath": "/tmp",
+         "name": "tmp"
+        }
+       ]
+      }
+     ],
+     "nodeSelector": {
+      "pool": "agents"
+     },
+     "priorityClassName": "low",
+     "securityContext": {
+      "fsGroup": 1000,
+      "runAsGroup": 1000,
+      "runAsNonRoot": true,
+      "runAsUser": 1000,
+      "seccompProfile": {
+       "type": "RuntimeDefault"
+      }
+     },
+     "tolerations": [
+      {
+       "key": "agents",
+       "operator": "Exists"
+      }
+     ],
+     "volumes": [
+      {
+       "emptyDir": {},
+       "name": "config"
+      },
+      {
+       "emptyDir": {},
+       "name": "tmp"
+      }
+     ]
+    }
+   }
+  }
+ },
+ "deployment_providers": {
+  "apiVersion": "apps/v1",
+  "kind": "Deployment",
+  "metadata": {
+   "labels": {
+    "app.kubernetes.io/managed-by": "daegam",
+    "daegam.devops.ai.kr/agent-profile": "ag-1",
+    "daegam.devops.ai.kr/id": "ag-1",
+    "daegam.devops.ai.kr/profile-revision": "1",
+    "daegam.devops.ai.kr/resource": "agent-instance",
+    "daegam.devops.ai.kr/tenant": "acme"
+   },
+   "name": "agent-bot",
+   "namespace": "daegam-acme"
+  },
+  "spec": {
+   "replicas": 2,
+   "selector": {
+    "matchLabels": {
+     "daegam.devops.ai.kr/id": "ag-1",
+     "daegam.devops.ai.kr/resource": "agent-instance"
+    }
+   },
+   "template": {
+    "metadata": {
+     "annotations": {
+      "daegam.devops.ai.kr/config-sha": "55376e8b4d77668d",
+      "daegam.devops.ai.kr/svc-token-rev": "0"
+     },
+     "labels": {
+      "app.kubernetes.io/managed-by": "daegam",
+      "daegam.devops.ai.kr/agent-profile": "ag-1",
+      "daegam.devops.ai.kr/id": "ag-1",
+      "daegam.devops.ai.kr/profile-revision": "1",
+      "daegam.devops.ai.kr/resource": "agent-instance",
+      "daegam.devops.ai.kr/tenant": "acme"
+     }
+    },
+    "spec": {
+     "containers": [
+      {
+       "env": [
+        {
+         "name": "DAEGAM_AGENT_CONFIG",
+         "value": "/config/agent.json"
+        },
+        {
+         "name": "DAEGAM_TENANT",
+         "value": "acme"
+        },
+        {
+         "name": "DAEGAM_TRANSCRIPT_RETENTION_DAYS",
+         "value": "30"
+        },
+        {
+         "name": "DAEGAM_INSTANCE_TOKEN",
+         "valueFrom": {
+          "secretKeyRef": {
+           "key": "token",
+           "name": "agent-inst-ag-1-token"
+          }
+         }
+        },
+        {
+         "name": "DAEGAM_MCP_TOKEN",
+         "valueFrom": {
+          "secretKeyRef": {
+           "key": "mcp_token",
+           "name": "agent-inst-ag-1-token"
+          }
+         }
+        },
+        {
+         "name": "DAEGAM_LLM_OPENAI_MAIN_API_KEY",
+         "valueFrom": {
+          "secretKeyRef": {
+           "key": "api_key",
+           "name": "agent-bot-llm-openai-main"
+          }
+         }
+        },
+        {
+         "name": "DAEGAM_LLM_CLAUDE_API_KEY",
+         "valueFrom": {
+          "secretKeyRef": {
+           "key": "api_key",
+           "name": "agent-bot-llm-claude"
+          }
+         }
+        },
+        {
+         "name": "DAEGAM_LLM_ROUTER_API_KEY",
+         "valueFrom": {
+          "secretKeyRef": {
+           "key": "api_key",
+           "name": "agent-bot-llm-router"
+          }
+         }
+        },
+        {
+         "name": "TIKTOKEN_CACHE_DIR",
+         "value": "/tmp/tiktoken"
+        }
+       ],
+       "image": "registry.local/daegam-agent-runtime:0.2.0",
+       "imagePullPolicy": "IfNotPresent",
+       "lifecycle": {
+        "preStop": {
+         "sleep": {
+          "seconds": 5
+         }
+        }
+       },
+       "livenessProbe": {
+        "failureThreshold": 6,
+        "httpGet": {
+         "path": "/healthz",
+         "port": 8080
+        },
+        "initialDelaySeconds": 30,
+        "periodSeconds": 30
+       },
+       "name": "agent",
+       "ports": [
+        {
+         "containerPort": 8080,
+         "name": "http"
+        }
+       ],
+       "readinessProbe": {
+        "failureThreshold": 15,
+        "httpGet": {
+         "path": "/healthz?probe=ready",
+         "port": 8080
+        },
+        "initialDelaySeconds": 1,
+        "periodSeconds": 2
+       },
+       "resources": {
+        "limits": {
+         "cpu": "1"
+        }
+       },
+       "securityContext": {
+        "allowPrivilegeEscalation": false,
+        "capabilities": {
+         "drop": [
+          "ALL"
+         ]
+        },
+        "readOnlyRootFilesystem": true,
+        "runAsGroup": 1000,
+        "runAsNonRoot": true,
+        "runAsUser": 1000,
+        "seccompProfile": {
+         "type": "RuntimeDefault"
+        }
+       },
+       "volumeMounts": [
+        {
+         "mountPath": "/config",
+         "name": "config",
+         "readOnly": true
+        },
+        {
+         "mountPath": "/tmp",
+         "name": "tmp"
+        }
+       ]
+      }
+     ],
+     "imagePullSecrets": [
+      {
+       "name": "regcred"
+      }
+     ],
+     "initContainers": [
+      {
+       "args": [
+        "\nimport importlib, importlib.util, json, os, sys, urllib.request\nfrom http.client import HTTPException\nfrom urllib.error import HTTPError, URLError\n\nCONFIG_URL = os.environ[\"DAEGAM_AGENT_CONFIG_URL\"]\nBASE = os.environ[\"DAEGAM_CONFIG_BASE_URL\"]\nOUT = os.environ[\"DAEGAM_AGENT_CONFIG\"]\nCONFIG_DIR = os.path.dirname(OUT)\nTERMINATION_LOG = \"/dev/termination-log\"\n\n\nclass NoRedirect(urllib.request.HTTPRedirectHandler):\n    def redirect_request(self, *args):\n        return None\n\n\nOPENER = urllib.request.build_opener(NoRedirect)\n\n\ndef headers():\n    h = {\"Authorization\": \"Bearer \" + os.environ[\"DAEGAM_INSTANCE_TOKEN\"]}\n    table = os.environ.get(\"DAEGAM_MCP_TOKEN_TABLE\")\n    if table:\n        h[\"X-Daegam-Mcp-Token-Table\"] = table\n    try:\n        from runtime.features import KNOWN\n        h[\"X-Daegam-Runtime-Features\"] = \",\".join(sorted(KNOWN))\n    except ImportError:\n        pass\n    image = os.environ.get(\"DAEGAM_AGENT_IMAGE\")\n    if image:\n        h[\"X-Daegam-Runtime-Image\"] = image\n    return h\n\n\ndef open_url(url):\n    request = urllib.request.Request(url, headers=headers())\n    return OPENER.open(request, timeout=30)\n\n\ndef fetch(path):\n    return open_url(BASE + path)\n\n\ndef stop(code, message):\n    line = code + \": \" + message\n    sys.stderr.write(line + \"\\n\")\n    try:\n        with open(TERMINATION_LOG, \"w\") as f:\n            f.write(line)\n    except OSError:\n        pass\n    sys.exit(1)\n\n\ntry:\n    with open_url(CONFIG_URL) as response:\n        body = response.read()\nexcept HTTPError as e:\n    code, message = \"http_\" + str(e.code), str(e)\n    try:\n        detail = json.loads(e.read()).get(\"detail\") or {}\n        code, message = detail.get(\"code\") or code, detail.get(\"detail\") or message\n    except (OSError, HTTPException, ValueError, AttributeError):\n        pass\n    stop(code, message)\nexcept URLError as e:\n    stop(\"unreachable\", str(e.reason))\nexcept (OSError, HTTPException, ValueError) as e:\n    # 읽다 끊긴 본문(IncompleteRead)은 OSError 가 아니라 HTTPException 이다\n    stop(\"unreachable\", repr(e))\ntry:\n    features = json.loads(body).get(\"features\") or []\nexcept (ValueError, AttributeError) as e:\n    stop(\"agent_config_invalid\", repr(e))\nwith open(OUT, \"wb\") as f:\n    f.write(body)\nfor name in features:\n    module = \"runtime.init_steps.\" + name\n    try:\n        found = importlib.util.find_spec(module) is not None\n    except ModuleNotFoundError:\n        found = False\n    if found:\n        try:\n            importlib.import_module(module).run(CONFIG_DIR, fetch)\n        except Exception as e:\n            stop(\"init_step_failed\", name + \": \" + repr(e))\n"
+       ],
+       "command": [
+        "python",
+        "-c"
+       ],
+       "env": [
+        {
+         "name": "DAEGAM_INSTANCE_TOKEN",
+         "valueFrom": {
+          "secretKeyRef": {
+           "key": "token",
+           "name": "agent-inst-ag-1-token"
+          }
+         }
+        },
+        {
+         "name": "DAEGAM_AGENT_CONFIG",
+         "value": "/config/agent.json"
+        },
+        {
+         "name": "DAEGAM_AGENT_CONFIG_URL",
+         "value": "http://daegam-platform.daegam-system.svc:9000/api/agents/ag-1/agent.json"
+        },
+        {
+         "name": "DAEGAM_CONFIG_BASE_URL",
+         "value": "http://daegam-platform.daegam-system.svc:9000/api/agents/ag-1"
+        },
+        {
+         "name": "DAEGAM_AGENT_IMAGE",
+         "value": "registry.local/daegam-agent-runtime:0.2.0"
+        }
+       ],
+       "image": "registry.local/daegam-agent-runtime:0.2.0",
+       "imagePullPolicy": "IfNotPresent",
+       "name": "fetch-agent-config",
+       "resources": {
+        "limits": {
+         "cpu": "200m",
+         "memory": "64Mi"
+        },
+        "requests": {
+         "cpu": "10m",
+         "memory": "16Mi"
+        }
+       },
+       "securityContext": {
+        "allowPrivilegeEscalation": false,
+        "capabilities": {
+         "drop": [
+          "ALL"
+         ]
+        },
+        "readOnlyRootFilesystem": true,
+        "runAsGroup": 1000,
+        "runAsNonRoot": true,
+        "runAsUser": 1000,
+        "seccompProfile": {
+         "type": "RuntimeDefault"
+        }
+       },
+       "volumeMounts": [
+        {
+         "mountPath": "/config",
+         "name": "config"
+        },
+        {
+         "mountPath": "/tmp",
+         "name": "tmp"
+        }
+       ]
+      }
+     ],
+     "nodeSelector": {
+      "pool": "agents"
+     },
+     "priorityClassName": "low",
+     "securityContext": {
+      "fsGroup": 1000,
+      "runAsGroup": 1000,
+      "runAsNonRoot": true,
+      "runAsUser": 1000,
+      "seccompProfile": {
+       "type": "RuntimeDefault"
+      }
+     },
+     "tolerations": [
+      {
+       "key": "agents",
+       "operator": "Exists"
+      }
+     ],
+     "volumes": [
+      {
+       "emptyDir": {},
+       "name": "config"
+      },
+      {
+       "emptyDir": {},
+       "name": "tmp"
+      }
+     ]
+    }
+   }
+  }
+ },
+ "policy": {
+  "apiVersion": "networking.k8s.io/v1",
+  "kind": "NetworkPolicy",
+  "metadata": {
+   "labels": {
+    "app.kubernetes.io/managed-by": "daegam",
+    "daegam.devops.ai.kr/agent-profile": "ag-1",
+    "daegam.devops.ai.kr/id": "ag-1",
+    "daegam.devops.ai.kr/profile-revision": "1",
+    "daegam.devops.ai.kr/resource": "agent-instance",
+    "daegam.devops.ai.kr/tenant": "acme"
+   },
+   "name": "daegam-agent-bot",
+   "namespace": "daegam-acme"
+  },
+  "spec": {
+   "ingress": [
+    {
+     "from": [
+      {
+       "podSelector": {}
+      },
+      {
+       "namespaceSelector": {
+        "matchLabels": {
+         "daegam.devops.ai.kr/tenant": "acme"
+        }
+       }
+      },
+      {
+       "namespaceSelector": {
+        "matchLabels": {
+         "kubernetes.io/metadata.name": "daegam-system"
+        }
+       }
+      }
+     ]
+    }
+   ],
+   "podSelector": {
+    "matchLabels": {
+     "daegam.devops.ai.kr/id": "ag-1",
+     "daegam.devops.ai.kr/resource": "agent-instance"
+    }
+   },
+   "policyTypes": [
+    "Ingress"
+   ]
+  }
+ },
+ "service": {
+  "apiVersion": "v1",
+  "kind": "Service",
+  "metadata": {
+   "labels": {
+    "app.kubernetes.io/managed-by": "daegam",
+    "daegam.devops.ai.kr/agent-profile": "ag-1",
+    "daegam.devops.ai.kr/id": "ag-1",
+    "daegam.devops.ai.kr/profile-revision": "1",
+    "daegam.devops.ai.kr/resource": "agent-instance",
+    "daegam.devops.ai.kr/tenant": "acme"
+   },
+   "name": "agent-bot",
+   "namespace": "daegam-acme"
+  },
+  "spec": {
+   "ports": [
+    {
+     "name": "http",
+     "port": 8080,
+     "targetPort": 8080
+    }
+   ],
+   "selector": {
+    "daegam.devops.ai.kr/id": "ag-1",
+    "daegam.devops.ai.kr/resource": "agent-instance"
+   },
+   "type": "ClusterIP"
+  }
+ },
+ "token_secret": {
+  "apiVersion": "v1",
+  "kind": "Secret",
+  "metadata": {
+   "labels": {
+    "app.kubernetes.io/managed-by": "daegam",
+    "daegam.devops.ai.kr/id": "ag-1",
+    "daegam.devops.ai.kr/resource": "agent-instance-token",
+    "daegam.devops.ai.kr/tenant": "acme"
+   },
+   "name": "agent-inst-ag-1-token",
+   "namespace": "daegam-acme"
+  },
+  "stringData": {
+   "mcp_token": "m.c.p",
+   "token": "inst-token"
+  },
+  "type": "Opaque"
+ },
+ "token_secret_gateway": {
+  "apiVersion": "v1",
+  "kind": "Secret",
+  "metadata": {
+   "labels": {
+    "app.kubernetes.io/managed-by": "daegam",
+    "daegam.devops.ai.kr/id": "ag-1",
+    "daegam.devops.ai.kr/resource": "agent-instance-token",
+    "daegam.devops.ai.kr/tenant": "acme"
+   },
+   "name": "agent-inst-ag-1-token",
+   "namespace": "daegam-acme"
+  },
+  "stringData": {
+   "gateway_token": "g.w",
+   "mcp_token": "m.c.p",
+   "token": "inst-token"
+  },
+  "type": "Opaque"
+ }
+}

@@ -1,0 +1,29 @@
+{
+  "events": {
+    "model_fallback": {"from": "gpt-4.1-mini", "to": "claude-sonnet-4-5"},
+    "done": {
+      "session_id": "5b0c8f3a9d2e4c7f8a1b6e0d3c9f2a71",
+      "turn": 1,
+      "turn_id": "2d7c9e1f4a6b48c0b3e5d7f9a1c3e5b7",
+      "trace_id": "7a9c1e3f5b7d4f6e8a0c2e4f6a8c0e2f",
+      "usage": {"input_tokens": 96, "output_tokens": 18, "total_tokens": 114, "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0},
+      "tool_calls": 0,
+      "text": "{\"answer\": \"7일\"}",
+      "structured_response": {"answer": "7일", "sources": ["환불규정.md"]}
+    }
+  },
+  "transcript": [
+    {"kind": "user", "text": "환불 기한만 알려 줘"},
+    {"kind": "fallback", "from": "gpt-4.1-mini", "to": "claude-sonnet-4-5"},
+    {"kind": "assistant", "text": "{\"answer\": \"7일\"}", "streaming": false},
+    {
+      "kind": "done",
+      "usage": {"input_tokens": 96, "output_tokens": 18, "total_tokens": 114, "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0},
+      "turn": 1,
+      "tool_calls": 0,
+      "structured_response": {"answer": "7일", "sources": ["환불규정.md"]},
+      "turn_id": "2d7c9e1f4a6b48c0b3e5d7f9a1c3e5b7",
+      "trace_id": "7a9c1e3f5b7d4f6e8a0c2e4f6a8c0e2f"
+    }
+  ]
+}

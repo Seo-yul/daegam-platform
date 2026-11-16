@@ -1,0 +1,33 @@
+{
+  "membersAdded": [
+    {
+      "id": "28:f5d48856-5b42-41a0-8c3a-c5f944b679b0"
+    },
+    {
+      "id": "29:<userID>",
+      "aadObjectId": "***"
+    }
+  ],
+  "type": "conversationUpdate",
+  "timestamp": "2019-04-23T10:17:44.349Z",
+  "id": "f:5f85c2ad",
+  "channelId": "msteams",
+  "serviceUrl": "https://smba.trafficmanager.net/amer-client-ss.msg/",
+  "from": {
+    "id": "29:<USERID>",
+    "aadObjectId": "***"
+  },
+  "conversation": {
+    "conversationType": "personal",
+    "id": "***"
+  },
+  "recipient": {
+    "id": "28:<BOT ID>",
+    "name": "<BOT NAME>"
+  },
+  "channelData": {
+    "tenant": {
+      "id": "<TENANT ID>"
+    }
+  }
+}

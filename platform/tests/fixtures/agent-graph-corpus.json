@@ -1,0 +1,293 @@
+{
+  "about": "P77. 캔버스(ui/src/lib/agentGraph.ts validateGraph)와 서버(platform/daegam/services/agent_graph.py validate)가 같은 그래프에 같은 이슈를 내는지 보는 묶음이다. pytest 는 tests/test_agent_graph_corpus.py, vitest 는 ui/src/test/agent-graph-corpus.test.ts 가 읽는다. 케이스의 graph 는 base 에 add_nodes·add_edges·drop_nodes(닿는 간선도 지운다)·drop_edges·data(노드 id 별 얕은 병합) 순서로 고친 것이다. 노드의 data 는 defaults[type] 위에 얕게 병합한다. context 는 base_context 의 최상위 키를 덮는다. server_only 가 있는 케이스는 캔버스가 건너뛰고 그 값이 이유다.",
+  "defaults": {
+    "entry": {"session_ttl_seconds": 3600, "max_turns": 50, "rate_limit": null, "max_concurrent_sessions": 100, "max_input_chars": 4000, "greeting": null},
+    "agent": {"role": "main", "name": "main", "description": "", "system_prompt": "", "context": {"compaction": {"trigger": {"fraction": 0.85}, "keep": {"fraction": 0.1}}}, "max_tool_calls_per_turn": 8, "turn_timeout_seconds": 120, "retries": 2, "response_format": "text", "language": null, "builtin_tools": {"filesystem": true}},
+    "model": {"name": "model", "provider": "openai-main", "model": null, "max_output_tokens": 2048, "reasoning": {"effort": "medium"}, "temperature": null, "fallback": null},
+    "tools": {"source": {"kind": "gateway_instance", "id": "gw-ok"}, "allow_tools": [], "approval": {}, "timeouts": {}},
+    "memory": {"checkpointer": {"data_service_id": "ds-pg"}},
+    "guardrail": {"position": "input", "rules": [{"kind": "max_length", "value": 4000}], "on_violation": "block", "message": null},
+    "knowledge": {"knowledge_base_id": "kb-faq", "tool_name": "search_knowledge", "description": "", "top_k": 5, "min_score": null}
+  },
+  "base": {
+    "nodes": [
+      {"id": "entry", "type": "entry", "data": {}},
+      {"id": "agent-main", "type": "agent", "data": {}},
+      {"id": "model-main", "type": "model", "data": {}}
+    ],
+    "edges": [
+      {"id": "e-entry", "source": "entry", "target": "agent-main", "kind": "entry"},
+      {"id": "e-model", "source": "agent-main", "target": "model-main", "kind": "model"}
+    ]
+  },
+  "base_service": {"budget": {"session_tokens": null, "daily_tokens": null}, "observability": {"record_bodies": false}, "evaluation": null},
+  "base_context": {
+    "providers": [
+      {"name": "openai-main", "kind": "openai", "has_key": true},
+      {"name": "claude", "kind": "anthropic", "has_key": true},
+      {"name": "nokey", "kind": "openai", "has_key": false},
+      {"name": "stub", "kind": "stub", "has_key": false}
+    ],
+    "auth_mode": "header",
+    "agent_oauth": null,
+    "agent_client_ids": [],
+    "gateways": [{"id": "gw-ok", "state": "deployed"}, {"id": "gw-draft", "state": "draft"}],
+    "mcp_servers": [{"id": "mi-ok", "state": "deployed"}],
+    "data_services": [
+      {"id": "ds-pg", "name": "pg", "kind": "postgres"},
+      {"id": "ds-redis", "name": "cache", "kind": "redis", "db": 0, "capabilities": {"checkpointer": "ready"}},
+      {"id": "ds-mysql", "name": "orders", "kind": "mysql"},
+      {"id": "ds-redis-old", "name": "old-cache", "kind": "redis", "db": 0, "capabilities": {}},
+      {"id": "ds-redis-db1", "name": "cache-db1", "kind": "redis", "db": 1, "capabilities": {"checkpointer": "ready"}}
+    ],
+    "knowledge_bases": [
+      {"id": "kb-faq", "name": "faq", "provider": "openai-main", "indexed": 3},
+      {"id": "kb-empty", "name": "empty", "provider": "openai-main", "indexed": 0},
+      {"id": "kb-failed", "name": "failed", "provider": "openai-main", "indexed": 1, "failed": 2},
+      {"id": "kb-deleting", "name": "leaving", "provider": "openai-main", "indexed": 3, "deleting": true},
+      {"id": "kb-ghost", "name": "ghost", "provider": "ghost", "indexed": 3},
+      {"id": "kb-claude", "name": "claude", "provider": "claude", "indexed": 3},
+      {"id": "kb-nokey", "name": "nokey", "provider": "nokey", "indexed": 3}
+    ],
+    "skill_revisions": [
+      {"id": "sk-alpha", "name": "alpha", "revision": 1, "latest": 1, "bytes": 100, "scripts": false},
+      {"id": "sk-alpha-copy", "name": "alpha", "revision": 1, "latest": 1, "bytes": 100, "scripts": false},
+      {"id": "sk-beta", "name": "beta", "revision": 1, "latest": 2, "bytes": 100, "scripts": false},
+      {"id": "sk-beta", "name": "beta", "revision": 2, "latest": 2, "bytes": 100, "scripts": false},
+      {"id": "sk-gamma", "name": "gamma", "revision": 1, "latest": 1, "bytes": 100, "scripts": true},
+      {"id": "sk-big", "name": "big", "revision": 1, "latest": 1, "bytes": 5000000, "scripts": false}
+    ]
+  },
+  "cases": [
+    {"name": "the base graph is valid", "expect": []},
+    {
+      "name": "no entry node",
+      "graph": {"drop_nodes": ["entry"]},
+      "expect": [{"code": "entry_count"}, {"code": "unattached_node", "level": "warning", "node_id": "model-main"}]
+    },
+    {
+      "name": "a second entry node is marked",
+      "graph": {"add_nodes": [{"id": "entry-2", "type": "entry"}]},
+      "expect": [{"code": "entry_count", "node_id": "entry-2"}]
+    },
+    {
+      "name": "no main agent",
+      "graph": {"drop_nodes": ["agent-main"]},
+      "expect": [{"code": "main_agent_count"}, {"code": "unattached_node", "level": "warning", "node_id": "model-main"}]
+    },
+    {
+      "name": "a second main agent is marked",
+      "graph": {
+        "add_nodes": [{"id": "agent-2", "type": "agent", "data": {"name": "other"}}],
+        "add_edges": [{"id": "e-model-2", "source": "agent-2", "target": "model-main", "kind": "model"}]
+      },
+      "expect": [{"code": "main_agent_count", "node_id": "agent-2"}, {"code": "unreachable_agent", "node_id": "agent-2"}]
+    },
+    {
+      "name": "an agent without a model edge",
+      "graph": {"drop_edges": ["e-model"]},
+      "expect": [{"code": "model_count", "node_id": "agent-main"}, {"code": "unattached_node", "level": "warning", "node_id": "model-main"}]
+    },
+    {
+      "name": "a second model edge is marked on the edge",
+      "graph": {
+        "add_nodes": [{"id": "model-2", "type": "model"}],
+        "add_edges": [{"id": "e-model-2", "source": "agent-main", "target": "model-2", "kind": "model"}]
+      },
+      "expect": [{"code": "model_count", "node_id": "agent-main", "edge_id": "e-model-2"}]
+    },
+    {
+      "name": "two memory nodes",
+      "graph": {
+        "add_nodes": [{"id": "memory", "type": "memory"}, {"id": "memory-2", "type": "memory"}],
+        "add_edges": [{"id": "e-memory", "source": "agent-main", "target": "memory", "kind": "memory"}]
+      },
+      "expect": [{"code": "memory_count", "node_id": "memory-2"}, {"code": "unattached_node", "level": "warning", "node_id": "memory-2"}]
+    },
+    {
+      "name": "a repeated node id",
+      "graph": {"add_nodes": [{"id": "model-main", "type": "model"}]},
+      "expect": [{"code": "duplicate_node_id", "node_id": "model-main"}]
+    },
+    {
+      "name": "a repeated edge id",
+      "graph": {"add_edges": [{"id": "e-model", "source": "agent-main", "target": "model-main", "kind": "model"}]},
+      "expect": [{"code": "duplicate_edge_id", "edge_id": "e-model"}]
+    },
+    {
+      "name": "an edge to a missing node",
+      "graph": {"add_edges": [{"id": "e-ghost", "source": "agent-main", "target": "ghost", "kind": "tools"}]},
+      "expect": [{"code": "dangling_edge", "edge_id": "e-ghost"}]
+    },
+    {
+      "name": "an edge kind that does not fit the pair",
+      "graph": {"add_edges": [{"id": "e-bad", "source": "entry", "target": "model-main", "kind": "model"}]},
+      "expect": [{"code": "invalid_edge_kind", "edge_id": "e-bad"}]
+    },
+    {
+      "name": "a sub agent that delegates",
+      "graph": {
+        "add_nodes": [
+          {"id": "agent-a", "type": "agent", "data": {"role": "sub", "name": "alpha", "description": "first"}},
+          {"id": "agent-b", "type": "agent", "data": {"role": "sub", "name": "beta", "description": "second"}}
+        ],
+        "add_edges": [
+          {"id": "e-del-a", "source": "agent-main", "target": "agent-a", "kind": "delegate"},
+          {"id": "e-del-ab", "source": "agent-a", "target": "agent-b", "kind": "delegate"},
+          {"id": "e-model-a", "source": "agent-a", "target": "model-main", "kind": "model"},
+          {"id": "e-model-b", "source": "agent-b", "target": "model-main", "kind": "model"}
+        ]
+      },
+      "expect": [{"code": "invalid_edge_kind", "edge_id": "e-del-ab"}]
+    },
+    {
+      "name": "the main agent delegates to itself",
+      "graph": {"add_edges": [{"id": "e-self", "source": "agent-main", "target": "agent-main", "kind": "delegate"}]},
+      "expect": [{"code": "delegation_cycle", "edge_id": "e-self"}]
+    },
+    {
+      "name": "a sub agent nobody delegates to",
+      "graph": {
+        "add_nodes": [{"id": "agent-sub", "type": "agent", "data": {"role": "sub", "name": "helper", "description": "helps"}}],
+        "add_edges": [{"id": "e-model-sub", "source": "agent-sub", "target": "model-main", "kind": "model"}]
+      },
+      "expect": [{"code": "unreachable_agent", "node_id": "agent-sub"}]
+    },
+    {
+      "name": "a delegated sub agent is valid",
+      "graph": {
+        "add_nodes": [{"id": "agent-sub", "type": "agent", "data": {"role": "sub", "name": "helper", "description": "helps"}}],
+        "add_edges": [
+          {"id": "e-del", "source": "agent-main", "target": "agent-sub", "kind": "delegate"},
+          {"id": "e-model-sub", "source": "agent-sub", "target": "model-main", "kind": "model"}
+        ]
+      },
+      "expect": []
+    },
+    {
+      "name": "two sub agents with one name",
+      "graph": {
+        "add_nodes": [
+          {"id": "agent-a", "type": "agent", "data": {"role": "sub", "name": "helper", "description": "first"}},
+          {"id": "agent-b", "type": "agent", "data": {"role": "sub", "name": "helper", "description": "second"}}
+        ],
+        "add_edges": [
+          {"id": "e-del-a", "source": "agent-main", "target": "agent-a", "kind": "delegate"},
+          {"id": "e-del-b", "source": "agent-main", "target": "agent-b", "kind": "delegate"},
+          {"id": "e-model-a", "source": "agent-a", "target": "model-main", "kind": "model"},
+          {"id": "e-model-b", "source": "agent-b", "target": "model-main", "kind": "model"}
+        ]
+      },
+      "expect": [{"code": "duplicate_agent_name", "node_id": "agent-b"}]
+    },
+    {
+      "name": "a model node nothing attaches",
+      "graph": {"add_nodes": [{"id": "model-loose", "type": "model"}]},
+      "expect": [{"code": "unattached_node", "level": "warning", "node_id": "model-loose"}]
+    },
+    {
+      "name": "node data the server model refuses",
+      "graph": {"data": {"model-main": {"max_output_tokens": 0}}},
+      "expect": [{"code": "invalid_node_data", "node_id": "model-main"}]
+    },
+    {
+      "name": "an unregistered provider",
+      "graph": {"data": {"model-main": {"provider": "ghost"}}},
+      "expect": [{"code": "unknown_provider", "node_id": "model-main"}]
+    },
+    {
+      "name": "an unregistered fallback provider",
+      "graph": {"data": {"model-main": {"fallback": {"provider": "ghost"}}}},
+      "expect": [{"code": "unknown_provider", "node_id": "model-main"}]
+    },
+    {
+      "name": "a provider without a key",
+      "graph": {"data": {"model-main": {"provider": "nokey"}}},
+      "expect": [{"code": "provider_no_key", "node_id": "model-main"}]
+    },
+    {
+      "name": "a stub provider needs no key",
+      "graph": {"data": {"model-main": {"provider": "stub"}}},
+      "expect": []
+    },
+    {
+      "name": "temperature on an anthropic provider",
+      "graph": {"data": {"model-main": {"provider": "claude", "temperature": 0.5}}},
+      "expect": [{"code": "unsupported_param", "level": "warning", "node_id": "model-main"}]
+    },
+    {
+      "name": "a provider whose key Secret is set but holds no key",
+      "server_only": "서버는 Secret 에 키가 실제로 있는지 읽고(GraphContext.has_key), 캔버스는 api_key_secret 이 정해졌는지만 본다",
+      "graph": {"data": {"model-main": {"provider": "openai-main"}}},
+      "context": {"providers": [{"name": "openai-main", "kind": "openai", "has_key": false, "secret_set": true}]},
+      "expect": [{"code": "provider_no_key", "node_id": "model-main"}]
+    },
+    {
+      "name": "a rate limit without memory",
+      "graph": {"data": {"entry": {"rate_limit": {"per_user_per_minute": 5}}}},
+      "expect": [{"code": "memory_required"}]
+    },
+    {
+      "name": "a daily budget without memory",
+      "service": {"budget": {"session_tokens": null, "daily_tokens": 100000}},
+      "expect": [{"code": "memory_required"}]
+    },
+    {"name": "a deployed Gateway source is valid", "graph": {"add_nodes": [{"id": "tools", "type": "tools"}], "add_edges": [{"id": "e-tools", "source": "agent-main", "target": "tools", "kind": "tools"}]}, "expect": []},
+    {"name": "a deployed MCP Server source is valid", "graph": {"add_nodes": [{"id": "tools", "type": "tools"}], "add_edges": [{"id": "e-tools", "source": "agent-main", "target": "tools", "kind": "tools"}], "data": {"tools": {"source": {"kind": "mcp_instance", "id": "mi-ok"}}}}, "expect": []},
+    {"name": "a source the tenant does not have", "graph": {"add_nodes": [{"id": "tools", "type": "tools"}], "add_edges": [{"id": "e-tools", "source": "agent-main", "target": "tools", "kind": "tools"}], "data": {"tools": {"source": {"kind": "gateway_instance", "id": "gw-ghost"}}}}, "expect": [{"code": "unknown_source", "node_id": "tools"}]},
+    {"name": "a source that is not deployed", "graph": {"add_nodes": [{"id": "tools", "type": "tools"}], "add_edges": [{"id": "e-tools", "source": "agent-main", "target": "tools", "kind": "tools"}], "data": {"tools": {"source": {"kind": "gateway_instance", "id": "gw-draft"}}}}, "expect": [{"code": "source_not_deployed", "node_id": "tools"}]},
+    {"name": "a Gateway source in oidc mode without agent OAuth", "graph": {"add_nodes": [{"id": "tools", "type": "tools"}], "add_edges": [{"id": "e-tools", "source": "agent-main", "target": "tools", "kind": "tools"}]}, "context": {"auth_mode": "oidc"}, "expect": [{"code": "agent_oauth_missing", "node_id": "tools"}]},
+    {"name": "a Gateway source in oidc mode with a client id the tenant does not allow", "graph": {"add_nodes": [{"id": "tools", "type": "tools"}], "add_edges": [{"id": "e-tools", "source": "agent-main", "target": "tools", "kind": "tools"}]}, "context": {"auth_mode": "oidc", "agent_oauth": {"client_id": "daegam-agent"}, "agent_client_ids": ["other"]}, "expect": [{"code": "agent_client_id_not_allowed", "node_id": "tools"}]},
+    {"name": "a Gateway source in oidc mode with agent OAuth is valid", "graph": {"add_nodes": [{"id": "tools", "type": "tools"}], "add_edges": [{"id": "e-tools", "source": "agent-main", "target": "tools", "kind": "tools"}]}, "context": {"auth_mode": "oidc", "agent_oauth": {"client_id": "daegam-agent"}, "agent_client_ids": ["daegam-agent"]}, "expect": []},
+    {"name": "a Gateway source in local mode needs no agent OAuth", "graph": {"add_nodes": [{"id": "tools", "type": "tools"}], "add_edges": [{"id": "e-tools", "source": "agent-main", "target": "tools", "kind": "tools"}]}, "context": {"auth_mode": "local"}, "expect": []},
+    {"name": "a tools node key this release does not know", "graph": {"add_nodes": [{"id": "tools", "type": "tools"}], "add_edges": [{"id": "e-tools", "source": "agent-main", "target": "tools", "kind": "tools"}], "data": {"tools": {"allow_domain": ["example.com"]}}}, "expect": [{"code": "unknown_node_keys", "level": "warning", "node_id": "tools"}]},
+    {"name": "tool approval without memory", "graph": {"add_nodes": [{"id": "tools", "type": "tools"}], "add_edges": [{"id": "e-tools", "source": "agent-main", "target": "tools", "kind": "tools"}], "data": {"tools": {"approval": {"add": ["approve", "reject"]}}}}, "expect": [{"code": "memory_required"}]},
+    {"name": "tool approval with memory is valid", "graph": {"add_nodes": [{"id": "tools", "type": "tools"}, {"id": "memory", "type": "memory", "data": {"checkpointer": {"data_service_id": "ds-pg"}}}], "add_edges": [{"id": "e-tools", "source": "agent-main", "target": "tools", "kind": "tools"}, {"id": "e-memory", "source": "agent-main", "target": "memory", "kind": "memory"}], "data": {"tools": {"approval": {"add": ["approve", "reject"]}}}}, "expect": []},
+    {"name": "a postgres checkpointer is valid", "graph": {"add_nodes": [{"id": "memory", "type": "memory", "data": {"checkpointer": {"data_service_id": "ds-pg"}}}], "add_edges": [{"id": "e-memory", "source": "agent-main", "target": "memory", "kind": "memory"}]}, "expect": []},
+    {"name": "a ready redis checkpointer is valid", "graph": {"add_nodes": [{"id": "memory", "type": "memory", "data": {"checkpointer": {"data_service_id": "ds-redis"}}}], "add_edges": [{"id": "e-memory", "source": "agent-main", "target": "memory", "kind": "memory"}]}, "expect": []},
+    {"name": "a checkpointer Database the tenant does not have", "graph": {"add_nodes": [{"id": "memory", "type": "memory", "data": {"checkpointer": {"data_service_id": "ds-ghost"}}}], "add_edges": [{"id": "e-memory", "source": "agent-main", "target": "memory", "kind": "memory"}]}, "expect": [{"code": "unknown_data_service", "node_id": "memory"}]},
+    {"name": "a checkpointer Database of another kind", "graph": {"add_nodes": [{"id": "memory", "type": "memory", "data": {"checkpointer": {"data_service_id": "ds-mysql"}}}], "add_edges": [{"id": "e-memory", "source": "agent-main", "target": "memory", "kind": "memory"}]}, "expect": [{"code": "invalid_data_service_kind", "node_id": "memory"}]},
+    {"name": "a redis checkpointer without the modules", "graph": {"add_nodes": [{"id": "memory", "type": "memory", "data": {"checkpointer": {"data_service_id": "ds-redis-old"}}}], "add_edges": [{"id": "e-memory", "source": "agent-main", "target": "memory", "kind": "memory"}]}, "expect": [{"code": "redis_modules_missing", "node_id": "memory"}]},
+    {"name": "a redis checkpointer outside db 0", "graph": {"add_nodes": [{"id": "memory", "type": "memory", "data": {"checkpointer": {"data_service_id": "ds-redis-db1"}}}], "add_edges": [{"id": "e-memory", "source": "agent-main", "target": "memory", "kind": "memory"}]}, "expect": [{"code": "redis_db_not_zero", "node_id": "memory"}]},
+    {"name": "a rate limit with memory is valid", "graph": {"add_nodes": [{"id": "memory", "type": "memory", "data": {"checkpointer": {"data_service_id": "ds-pg"}}}], "add_edges": [{"id": "e-memory", "source": "agent-main", "target": "memory", "kind": "memory"}], "data": {"entry": {"rate_limit": {"per_user_per_minute": 5}}}}, "expect": []},
+    {"name": "long-term memory on the main agent is valid", "graph": {"add_nodes": [{"id": "memory", "type": "memory", "data": {"checkpointer": {"data_service_id": "ds-pg"}}}], "add_edges": [{"id": "e-memory", "source": "agent-main", "target": "memory", "kind": "memory"}], "data": {"memory": {"long_term": {"retention_days": 30}}}}, "expect": []},
+    {"name": "long-term memory on a memory node nothing attaches", "graph": {"add_nodes": [{"id": "memory", "type": "memory", "data": {"long_term": {"retention_days": null}}}]}, "expect": [{"code": "long_term_needs_memory", "node_id": "memory"}, {"code": "unattached_node", "level": "warning", "node_id": "memory"}]},
+    {"name": "long-term memory with the file tools off", "graph": {"add_nodes": [{"id": "memory", "type": "memory", "data": {"checkpointer": {"data_service_id": "ds-pg"}}}], "add_edges": [{"id": "e-memory", "source": "agent-main", "target": "memory", "kind": "memory"}], "data": {"memory": {"long_term": {"retention_days": null}}, "agent-main": {"builtin_tools": {"filesystem": false}}}}, "expect": [{"code": "long_term_filesystem_disabled", "node_id": "memory"}]},
+    {"name": "an indexed Knowledge Base is valid", "graph": {"add_nodes": [{"id": "knowledge", "type": "knowledge", "data": {"knowledge_base_id": "kb-faq"}}], "add_edges": [{"id": "e-knowledge", "source": "agent-main", "target": "knowledge", "kind": "knowledge"}]}, "expect": []},
+    {"name": "a Knowledge Base the tenant does not have", "graph": {"add_nodes": [{"id": "knowledge", "type": "knowledge", "data": {"knowledge_base_id": "kb-none"}}], "add_edges": [{"id": "e-knowledge", "source": "agent-main", "target": "knowledge", "kind": "knowledge"}]}, "expect": [{"code": "unknown_knowledge_base", "node_id": "knowledge"}]},
+    {"name": "a Knowledge Base being deleted", "graph": {"add_nodes": [{"id": "knowledge", "type": "knowledge", "data": {"knowledge_base_id": "kb-deleting"}}], "add_edges": [{"id": "e-knowledge", "source": "agent-main", "target": "knowledge", "kind": "knowledge"}]}, "expect": [{"code": "knowledge_base_deleting", "node_id": "knowledge"}]},
+    {"name": "an unregistered embedding provider", "graph": {"add_nodes": [{"id": "knowledge", "type": "knowledge", "data": {"knowledge_base_id": "kb-ghost"}}], "add_edges": [{"id": "e-knowledge", "source": "agent-main", "target": "knowledge", "kind": "knowledge"}]}, "expect": [{"code": "unknown_provider", "node_id": "knowledge"}]},
+    {"name": "an embedding provider without an embedding API", "graph": {"add_nodes": [{"id": "knowledge", "type": "knowledge", "data": {"knowledge_base_id": "kb-claude"}}], "add_edges": [{"id": "e-knowledge", "source": "agent-main", "target": "knowledge", "kind": "knowledge"}]}, "expect": [{"code": "embedding_not_supported", "node_id": "knowledge"}]},
+    {"name": "an embedding provider without a key", "graph": {"add_nodes": [{"id": "knowledge", "type": "knowledge", "data": {"knowledge_base_id": "kb-nokey"}}], "add_edges": [{"id": "e-knowledge", "source": "agent-main", "target": "knowledge", "kind": "knowledge"}]}, "expect": [{"code": "provider_no_key", "node_id": "knowledge"}]},
+    {"name": "a Knowledge Base with no indexed document", "graph": {"add_nodes": [{"id": "knowledge", "type": "knowledge", "data": {"knowledge_base_id": "kb-empty"}}], "add_edges": [{"id": "e-knowledge", "source": "agent-main", "target": "knowledge", "kind": "knowledge"}]}, "expect": [{"code": "knowledge_base_empty", "level": "warning", "node_id": "knowledge"}]},
+    {"name": "a Knowledge Base with failed documents", "graph": {"add_nodes": [{"id": "knowledge", "type": "knowledge", "data": {"knowledge_base_id": "kb-failed"}}], "add_edges": [{"id": "e-knowledge", "source": "agent-main", "target": "knowledge", "kind": "knowledge"}]}, "expect": [{"code": "knowledge_base_failed", "level": "warning", "node_id": "knowledge"}]},
+    {"name": "a knowledge tool named like a built-in tool", "graph": {"add_nodes": [{"id": "knowledge", "type": "knowledge", "data": {"knowledge_base_id": "kb-faq", "tool_name": "read_file"}}], "add_edges": [{"id": "e-knowledge", "source": "agent-main", "target": "knowledge", "kind": "knowledge"}]}, "expect": [{"code": "reserved_tool_name", "node_id": "knowledge"}]},
+    {"name": "two knowledge nodes with one tool name", "graph": {"add_nodes": [{"id": "knowledge", "type": "knowledge", "data": {"knowledge_base_id": "kb-faq"}}, {"id": "knowledge-2", "type": "knowledge"}], "add_edges": [{"id": "e-knowledge", "source": "agent-main", "target": "knowledge", "kind": "knowledge"}, {"id": "e-knowledge-2", "source": "agent-main", "target": "knowledge-2", "kind": "knowledge"}]}, "expect": [{"code": "duplicate_tool_name", "node_id": "knowledge-2"}]},
+    {"name": "a pinned Skill at its latest revision is valid", "graph": {"data": {"agent-main": {"skills": [{"id": "sk-alpha", "revision": 1}]}}}, "expect": []},
+    {"name": "a Skill revision the tenant cannot see", "graph": {"data": {"agent-main": {"skills": [{"id": "sk-ghost", "revision": 1}]}}}, "expect": [{"code": "unknown_skill", "node_id": "agent-main"}]},
+    {"name": "a Skill pinned below its latest revision", "graph": {"data": {"agent-main": {"skills": [{"id": "sk-beta", "revision": 1}]}}}, "expect": [{"code": "skill_behind", "level": "warning", "node_id": "agent-main"}]},
+    {"name": "a Skill with script files", "graph": {"data": {"agent-main": {"skills": [{"id": "sk-gamma", "revision": 1}]}}}, "expect": [{"code": "skill_scripts_inert", "level": "warning", "node_id": "agent-main"}]},
+    {"name": "two Skills with one name", "graph": {"data": {"agent-main": {"skills": [{"id": "sk-alpha", "revision": 1}, {"id": "sk-alpha-copy", "revision": 1}]}}}, "expect": [{"code": "skill_name_conflict", "node_id": "agent-main"}]},
+    {"name": "one Skill pinned at two revisions", "graph": {"add_nodes": [{"id": "agent-sub", "type": "agent", "data": {"role": "sub", "name": "helper", "description": "helps", "skills": [{"id": "sk-beta", "revision": 1}]}}], "add_edges": [{"id": "e-del", "source": "agent-main", "target": "agent-sub", "kind": "delegate"}, {"id": "e-model-sub", "source": "agent-sub", "target": "model-main", "kind": "model"}], "data": {"agent-main": {"skills": [{"id": "sk-beta", "revision": 2}]}}}, "expect": [{"code": "skill_revision_mismatch", "node_id": "agent-sub"}, {"code": "skill_behind", "level": "warning", "node_id": "agent-sub"}]},
+    {"name": "Skills with the file tools off", "graph": {"data": {"agent-main": {"skills": [{"id": "sk-alpha", "revision": 1}], "builtin_tools": {"filesystem": false}}}}, "expect": [{"code": "skills_filesystem_disabled", "node_id": "agent-main"}]},
+    {"name": "code execution with a turn limit below the longest command", "graph": {"data": {"agent-main": {"code_execution": {"approval": []}}}}, "expect": [{"code": "code_execution_turn_timeout_short", "level": "warning", "node_id": "agent-main"}]},
+    {"name": "code execution with the file tools off", "graph": {"data": {"agent-main": {"code_execution": {"approval": ["approve", "reject"]}, "turn_timeout_seconds": 300, "builtin_tools": {"filesystem": false}}}}, "expect": [{"code": "code_execution_filesystem_disabled", "node_id": "agent-main"}]},
+    {"name": "more Skills on one agent than allowed", "graph": {"data": {"agent-main": {"skills": [{"id": "sk-0", "revision": 1}, {"id": "sk-1", "revision": 1}, {"id": "sk-2", "revision": 1}, {"id": "sk-3", "revision": 1}, {"id": "sk-4", "revision": 1}, {"id": "sk-5", "revision": 1}, {"id": "sk-6", "revision": 1}, {"id": "sk-7", "revision": 1}, {"id": "sk-8", "revision": 1}, {"id": "sk-9", "revision": 1}, {"id": "sk-10", "revision": 1}]}}}, "context": {"skill_revisions": [{"id": "sk-0", "name": "s0", "revision": 1, "latest": 1, "bytes": 100, "scripts": false}, {"id": "sk-1", "name": "s1", "revision": 1, "latest": 1, "bytes": 100, "scripts": false}, {"id": "sk-2", "name": "s2", "revision": 1, "latest": 1, "bytes": 100, "scripts": false}, {"id": "sk-3", "name": "s3", "revision": 1, "latest": 1, "bytes": 100, "scripts": false}, {"id": "sk-4", "name": "s4", "revision": 1, "latest": 1, "bytes": 100, "scripts": false}, {"id": "sk-5", "name": "s5", "revision": 1, "latest": 1, "bytes": 100, "scripts": false}, {"id": "sk-6", "name": "s6", "revision": 1, "latest": 1, "bytes": 100, "scripts": false}, {"id": "sk-7", "name": "s7", "revision": 1, "latest": 1, "bytes": 100, "scripts": false}, {"id": "sk-8", "name": "s8", "revision": 1, "latest": 1, "bytes": 100, "scripts": false}, {"id": "sk-9", "name": "s9", "revision": 1, "latest": 1, "bytes": 100, "scripts": false}, {"id": "sk-10", "name": "s10", "revision": 1, "latest": 1, "bytes": 100, "scripts": false}]}, "expect": [{"code": "too_many_skills", "node_id": "agent-main"}]},
+    {"name": "Skills larger than allowed", "graph": {"data": {"agent-main": {"skills": [{"id": "sk-big", "revision": 1}]}}}, "expect": [{"code": "skills_too_large"}]},
+    {"name": "a second memory edge from the main agent is marked on the edge", "graph": {"add_nodes": [{"id": "memory", "type": "memory"}], "add_edges": [{"id": "e-memory", "source": "agent-main", "target": "memory", "kind": "memory"}, {"id": "e-memory-2", "source": "agent-main", "target": "memory", "kind": "memory"}]}, "expect": [{"code": "memory_count", "edge_id": "e-memory-2"}]},
+    {"name": "a delegation edge back to the main agent", "graph": {"add_nodes": [{"id": "agent-sub", "type": "agent", "data": {"role": "sub", "name": "helper", "description": "helps"}}], "add_edges": [{"id": "e-del-agent-sub", "source": "agent-main", "target": "agent-sub", "kind": "delegate"}, {"id": "e-model-agent-sub", "source": "agent-sub", "target": "model-main", "kind": "model"}, {"id": "e-back", "source": "agent-sub", "target": "agent-main", "kind": "delegate"}]}, "expect": [{"code": "invalid_edge_kind", "edge_id": "e-back"}, {"code": "delegation_cycle", "edge_id": "e-back"}]},
+    {"name": "an entry edge to a sub agent", "graph": {"add_nodes": [{"id": "agent-sub", "type": "agent", "data": {"role": "sub", "name": "helper", "description": "helps"}}], "add_edges": [{"id": "e-entry-sub", "source": "entry", "target": "agent-sub", "kind": "entry"}, {"id": "e-model-agent-sub", "source": "agent-sub", "target": "model-main", "kind": "model"}]}, "expect": [{"code": "invalid_edge_kind", "edge_id": "e-entry-sub"}]},
+    {"name": "a delegation to the main agent", "graph": {"add_nodes": [{"id": "agent-2", "type": "agent", "data": {"name": "other"}}], "add_edges": [{"id": "e-del-main", "source": "agent-main", "target": "agent-2", "kind": "delegate"}, {"id": "e-model-agent-2", "source": "agent-2", "target": "model-main", "kind": "model"}]}, "expect": [{"code": "main_agent_count", "node_id": "agent-2"}, {"code": "invalid_edge_kind", "edge_id": "e-del-main"}]},
+    {"name": "a memory edge from a sub agent", "graph": {"add_nodes": [{"id": "agent-sub", "type": "agent", "data": {"role": "sub", "name": "helper", "description": "helps"}}, {"id": "memory", "type": "memory"}], "add_edges": [{"id": "e-del-agent-sub", "source": "agent-main", "target": "agent-sub", "kind": "delegate"}, {"id": "e-model-agent-sub", "source": "agent-sub", "target": "model-main", "kind": "model"}, {"id": "e-memory-sub", "source": "agent-sub", "target": "memory", "kind": "memory"}]}, "expect": [{"code": "invalid_edge_kind", "edge_id": "e-memory-sub"}]},
+    {"name": "a sub agent without a description", "graph": {"add_nodes": [{"id": "agent-sub", "type": "agent", "data": {"role": "sub", "name": "helper", "description": ""}}], "add_edges": [{"id": "e-del-agent-sub", "source": "agent-main", "target": "agent-sub", "kind": "delegate"}, {"id": "e-model-agent-sub", "source": "agent-sub", "target": "model-main", "kind": "model"}]}, "expect": [{"code": "invalid_node_data", "node_id": "agent-sub"}]},
+    {"name": "more different Skills in the graph than allowed", "graph": {"add_nodes": [{"id": "agent-a", "type": "agent", "data": {"role": "sub", "name": "alpha", "description": "helps", "skills": [{"id": "sk-10", "revision": 1}, {"id": "sk-11", "revision": 1}, {"id": "sk-12", "revision": 1}, {"id": "sk-13", "revision": 1}, {"id": "sk-14", "revision": 1}, {"id": "sk-15", "revision": 1}, {"id": "sk-16", "revision": 1}, {"id": "sk-17", "revision": 1}, {"id": "sk-18", "revision": 1}, {"id": "sk-19", "revision": 1}]}}, {"id": "agent-b", "type": "agent", "data": {"role": "sub", "name": "beta", "description": "helps", "skills": [{"id": "sk-20", "revision": 1}]}}], "add_edges": [{"id": "e-del-agent-a", "source": "agent-main", "target": "agent-a", "kind": "delegate"}, {"id": "e-model-agent-a", "source": "agent-a", "target": "model-main", "kind": "model"}, {"id": "e-del-agent-b", "source": "agent-main", "target": "agent-b", "kind": "delegate"}, {"id": "e-model-agent-b", "source": "agent-b", "target": "model-main", "kind": "model"}], "data": {"agent-main": {"skills": [{"id": "sk-0", "revision": 1}, {"id": "sk-1", "revision": 1}, {"id": "sk-2", "revision": 1}, {"id": "sk-3", "revision": 1}, {"id": "sk-4", "revision": 1}, {"id": "sk-5", "revision": 1}, {"id": "sk-6", "revision": 1}, {"id": "sk-7", "revision": 1}, {"id": "sk-8", "revision": 1}, {"id": "sk-9", "revision": 1}]}}}, "context": {"skill_revisions": [{"id": "sk-0", "name": "s0", "revision": 1, "latest": 1, "bytes": 100, "scripts": false}, {"id": "sk-1", "name": "s1", "revision": 1, "latest": 1, "bytes": 100, "scripts": false}, {"id": "sk-2", "name": "s2", "revision": 1, "latest": 1, "bytes": 100, "scripts": false}, {"id": "sk-3", "name": "s3", "revision": 1, "latest": 1, "bytes": 100, "scripts": false}, {"id": "sk-4", "name": "s4", "revision": 1, "latest": 1, "bytes": 100, "scripts": false}, {"id": "sk-5", "name": "s5", "revision": 1, "latest": 1, "bytes": 100, "scripts": false}, {"id": "sk-6", "name": "s6", "revision": 1, "latest": 1, "bytes": 100, "scripts": false}, {"id": "sk-7", "name": "s7", "revision": 1, "latest": 1, "bytes": 100, "scripts": false}, {"id": "sk-8", "name": "s8", "revision": 1, "latest": 1, "bytes": 100, "scripts": false}, {"id": "sk-9", "name": "s9", "revision": 1, "latest": 1, "bytes": 100, "scripts": false}, {"id": "sk-10", "name": "s10", "revision": 1, "latest": 1, "bytes": 100, "scripts": false}, {"id": "sk-11", "name": "s11", "revision": 1, "latest": 1, "bytes": 100, "scripts": false}, {"id": "sk-12", "name": "s12", "revision": 1, "latest": 1, "bytes": 100, "scripts": false}, {"id": "sk-13", "name": "s13", "revision": 1, "latest": 1, "bytes": 100, "scripts": false}, {"id": "sk-14", "name": "s14", "revision": 1, "latest": 1, "bytes": 100, "scripts": false}, {"id": "sk-15", "name": "s15", "revision": 1, "latest": 1, "bytes": 100, "scripts": false}, {"id": "sk-16", "name": "s16", "revision": 1, "latest": 1, "bytes": 100, "scripts": false}, {"id": "sk-17", "name": "s17", "revision": 1, "latest": 1, "bytes": 100, "scripts": false}, {"id": "sk-18", "name": "s18", "revision": 1, "latest": 1, "bytes": 100, "scripts": false}, {"id": "sk-19", "name": "s19", "revision": 1, "latest": 1, "bytes": 100, "scripts": false}, {"id": "sk-20", "name": "s20", "revision": 1, "latest": 1, "bytes": 100, "scripts": false}]}, "expect": [{"code": "too_many_skills"}]},
+    {"name": "Skill files written for every agent larger than allowed", "graph": {"add_nodes": [{"id": "agent-0", "type": "agent", "data": {"role": "sub", "name": "helper0", "description": "helps", "skills": [{"id": "sk-huge", "revision": 1}]}}, {"id": "agent-1", "type": "agent", "data": {"role": "sub", "name": "helper1", "description": "helps", "skills": [{"id": "sk-huge", "revision": 1}]}}, {"id": "agent-2", "type": "agent", "data": {"role": "sub", "name": "helper2", "description": "helps", "skills": [{"id": "sk-huge", "revision": 1}]}}, {"id": "agent-3", "type": "agent", "data": {"role": "sub", "name": "helper3", "description": "helps", "skills": [{"id": "sk-huge", "revision": 1}]}}], "add_edges": [{"id": "e-del-agent-0", "source": "agent-main", "target": "agent-0", "kind": "delegate"}, {"id": "e-model-agent-0", "source": "agent-0", "target": "model-main", "kind": "model"}, {"id": "e-del-agent-1", "source": "agent-main", "target": "agent-1", "kind": "delegate"}, {"id": "e-model-agent-1", "source": "agent-1", "target": "model-main", "kind": "model"}, {"id": "e-del-agent-2", "source": "agent-main", "target": "agent-2", "kind": "delegate"}, {"id": "e-model-agent-2", "source": "agent-2", "target": "model-main", "kind": "model"}, {"id": "e-del-agent-3", "source": "agent-main", "target": "agent-3", "kind": "delegate"}, {"id": "e-model-agent-3", "source": "agent-3", "target": "model-main", "kind": "model"}], "data": {"agent-main": {"skills": [{"id": "sk-huge", "revision": 1}]}}}, "context": {"skill_revisions": [{"id": "sk-huge", "name": "huge", "revision": 1, "latest": 1, "bytes": 3500000, "scripts": false}]}, "expect": [{"code": "skills_too_large"}]},
+    {"name": "a redis checkpointer outside db 0 without the modules", "graph": {"add_nodes": [{"id": "memory", "type": "memory", "data": {"checkpointer": {"data_service_id": "ds-redis-bare"}}}], "add_edges": [{"id": "e-memory", "source": "agent-main", "target": "memory", "kind": "memory"}]}, "context": {"data_services": [{"id": "ds-redis-bare", "name": "bare", "kind": "redis", "db": 2, "capabilities": {}}]}, "expect": [{"code": "redis_modules_missing", "node_id": "memory"}, {"code": "redis_db_not_zero", "node_id": "memory"}]},
+    {"name": "a judge model node referenced by an attached guardrail counts as attached", "graph": {"add_nodes": [{"id": "model-judge", "type": "model", "data": {"name": "judge"}}, {"id": "guard-judge", "type": "guardrail", "data": {"position": "tool", "rules": [{"kind": "injection_check", "value": {"model": "model-judge", "max_chars": 8000, "max_calls": 20}}]}}], "add_edges": [{"id": "e-guard-judge", "source": "agent-main", "target": "guard-judge", "kind": "guardrail"}]}, "expect": []},
+    {"name": "a judge without a model is marked on its guardrail node", "graph": {"add_nodes": [{"id": "guard-judge", "type": "guardrail", "data": {"position": "tool", "rules": [{"kind": "injection_check", "value": {"model": "", "max_chars": 8000, "max_calls": 20}}]}}], "add_edges": [{"id": "e-guard-judge", "source": "agent-main", "target": "guard-judge", "kind": "guardrail"}]}, "expect": [{"code": "unknown_judge_model", "node_id": "guard-judge"}]},
+    {"name": "a judge pointing at a node that is not a model is marked", "graph": {"add_nodes": [{"id": "guard-judge", "type": "guardrail", "data": {"position": "tool", "rules": [{"kind": "injection_check", "value": {"model": "agent-main", "max_chars": 8000, "max_calls": 20}}]}}], "add_edges": [{"id": "e-guard-judge", "source": "agent-main", "target": "guard-judge", "kind": "guardrail"}]}, "expect": [{"code": "unknown_judge_model", "node_id": "guard-judge"}]},
+    {"name": "a second judge in the graph is marked", "graph": {"add_nodes": [{"id": "model-judge", "type": "model", "data": {"name": "judge"}}, {"id": "guard-judge", "type": "guardrail", "data": {"position": "tool", "rules": [{"kind": "injection_check", "value": {"model": "model-judge", "max_chars": 8000, "max_calls": 20}}]}}, {"id": "guard-judge-2", "type": "guardrail", "data": {"position": "tool", "rules": [{"kind": "injection_check", "value": {"model": "model-judge", "max_chars": 8000, "max_calls": 20}}]}}], "add_edges": [{"id": "e-guard-judge", "source": "agent-main", "target": "guard-judge", "kind": "guardrail"}, {"id": "e-guard-judge-2", "source": "agent-main", "target": "guard-judge-2", "kind": "guardrail"}]}, "expect": [{"code": "judge_count", "node_id": "guard-judge-2"}]},
+    {"name": "a judge outside position tool is invalid node data", "graph": {"add_nodes": [{"id": "model-judge", "type": "model", "data": {"name": "judge"}}, {"id": "guard-judge", "type": "guardrail", "data": {"position": "output", "rules": [{"kind": "injection_check", "value": {"model": "model-judge", "max_chars": 8000, "max_calls": 20}}]}}], "add_edges": [{"id": "e-guard-judge", "source": "agent-main", "target": "guard-judge", "kind": "guardrail"}]}, "expect": [{"code": "invalid_node_data", "node_id": "guard-judge"}, {"code": "unattached_node", "level": "warning", "node_id": "model-judge"}]},
+    {"name": "the model of an unattached judge stays unattached", "graph": {"add_nodes": [{"id": "model-judge", "type": "model", "data": {"name": "judge"}}, {"id": "guard-judge", "type": "guardrail", "data": {"position": "tool", "rules": [{"kind": "injection_check", "value": {"model": "model-judge", "max_chars": 8000, "max_calls": 20}}]}}]}, "expect": [{"code": "unattached_node", "level": "warning", "node_id": "model-judge"}, {"code": "unattached_node", "level": "warning", "node_id": "guard-judge"}]}
+  ]
+}
