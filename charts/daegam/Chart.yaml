@@ -1,0 +1,10 @@
+# 대감 차트 (P85 3절). 소스 트리에서만 설치하고 묶음으로 올리지 않는다. appVersion 은 make push-images 가 늘 올리는
+# 판 태그(Makefile 의 PLATFORM_VERSION 과 다른 *_VERSION)와 같다(platform/tests/test_chart_render.py 가 맞댄다)
+apiVersion: v2
+name: daegam
+description: Daegam runs MCP servers and AI Agents for tenants on a Kubernetes cluster
+type: application
+version: 0.0.0-dev
+appVersion: "0.1.0"
+# 플랫폼·문서 파싱 파드의 preStop 은 쿠버네티스의 sleep 동작이다(1.30 부터 기본으로 켜진다)
+kubeVersion: ">=1.30.0-0"

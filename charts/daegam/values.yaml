@@ -1,0 +1,224 @@
+# 대감 차트의 기본값 (P85 4절). 어느 클러스터에서나 도는 값만 둔다. 키마다의 꼴은 values.schema.json 이 정하고
+# 모르는 키는 거절한다. 설명은 README.md 의 표다.
+
+# home 은 플랫폼 한 벌이다. remote 는 플랫폼이 배포해 들어갈 원격 클러스터의 ServiceAccount daegam-deployer 와 그 권한만
+# 렌더하고(P85 8절), 아래 값 가운데 target 과 llmGateway 밖의 것은 읽지 않는다. remote 는 host 와 images 가 없어도 된다
+target: home
+
+# 플랫폼 호스트(target home 에서 필수). 공개 주소 DAEGAM_PUBLIC_URL, Ingress 의 host, 노출이 쓰지 못하는 예약 host 가 모두 이 값이다(D58)
+host: ""
+# 브라우저가 오는 scheme. 앞단 프록시나 Ingress 가 TLS 를 끝내면 https 다. http 면 UI 의 sticky 쿠키에 Secure 를 두지 않는다
+scheme: https
+
+auth:
+  # local(대감이 사람을 확인한다, D40), oidc(IdP 의 토큰), header(요청한 사람을 확인하지 않고 모두 platform-admin 으로
+  # 본다). header 는 개발 전용이라 allowHeaderMode 를 켜야 렌더된다
+  mode: local
+  allowHeaderMode: false
+  # 첫 관리자 이름. 만드는 Secret(secrets.platform)을 처음 만들 때만 쓰고, 비면 admin-<무작위>다. 잠금이 사용자 이름
+  # 단위라 짐작하기 쉬운 이름은 앞단에서 접근을 좁혔을 때만 쓴다
+  adminUsername: ""
+  # 매핑 표에 platform-admin 이 하나도 없을 때만 힘을 갖는 IdP 그룹(DAEGAM_BOOTSTRAP_ADMIN_GROUP). 비면 두지 않는다
+  bootstrapAdminGroup: ""
+  # 데이터 플레인이 받는 MCP 토큰의 audience (DAEGAM_MCP_AUDIENCE)
+  mcpAudience: daegam-mcp
+  oidc:
+    # IdP 발급자. 있으면 DAEGAM_OIDC_* 를 적고 UI 의 CSP 가 그 origin 을 연다. oidc 모드는 이 값이 있어야 한다
+    issuer: ""
+    audience: daegam-api
+    # 평문 http 발급자를 믿는가. 클러스터 안의 시험용 IdP 에만 켠다
+    insecureHttp: false
+    # IdP 에 등록한 UI 의 공개 PKCE 클라이언트(DAEGAM_OIDC_CLIENT_ID). UI 가 이것으로 로그인하고, 플랫폼은 최근 로그인의 ID
+    # 토큰이 이 클라이언트에게 났는지 본다. oidc 모드에는 있어야 한다(비면 아무도 로그인하지 못하므로 렌더가 멈춘다)
+    clientId: ""
+    # Gateway, 노출한 MCP Server, 노출한 Agent 가 믿는 사람 토큰의 발급자(DAEGAM_DATA_PLANE_ISSUER). platform 은 대감, idp 는
+    # IdP 다. oidc 모드에서만 읽는다. platform 이면 IdP 토큰이 Gateway 와 노출 앞단에서 거절되고, idp 는 되돌아갈 자리다
+    dataPlaneIssuer: platform
+    # 개인 토큰, 로그인 연결, 실행을 사람의 마지막 IdP 확인에서 쓸 수 있는 초(DAEGAM_IDP_CONFIRM_SECONDS). 기본 7일이고
+    # oidc 모드에서만 읽는다. 대화형 한도(DAEGAM_TURN_OWNER_CONFIRM_SECONDS, 기본 4500)보다 작으면 oidc 플랫폼이 뜨지 않는다
+    confirmSeconds: 604800
+
+ingress:
+  enabled: true
+  # 비면 클러스터의 기본 IngressClass 다
+  className: ""
+  annotations: {}
+  # none(TLS 없음), edge(앞단 프록시가 TLS 를 끝낸다), 아니면 이 네임스페이스의 TLS Secret 이름이다
+  tls: none
+
+# 플랫폼이 기동마다 home Cluster 에 덮어쓰는 값 (D22, D54). 여기 적은 값이 화면에서 고친 값을 이긴다
+home:
+  exposure:
+    # 인스턴스의 인터넷 노출을 허용하는가 (DAEGAM_HOME_INGRESS_ENABLED)
+    enabled: false
+    # 노출 Ingress 의 기본 IngressClass. 비면 ingress.className 이다
+    className: ""
+    # Ingress 컨트롤러 파드의 네임스페이스. 노출 NetworkPolicy 가 이 네임스페이스에서 오는 연결만 받는다. 비면 두지 않는다
+    controllerNamespace: ""
+    # 노출 폼의 기본 host 접미사(<name>.<tenant>.<domain>). 비면 두지 않는다
+    domain: ""
+    # header 모드의 무인증 노출 허용
+    allowUnauthenticated: false
+    # 노출의 기본 TLS(none, secret, cert-manager, edge). 비면 ingress.tls 가 edge 일 때만 edge 를 적는다
+    tls: ""
+  # NetworkPolicy 집행 판정(enforced, unenforced). 비면 플랫폼이 탐지한다
+  networkPolicy: ""
+  # 테넌트 파드를 인스턴스 메타데이터 주소(169.254.169.254)에서 막는가 (T75). true·false 를 적고, 비면 화면의 값이다
+  blockMetadata: ""
+  # 플랫폼이 렌더하는 런타임·에이전트 본 컨테이너의 자원(DAEGAM_HOME_RESOURCES). 비면 화면의 값이다
+  resources: {}
+  # 테넌트 네임스페이스의 LimitRange spec(DAEGAM_HOME_LIMIT_RANGE). 비면 화면의 값이다
+  limitRange: {}
+  # 플랫폼 곁에 TLS 로 둔 Redis (P61, DAEGAM_HOME_REDIS_TLS). 그 Redis 를 두는 운영자가 hosts·port·tls_port·
+  # ca_configmap·plain 을 모두 준다. 산 ConfigMap 에 이 값이 있는데 비우면 렌더가 멈춘다
+  shippedRedis: {}
+  # 산 ConfigMap 이 닫혔다고 적은 평문 포트(plain false)를 plain true 로 다시 여는 것을 허락한다. 없으면 그 렌더는 멈춘다
+  allowRedisPlainReopen: false
+
+# 이미지는 <registry>/<repository>:<tag>[@<digest>] 다 (P85 6절). 공개 이미지는 없으므로 registry 는 기본값이 없다
+images:
+  registry: ""
+  # 비면 digest 가 있는 이미지는 IfNotPresent, 없는 이미지는 Always 다. 판 태그는 make push-images 마다 옮겨 가기 때문이다
+  pullPolicy: ""
+  # 레지스트리의 pull secret 이름. 플랫폼 파드와 플랫폼이 렌더하는 파드가 함께 쓴다. 비면 두지 않는다
+  pullSecret: ""
+  # tag 가 비면 차트의 appVersion 이다
+  platform:
+    repository: daegam-platform
+    tag: ""
+    digest: ""
+  ui:
+    repository: daegam-ui
+    tag: ""
+    digest: ""
+  # 아래 넷은 플랫폼이 테넌트 네임스페이스에 렌더하는 파드의 이미지다. registry 가 앞에 붙는다
+  runtime:
+    repository: daegam-mcp-runtime
+    tag: ""
+    digest: ""
+  agent:
+    repository: daegam-agent-runtime
+    tag: ""
+    digest: ""
+  webTools:
+    repository: daegam-web-tools
+    tag: ""
+    digest: ""
+  sandbox:
+    repository: daegam-sandbox
+    tag: ""
+    digest: ""
+
+platform:
+  # 워커는 MongoDB 리스로 한 파드만 돈다(P6 F6). 둘은 파드 하나가 죽어도 버티려는 것이다
+  replicas: 2
+  # 유휴 실측 238MiB
+  resources:
+    requests: {cpu: 50m, memory: 384Mi}
+    limits: {cpu: 1000m, memory: 1Gi}
+  pdb:
+    enabled: true
+  # 컨테이너 env 에 더한다. 차트가 정하는 이름과 ConfigMap 으로만 받는 이름(values.schema.json 의 reservedKeys,
+  # configOnlyKeys)은 받지 않는다. env 는 envFrom 의 ConfigMap 을 이기기 때문이다
+  extraEnv: []
+  # ConfigMap 에 더하는 키(글자나 참·거짓). 차트가 정하는 이름(reservedKeys)은 받지 않는다. 개발용 스위치 둘
+  # (DAEGAM_ALLOW_STUB_PROVIDER, DAEGAM_SANDBOX_ALLOW_UNCHECKED)은 auth.allowHeaderMode 일 때만 켤 수 있다
+  extraConfig: {}
+
+docparse:
+  replicas: 2
+  # 하위 프로세스 둘의 주소 공간 상한(768MiB 씩)과 서버를 합친 것보다 크게 잡아, 한 추출이 한도에 이르러도 그 하위
+  # 프로세스만 죽는다
+  resources:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {cpu: 1000m, memory: 2Gi}
+  # 복제가 하나면 켜 두어도 PDB 를 두지 않는다
+  pdb:
+    enabled: true
+  extraEnv: []
+
+ui:
+  replicas: 2
+  resources:
+    requests: {cpu: 10m, memory: 16Mi}
+    limits: {cpu: 200m, memory: 64Mi}
+  pdb:
+    enabled: true
+  extraEnv: []
+  service:
+    # Traefik 의 sticky 쿠키로 브라우저 하나를 UI 파드 하나에 붙인다(D52). Secure 는 scheme 이 https 일 때만이다
+    traefikStickyCookie: true
+    annotations: {}
+
+mongodb:
+  # true 면 --auth 로 뜨는 MongoDB 한 벌을 함께 올린다. false 면 secrets.platform.existingSecret 의 DAEGAM_MONGO_URL 이다
+  bundled: true
+  image: mongo:7.0
+  # 비면 클러스터의 기본 StorageClass 다. 크기와 StorageClass 는 처음 만든 뒤 바꾸지 못한다
+  storageClass: ""
+  size: 10Gi
+  # WiredTiger 캐시(GB). 메모리 한도 1Gi 에 맞춘다. 비면 mongod 가 cgroup 한도로 정한다
+  wiredTigerCacheSizeGB: "0.25"
+  resources:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {cpu: 1000m, memory: 1Gi}
+
+# Secret 마다 existingSecret(운영자가 만든 Secret 의 이름) 이거나, 비우면 차트가 한 번 만들고 다시 만들지 않는다 (P85 5절).
+# 만드는 Secret 은 산 Secret 을 읽어야 하므로 클러스터 없는 렌더(helm template, lint)는 멈춘다
+secrets:
+  # 키 DAEGAM_MONGO_URL, DAEGAM_LOCAL_BOOTSTRAP_USERNAME, DAEGAM_LOCAL_BOOTSTRAP_PASSWORD
+  platform:
+    existingSecret: ""
+  # 키 token. 플랫폼과 문서 파싱 서비스가 나눠 갖는다
+  docparse:
+    existingSecret: ""
+  # 키 username, password. MongoDB 를 함께 올릴 때만 쓴다
+  mongo:
+    existingSecret: ""
+
+# LLM 게이트웨이 (P38, P85 8절). 켜면(mode agentgateway) 플랫폼이 게이트웨이 한 벌을 이 네임스페이스에 렌더하고, 차트는
+# 그 네임스페이스와 플랫폼의 Role·RoleBinding 을 helm.sh/resource-policy: keep 으로 렌더한다. 끈 뒤에도 남는다. 플랫폼이
+# 게이트웨이를 부르는 Agent 가 옮겨 갈 때까지 게이트웨이를 두기 때문이다. target home 에서만 쓴다
+llmGateway:
+  # off 나 agentgateway. YAML 에서 따옴표 없는 off 는 false 이므로 따옴표로 적는다
+  mode: "off"
+  # 테넌트가 쓰지 못하는 이름이다. 플랫폼·쿠버네티스의 네임스페이스(daegam-system, default, kube-*, toolhive-system,
+  # daegam-probe)는 받지 않는다. 켠 뒤 바꾸면 옛 네임스페이스의 게이트웨이가 남는다
+  namespace: daegam-llm
+  # 게이트웨이의 PodDisruptionBudget(minAvailable 1). 노드가 하나인 클러스터에서는 끈다
+  pdb:
+    enabled: true
+  # 게이트웨이 한 벌의 남의 이미지 넷 (P38 3절). 게이트웨이가 모든 provider 키를 들므로 모두 `저장소:태그@sha256:<index
+  # digest>` 로 못 박는다. 여기가 그 참조의 하나뿐인 자리다. 모드와 상관없이 ConfigMap 에 적는다. 끈 뒤에도 옮겨 가지 않은
+  # Agent 가 있으면 플랫폼이 게이트웨이를 그대로 두기 때문이다. signer 는 그 이미지를 키 없이 서명한 GitHub Actions
+  # 워크플로이고 make mirror-images 가 cosign verify 로 확인한다(차트는 읽지 않는다). 판을 올리면 P38 F0 의 필수 항목을 다시
+  # 잰다
+  images:
+    # 비우면 참조를 그대로 당긴다. 설치의 레지스트리 사본(make mirror-images)을 쓰는 값 파일은 scripts/lib/llm_gateway_images.py
+    # 가 만든다. 그 파일은 접두 <레지스트리>/third-party 와 사본 참조 `이름:태그@digest` 를 준다
+    registryPrefix: ""
+    pullSecret: ""
+    # agentgateway (amd64·arm64). 태그는 Makefile 의 AGENTGATEWAY_VERSION 과 같아야 한다
+    gateway:
+      image: ghcr.io/agentgateway/agentgateway:v1.5.0@sha256:bf2f339ef326d32def2aaeb44b1b4549801293c19b89e764a4228667d97d9896
+      signer: https://github.com/agentgateway/agentgateway/.github/workflows/release.yml@refs/tags/v1.5.0
+    # 토큰 한도 서비스 envoyproxy/ratelimit. 커밋 태그이고 서명이 없어 digest 만이 그것을 못 박는다
+    ratelimit:
+      image: docker.io/envoyproxy/ratelimit:f4e76690@sha256:83b1664a194ff9fc1ff30b0868573115a2d01a1b6e2a3f8961724f9a79bf1cd0
+      signer: ""
+    # 한도 계수기 Redis (D54 의 8.2). 공식 이미지라 cosign 서명이 없다
+    redis:
+      image: docker.io/library/redis:8.2@sha256:e5f23377739f95a2f530b9c99f93accb4f634577f09d00a7d8e0638f2fdf69e0
+      signer: ""
+    # 수집기 OpenTelemetry Collector contrib 0.163.2. bearertokenauth 와 filter 가 core 배포판에 없어 contrib 다
+    collector:
+      image: ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib:0.163.2@sha256:7f22d2a6748110ffb6a59bc0df448bccbf501cdb667d610ede4c61d3863d5849
+      signer: https://github.com/open-telemetry/opentelemetry-collector-releases/.github/workflows/base-release.yaml@refs/tags/v0.163.2
+
+# 릴리스 네임스페이스의 LimitRange daegam-defaults. 모든 컨테이너에 requests·limits 를 요구하는 클러스터의 받침이다
+limitRange:
+  enabled: false
+  limits:
+    - type: Container
+      defaultRequest: {cpu: 20m, memory: 32Mi}
+      default: {cpu: 500m, memory: 256Mi}

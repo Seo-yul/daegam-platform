@@ -1,0 +1,145 @@
+{{- /* 플랫폼이 쓰는 ServiceAccount 와 그 최소 권한. 규칙 목록은 _rbac.tpl 하나이고 두 target 이 같이 쓴다 (P85 8절).
+home 은 플랫폼 자신의 daegam-platform 이다. remote 는 플랫폼이 배포해 들어갈 원격 클러스터의 daegam-deployer 와 그 토큰
+Secret 이다. 플랫폼은 그 토큰(connection.sa_token)이나 그것을 쓰는 kubeconfig 로 그 클러스터를 등록하고, preflight 가 같은
+동사를 SelfSubjectAccessReview 로 본다. ClusterRole 과 ClusterRoleBinding 의 이름은 계정 이름이다. roleRef 는 바꾸지 못하므로
+kubectl apply 로 만든 옛 객체를 넘겨받아도 이름이 같아야 한다 */ -}}
+{{- $ns := .Release.Namespace -}}
+{{- $home := eq .Values.target "home" -}}
+{{- $account := ternary "daegam-platform" "daegam-deployer" $home -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $account }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "daegam.labels" . | nindent 4 }}
+---
+{{- if $home }}
+# 클러스터 Secret(cluster-{id}: 원격 kubeconfig, SA 토큰)은 플랫폼 네임스페이스에만 있다. 이름으로 읽으므로 list·watch 는 없다
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: daegam-platform
+  namespace: {{ $ns }}
+  labels:
+    {{- include "daegam.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, create, update, patch, delete]
+  # 함께 올린 Redis 의 공개 CA·서버 인증서 (P61 F3). 개인 키 없이 읽으려고 ConfigMap 하나만 읽는다
+  - apiGroups: [""]
+    resources: [configmaps]
+    resourceNames: [daegam-redis-ca]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: daegam-platform
+  namespace: {{ $ns }}
+  labels:
+    {{- include "daegam.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: daegam-platform
+    namespace: {{ $ns }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: daegam-platform
+{{- else }}
+# 계정의 오래 가는 토큰. 쿠버네티스 1.24 부터는 저절로 만들지 않는다. 값은 토큰 컨트롤러가 채운다
+apiVersion: v1
+kind: Secret
+metadata:
+  name: daegam-deployer-token
+  namespace: {{ $ns }}
+  labels:
+    {{- include "daegam.labels" . | nindent 4 }}
+  annotations:
+    kubernetes.io/service-account.name: daegam-deployer
+type: kubernetes.io/service-account-token
+{{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $account }}
+  labels:
+    {{- include "daegam.labels" . | nindent 4 }}
+rules:
+  {{- include "daegam.rules.platform" . | nindent 2 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: daegam-tls-reader
+  labels:
+    {{- include "daegam.labels" . | nindent 4 }}
+rules:
+  {{- include "daegam.rules.tlsReader" . | nindent 2 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: daegam-tenant-objects
+  labels:
+    {{- include "daegam.labels" . | nindent 4 }}
+rules:
+  {{- include "daegam.rules.tenantObjects" . | nindent 2 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $account }}
+  labels:
+    {{- include "daegam.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $account }}
+    namespace: {{ $ns }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $account }}
+---
+# P40 (D95): 코드 실행 샌드박스 파드는 다른 모든 파드보다 낮은 이 우선순위로 돌고 어느 파드도 밀어내지 않는다. 플랫폼은
+# 클러스터의 일반 우선순위 클래스가 무엇이든 샌드박스 파드에 이것을 단다
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: daegam-sandbox
+  labels:
+    {{- include "daegam.labels" . | nindent 4 }}
+value: -10
+preemptionPolicy: Never
+globalDefault: false
+description: Daegam code-execution sandboxes (P40)
+---
+# P40 (D95): 격리 점검은 양성 대조와 실제 샌드박스를 테넌트 네임스페이스가 지는 정책 아래 여기서 돌린다. 테넌트는 이
+# 네임스페이스를 가져가지 못하고, 플랫폼은 테넌트 네임스페이스처럼 여기서 daegam-tenant-objects 를 갖는다. Pod Security
+# admission 이 restricted 를 집행하므로 플랫폼이 여기 만드는 파드는 그 아래로 내려가지 못한다
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: daegam-probe
+  labels:
+    {{- include "daegam.labels" . | nindent 4 }}
+    pod-security.kubernetes.io/enforce: restricted
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: daegam-tenant-objects
+  namespace: daegam-probe
+  labels:
+    {{- include "daegam.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $account }}
+    namespace: {{ $ns }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: daegam-tenant-objects

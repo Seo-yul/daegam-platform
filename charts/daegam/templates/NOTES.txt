@@ -1,0 +1,57 @@
+{{- if eq .Values.target "remote" -}}
+This cluster is ready for a Daegam platform to deploy into: the ServiceAccount daegam-deployer in the namespace
+{{ .Release.Namespace }}, its ClusterRoles and binding, the PriorityClass daegam-sandbox and the namespace daegam-probe.
+
+Register it on the platform with the account's token, the API server address and its CA. Read the token and the CA with:
+  kubectl -n {{ .Release.Namespace }} get secret daegam-deployer-token -o jsonpath='{.data.token}' | base64 -d; echo
+  kubectl -n {{ .Release.Namespace }} get secret daegam-deployer-token -o jsonpath='{.data.ca\.crt}' | base64 -d
+Then run the cluster's preflight on the platform.
+
+To uninstall, first remove the tenants' MCP Servers, Gateways, Agents and exposures on this cluster through the
+platform, then run
+  helm uninstall {{ .Release.Name }} -n {{ .Release.Namespace }}
+{{- else -}}
+Daegam {{ .Chart.AppVersion }} is installed in the namespace {{ .Release.Namespace }}.
+
+Watch the rollout:
+  kubectl -n {{ .Release.Namespace }} rollout status deploy/daegam-platform
+  kubectl -n {{ .Release.Namespace }} rollout status deploy/daegam-ui
+
+{{- if .Values.ingress.enabled }}
+
+Open {{ .Values.scheme }}://{{ .Values.host }} once that name reaches the Ingress{{ if eq .Values.ingress.tls "edge" }} through the TLS proxy in front of the cluster{{ end }}.
+{{- if and (eq .Values.scheme "https") (eq .Values.ingress.tls "none") }}
+WARNING: scheme is https but ingress.tls is none, so nothing in this release ends TLS. Put a proxy that ends TLS in
+front of the Ingress (ingress.tls: edge says so), name a TLS Secret in ingress.tls, or use scheme: http for a trial.
+{{- end }}
+{{- else }}
+
+The Ingress is off. Route {{ .Values.scheme }}://{{ .Values.host }} to the Service daegam-platform (port 9000) for /api/,
+/.well-known/ and /healthz, and to the Service daegam-ui (port 8080) for everything else.
+{{- end }}
+{{- if eq .Values.auth.mode "local" }}
+
+The first admin is created on the first start from the Secret {{ include "daegam.secretName.platform" . }}. Read the
+name and the password with:
+  kubectl -n {{ .Release.Namespace }} get secret {{ include "daegam.secretName.platform" . }} -o jsonpath='{.data.DAEGAM_LOCAL_BOOTSTRAP_USERNAME}' | base64 -d; echo
+  kubectl -n {{ .Release.Namespace }} get secret {{ include "daegam.secretName.platform" . }} -o jsonpath='{.data.DAEGAM_LOCAL_BOOTSTRAP_PASSWORD}' | base64 -d; echo
+The platform asks for a new password at the first sign-in.
+{{- end }}
+{{- if or .Values.secrets.platform.existingSecret .Values.secrets.docparse.existingSecret .Values.secrets.mongo.existingSecret }}
+
+Pods read an edited existing Secret at their next restart:
+  kubectl -n {{ .Release.Namespace }} rollout restart deploy/daegam-platform deploy/daegam-docparse
+{{- end }}
+
+To uninstall, first remove the tenants' MCP Servers, Gateways, Agents and exposures through the platform, then run
+  helm uninstall {{ .Release.Name }} -n {{ .Release.Namespace }}
+It deletes the ClusterRoles, the PriorityClass daegam-sandbox and the namespace daegam-probe, so tenant pods left
+behind would keep serving with nothing to manage them, and sandboxes could not start. The namespace
+{{ .Release.Namespace }}{{ if .Values.mongodb.bundled }}, the MongoDB volume{{ end }} and the Secrets the chart generated stay.
+{{- if eq (toString .Values.llmGateway.mode) "agentgateway" }}
+
+The LLM gateway is on in the namespace {{ .Values.llmGateway.namespace }}. That namespace and its Role stay after
+the gateway is turned off and after an uninstall; remove them with make llm-gateway-uninstall once no Agent calls the
+gateway.
+{{- end }}
+{{- end }}

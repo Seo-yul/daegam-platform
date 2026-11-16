@@ -1,0 +1,86 @@
+{{- /*
+값끼리의 규칙 (P85 3절~5절). 객체를 내지 않고 어긋나면 렌더를 멈춘다. JSON Schema 로 적을 수 있는 규칙은 values.schema.json
+이 먼저 막고(helm lint 도 그것은 막는다), 여기는 스키마를 건너뛴 렌더(--skip-schema-validation)의 받침이다. 네임스페이스와
+산 객체의 규칙은 스키마로 적지 못해 여기에만 있다.
+*/ -}}
+{{- $v := .Values -}}
+{{- /* 클러스터 범위의 이름(daegam-*)이 하나이고 코드가 daegam-system 을 글자로 쓰므로 릴리스는 클러스터마다 하나, 그 네임스페이스다 */ -}}
+{{- if ne .Release.Namespace "daegam-system" -}}
+{{- fail (printf "install the chart into the namespace daegam-system (got %s); the platform code and the cluster-scoped names expect one release there" .Release.Namespace) -}}
+{{- end -}}
+{{- /* YAML 의 따옴표 없는 off 는 false 다. 스키마는 그것을 받고 여기서 고칠 말을 준다. 모드를 견주는 곳은 모두 toString 으로
+견주므로 이것이 먼저 걸린다 */ -}}
+{{- if kindIs "bool" $v.llmGateway.mode -}}
+{{- fail "llmGateway.mode: a bare off in YAML is the boolean false; write mode: \"off\"" -}}
+{{- end -}}
+{{- /* 산 플랫폼 ConfigMap. remote 는 그것이 있는 클러스터(플랫폼이 도는 클러스터)에 올리지 않고, home 은 그 기록을 지킨다 */ -}}
+{{- $liveConfig := include "daegam.live" (list . "ConfigMap" "daegam-platform-config") | fromJson -}}
+{{- $liveData := $liveConfig.data | default dict -}}
+{{- /* 아래는 플랫폼 한 벌(target home)의 규칙이다. remote 는 그 값을 읽지 않는다. 게이트웨이는 플랫폼의 클러스터에서만 돈다 */ -}}
+{{- if eq $v.target "remote" -}}
+{{- if eq (toString $v.llmGateway.mode) "agentgateway" -}}
+{{- fail "llmGateway.mode agentgateway goes only with target home: the gateway runs on the platform's cluster" -}}
+{{- end -}}
+{{- if $liveConfig -}}
+{{- fail (printf "this cluster runs the Daegam platform (the ConfigMap daegam-platform-config is in %s); install target: remote on the other cluster the platform deploys into, and keep target: home here" .Release.Namespace) -}}
+{{- end -}}
+{{- end -}}
+{{- if eq $v.target "home" -}}
+{{- /* 게이트웨이 네임스페이스는 켜든 끄든 ConfigMap 에 적히고 테넌트가 쓰지 못한다. scripts/llm-gateway-install.sh 가 거두기
+전에 보는 이름 규칙과 같다. 틀리면 플랫폼 네임스페이스에 restricted 를 걸거나 거두기가 그 네임스페이스를 PVC 와 함께 지운다.
+DNS 라벨은 스키마도 보고, 예약 이름은 고칠 말을 주려고 여기서만 본다 */ -}}
+{{- $gwns := $v.llmGateway.namespace -}}
+{{- if not (regexMatch "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$" $gwns) -}}
+{{- fail (printf "llmGateway.namespace %q is not a DNS label" $gwns) -}}
+{{- end -}}
+{{- if or (has $gwns (list .Release.Namespace "daegam-system" "default" "toolhive-system" "daegam-probe")) (hasPrefix "kube-" $gwns) -}}
+{{- fail (printf "llmGateway.namespace %q is a namespace of the platform or of Kubernetes (daegam-system, default, kube-*, toolhive-system, daegam-probe); give the gateway a namespace of its own" $gwns) -}}
+{{- end -}}
+{{- /* header 모드는 요청한 사람을 확인하지 않는다. 개발 클러스터에서만 켜도록 따로 허락을 받는다 */ -}}
+{{- if and (eq $v.auth.mode "header") (not $v.auth.allowHeaderMode) -}}
+{{- fail "auth.mode header trusts every request as platform-admin; it is for development clusters only and needs auth.allowHeaderMode: true" -}}
+{{- end -}}
+{{- if and (eq $v.auth.mode "oidc") (not $v.auth.oidc.issuer) -}}
+{{- fail "auth.mode oidc needs auth.oidc.issuer" -}}
+{{- end -}}
+{{- /* UI 는 이 클라이언트로 IdP 에 로그인하고 플랫폼은 최근 로그인의 ID 토큰이 이것에게 났는지 본다. 없으면 아무도 로그인하지 못한다 */ -}}
+{{- if and (eq $v.auth.mode "oidc") (not $v.auth.oidc.clientId) -}}
+{{- fail "auth.mode oidc needs auth.oidc.clientId, the UI's PKCE client at the IdP" -}}
+{{- end -}}
+{{- /* 개발용 스위치 둘은 릴리스 산출물에 두지 않는다(D25, D95). header 모드를 허락한 개발 설치만 ConfigMap 에 켤 수 있다 */ -}}
+{{- range $key := list "DAEGAM_ALLOW_STUB_PROVIDER" "DAEGAM_SANDBOX_ALLOW_UNCHECKED" -}}
+{{- $raw := get $v.platform.extraConfig $key | toString | trim | lower -}}
+{{- if and (has $raw (list "1" "true" "yes" "on")) (not $v.auth.allowHeaderMode) -}}
+{{- fail (printf "platform.extraConfig.%s turns on a development switch; it is allowed only with auth.allowHeaderMode: true" $key) -}}
+{{- end -}}
+{{- end -}}
+{{- /* 차트가 스스로 정하는 이름과 ConfigMap 으로만 받는 이름은 env 로 주지 못한다. env 는 envFrom 을 이기므로 인증 모드나
+개발용 스위치를 값의 규칙 밖에서 바꾸거나 e2e 의 ConfigMap 고침을 무르게 된다 */ -}}
+{{- $refused := concat (include "daegam.reservedKeys" . | fromJsonArray) (include "daegam.configOnlyKeys" . | fromJsonArray) -}}
+{{- range $component := list "platform" "docparse" "ui" -}}
+{{- range (index $v $component).extraEnv -}}
+{{- if has .name $refused -}}
+{{- fail (printf "%s.extraEnv: %s is set by the chart or only through the ConfigMap; use its value or platform.extraConfig" $component .name) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- /* 공개 주소가 http 인데 Ingress 나 앞단이 TLS 를 끝내면 쿠키와 CSP 가 브라우저가 쓰는 주소와 어긋난다 */ -}}
+{{- if and (eq $v.scheme "http") (ne $v.ingress.tls "none") -}}
+{{- fail (printf "scheme http does not go with ingress.tls %s; use scheme https" $v.ingress.tls) -}}
+{{- end -}}
+{{- if and (not $v.mongodb.bundled) (not $v.secrets.platform.existingSecret) -}}
+{{- fail "mongodb.bundled false needs secrets.platform.existingSecret: the Secret that holds DAEGAM_MONGO_URL of your MongoDB" -}}
+{{- end -}}
+{{- /* 플랫폼 곁에 둔 Redis 는 그 Redis 를 두는 배포가 home.shippedRedis 로 넘긴다 (P61). 산 ConfigMap 에 있는 값을 빼고
+올리면 TLS 끝점과 평문 포트의 기록이 사라지고, 닫힌 평문 포트(plain false)를 열린 것으로 올리면 다음 배포가 Redis 의 평문
+포트를 다시 연다. 다시 여는 것은 home.allowRedisPlainReopen 으로만 한다 */ -}}
+{{- with get $liveData "DAEGAM_HOME_REDIS_TLS" -}}
+{{- $recorded := . | fromJson -}}
+{{- if not $v.home.shippedRedis -}}
+{{- fail "the live ConfigMap daegam-platform-config records a Redis shipped next to the platform (DAEGAM_HOME_REDIS_TLS); set home.shippedRedis to that object so the upgrade keeps its TLS endpoint and plain-port state" -}}
+{{- end -}}
+{{- if and (eq (toString $recorded.plain) "false") $v.home.shippedRedis.plain (not $v.home.allowRedisPlainReopen) -}}
+{{- fail "the live ConfigMap records the shipped Redis's plain port as closed (plain false) and home.shippedRedis.plain is true; reopening it needs home.allowRedisPlainReopen: true" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}

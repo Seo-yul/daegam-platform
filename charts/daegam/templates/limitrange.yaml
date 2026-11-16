@@ -1,0 +1,14 @@
+{{- /* 릴리스 네임스페이스의 LimitRange (D54). 모든 컨테이너에 requests·limits 를 요구하는 클러스터에서 값이 빠진 컨테이너를
+덮는 받침이다. 값은 매니페스트와 플랫폼이 렌더하는 CR 에 직접 적는다. 테넌트 네임스페이스의 것은 home.limitRange 다 */ -}}
+{{- if and (eq .Values.target "home") .Values.limitRange.enabled }}
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: daegam-defaults
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "daegam.labels" . | nindent 4 }}
+spec:
+  limits:
+    {{- toYaml .Values.limitRange.limits | nindent 4 }}
+{{- end }}

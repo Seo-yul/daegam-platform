@@ -1,0 +1,12 @@
+{{- /* 플랫폼 설정 중 비밀이 아닌 것 (D15). 플랫폼은 envFrom 으로 읽고 UI 는 두 키만 읽는다. 키는 daegam.configData 다 */ -}}
+{{- if eq .Values.target "home" }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: daegam-platform-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "daegam.labels" . | nindent 4 }}
+data:
+  {{- include "daegam.configData" . | nindent 2 }}
+{{- end }}

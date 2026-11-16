@@ -1,0 +1,141 @@
+{{- /* UI (D52). 정적 빌드를 nginx 가 낸다. 같은 호스트의 /api/·/.well-known/·/healthz 는 Ingress 가 플랫폼으로 보낸다 */ -}}
+{{- if eq .Values.target "home" }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: daegam-ui
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: daegam-ui
+    {{- include "daegam.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.ui.replicas }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxUnavailable: 0, maxSurge: 1}
+  selector:
+    matchLabels: {app: daegam-ui}
+  template:
+    metadata:
+      labels: {app: daegam-ui}
+      annotations:
+        # UI 가 읽는 두 키의 체크섬. 인증 모드를 바꾸면 UI 도 굴러 CSP 가 그 모드의 IdP origin 을 따른다
+        daegam.devops.ai.kr/ui-config-sha: {{ include "daegam.uiConfigSha" . | quote }}
+    spec:
+      # 쿠버네티스 API 를 부르지 않는다
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      {{- include "daegam.pullSecrets" . | nindent 6 }}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: {app: daegam-ui}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        runAsGroup: 101
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: ui
+          image: {{ include "daegam.image" (list . .Values.images.ui) }}
+          imagePullPolicy: {{ include "daegam.pullPolicy" (list . .Values.images.ui) }}
+          ports:
+            - {name: http, containerPort: 8080}
+            # 준비 확인만 받는다(nginx.conf). Service 는 이 포트를 열지 않는다
+            - {name: probe, containerPort: 8081}
+          # CSP 가 인증 모드에 따라 IdP origin 을 연다. 기동 때 한 번 읽는다. 나머지 키는 UI 가 읽지 않아 두 키만 받는다
+          env:
+            - name: DAEGAM_AUTH_MODE
+              valueFrom:
+                configMapKeyRef: {name: daegam-platform-config, key: DAEGAM_AUTH_MODE, optional: true}
+            - name: DAEGAM_OIDC_ISSUER
+              valueFrom:
+                configMapKeyRef: {name: daegam-platform-config, key: DAEGAM_OIDC_ISSUER, optional: true}
+            {{- with .Values.ui.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          # 내려갈 때는 Ingress 컨트롤러에서 먼저 빠진 뒤 멈춘다(D52). daegam-ui-drain 은 3초 뒤 내려가는 중 표시를 두고 7초 더
+          # 낸다. 3초는 컨트롤러가 이 파드를 새 브라우저에서 빼기를 기다린다. 표시를 두면 준비 확인이 503 이 되어 sticky 쿠키로
+          # 붙은 브라우저도 옮긴다. 7초는 그것이 반영될 때까지 계속 내는 몫이다
+          lifecycle:
+            preStop:
+              exec: {command: ["/usr/local/bin/daegam-ui-drain", "3", "7"]}
+          # httpGet 이어야 한다. kubelet 이 직접 부르므로 preStop 이 도는 동안에도 결과가 반영된다
+          readinessProbe:
+            httpGet: {path: /ready, port: probe}
+            periodSeconds: 1
+            failureThreshold: 2
+          livenessProbe:
+            httpGet: {path: /, port: http}
+            periodSeconds: 20
+            initialDelaySeconds: 5
+          resources:
+            {{- toYaml .Values.ui.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            # pid, nginx 임시 경로, 기동 때 만드는 CSP 설정
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+# 브라우저 하나를 UI 파드 하나에 붙인다(D52). 롤링 중 새로 연 탭이 index.html 과 진입 번들을 서로 다른 파드에서 받으면
+# 번들이 404 라 첫 화면이 빈다. Traefik 이 쿠키 없는 요청에 파드를 고르며 쿠키를 주고, 그 쿠키를 든 요청은 같은 파드로
+# 보낸다. Secure 는 https 일 때만이다. http 에 두면 브라우저가 쿠키를 돌려보내지 않아 붙지 않는다
+apiVersion: v1
+kind: Service
+metadata:
+  name: daegam-ui
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: daegam-ui
+    {{- include "daegam.labels" . | nindent 4 }}
+  {{- $sticky := dict }}
+  {{- if .Values.ui.service.traefikStickyCookie }}
+  {{- $prefix := "traefik.ingress.kubernetes.io/service.sticky.cookie" }}
+  {{- $sticky = dict $prefix "true" (printf "%s.name" $prefix) "daegam_ui" (printf "%s.httponly" $prefix) "true" (printf "%s.samesite" $prefix) "lax" (printf "%s.secure" $prefix) (toString (eq .Values.scheme "https")) }}
+  {{- end }}
+  {{- with merge (deepCopy .Values.ui.service.annotations) $sticky }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  selector: {app: daegam-ui}
+  ports:
+    - {name: http, port: 8080, targetPort: http}
+{{- if include "daegam.pdb" .Values.ui }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: daegam-ui
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "daegam.labels" . | nindent 4 }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: {app: daegam-ui}
+{{- end }}
+---
+# UI 파드는 밖으로 나가는 연결을 전부 막는다. 테넌트 네임스페이스 정책이 이 네임스페이스 전체를 받아들이므로(D16) 가장
+# 바깥에 노출된 nginx 가 테넌트 파드에 닿는 자리에 서지 않게 하는 한 겹이다. 막는 것의 본체는 D41 의 서비스 토큰과 MongoDB
+# 자신의 인증이다(D38). DNS 까지 막으므로 nginx.conf 에 proxy_pass·resolver 를 더하면 이 정책부터 고친다. 집행은 CNI 가
+# NetworkPolicy 를 지원할 때만이다. kubelet probe 와 Ingress 컨트롤러의 요청은 들어오는 연결이라 막히지 않는다
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: daegam-ui
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "daegam.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {app: daegam-ui}
+  policyTypes: [Egress]
+{{- end }}

@@ -1,0 +1,72 @@
+{{- /*
+LLM 게이트웨이의 네임스페이스와 플랫폼이 거기서 쓰는 Role (P38 3절, P85 8절). 게이트웨이 자신(Deployment, Secret, 정책)은
+플랫폼의 리컨실 단계가 렌더한다. 켰을 때만 렌더하고 helm.sh/resource-policy: keep 이라 끈 뒤의 업그레이드도 helm uninstall
+도 지우지 않는다. 끈 뒤에도 게이트웨이를 부르는 Agent 가 옮겨 갈 때까지 플랫폼이 게이트웨이를 두기 때문이다. 그 뒤
+네임스페이스는 make llm-gateway-uninstall 이 지운다. 게이트웨이가 모든 provider 키를 들므로 PodSecurity restricted 를
+집행하고, 테넌트 라벨(daegam.devops.ai.kr/tenant)은 달지 않는다. 플랫폼은 테넌트 라벨이 있는 네임스페이스에는 아무것도
+렌더하지 않는다.
+
+Role 의 동사는 platform/daegam/services/llm_gateway.py 의 NAMESPACE_VERBS 와 같아야 한다(test_namespaces.py). Deployment,
+Service, NetworkPolicy, 파드 읽기와 pods/portforward 는 플랫폼 ClusterRole(_rbac.tpl)이 이미 준다. 그 ClusterRole 에 Secret
+동사가 없으므로(P63, D75) 키를 든 Secret 은 이 Role 이 이 네임스페이스에서만 준다. list 와 watch 는 없다. 플랫폼은 자기
+객체를 이름으로 읽고(get) SSA 로 쓰고(create, patch) 지운다(delete). ConfigMap 은 한도 설정과 수집기 설정이고, 파드 delete
+는 옛 리비전에 멈춘 게이트웨이 파드를 지우는 회복이다. PodDisruptionBudget 은 llmGateway.pdb 가 켜졌을 때만 렌더한다.
+*/ -}}
+{{- $gw := .Values.llmGateway -}}
+{{- if and (eq .Values.target "home") (eq (toString $gw.mode) "agentgateway") }}
+{{- $ns := $gw.namespace }}
+{{- /* 네임스페이스 이름의 규칙은 validate.yaml 이 본다 */}}
+{{- $live := include "daegam.live" (list . "Namespace" $ns) | fromJson }}
+{{- $labels := ($live.metadata | default dict).labels | default dict }}
+{{- if get $labels "daegam.devops.ai.kr/tenant" }}
+{{- fail (printf "the namespace %s carries the tenant label daegam.devops.ai.kr/tenant; move that tenant's namespace or set another llmGateway.namespace" $ns) }}
+{{- end }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $ns }}
+  labels:
+    {{- include "daegam.labels" . | nindent 4 }}
+    daegam.devops.ai.kr/component: llm-gateway
+    pod-security.kubernetes.io/enforce: restricted
+  annotations:
+    helm.sh/resource-policy: keep
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: daegam-llm-gateway
+  namespace: {{ $ns }}
+  labels:
+    {{- include "daegam.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+rules:
+  - apiGroups: [""]
+    resources: [secrets, configmaps]
+    verbs: [get, create, patch, delete]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [delete]
+  - apiGroups: [policy]
+    resources: [poddisruptionbudgets]
+    verbs: [get, create, patch, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: daegam-llm-gateway
+  namespace: {{ $ns }}
+  labels:
+    {{- include "daegam.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+subjects:
+  - kind: ServiceAccount
+    name: daegam-platform
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: daegam-llm-gateway
+{{- end }}

@@ -1,0 +1,13 @@
+# 클러스터 없이 렌더하는 값 (P85 5절). 차트가 만드는 Secret 은 산 Secret 을 읽어야 하므로 클러스터 없는 렌더(helm template,
+# helm lint)는 멈춘다. 그래서 세 Secret 을 모두 existingSecret 으로 적는다. 차트 시험(platform/tests/test_chart_*.py)과
+# helm lint --strict 가 이 파일로 렌더한다. host 와 registry 는 렌더에 필요한 중립 예시 값이다
+host: daegam.example.com
+images:
+  registry: registry.example.com/daegam
+secrets:
+  platform:
+    existingSecret: daegam-platform-secrets
+  docparse:
+    existingSecret: daegam-docparse-token
+  mongo:
+    existingSecret: daegam-mongo-auth

@@ -1,0 +1,90 @@
+{{- /*
+함께 올리는 MongoDB (P85 5절). 플랫폼의 유일한 상태다. root 사용자는 빈 볼륨으로 처음 뜰 때만 Secret 의 값으로 만들어지므로
+그 Secret 은 한 번 만들고 다시 만들지 않는다(secrets.yaml). PVC 는 helm uninstall 이 지우지 않는다.
+*/ -}}
+{{- if eq .Values.target "home" }}
+{{- if .Values.mongodb.bundled }}
+{{- $m := .Values.mongodb }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongodb
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: mongodb
+    {{- include "daegam.labels" . | nindent 4 }}
+spec:
+  selector: {app: mongodb}
+  ports:
+    - {name: mongo, port: 27017, targetPort: mongo}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mongodb
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: mongodb
+    {{- include "daegam.labels" . | nindent 4 }}
+spec:
+  serviceName: mongodb
+  replicas: 1
+  selector:
+    matchLabels: {app: mongodb}
+  template:
+    metadata:
+      labels: {app: mongodb}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: mongo
+          image: {{ $m.image }}
+          imagePullPolicy: IfNotPresent
+          # 이 포트는 클러스터 안에서 누구나 닿고 NetworkPolicy 는 CNI 가 집행할 때만 막으므로 DB 자신의 인증(--auth)이
+          # 어디서나 도는 방어다. WiredTiger 캐시는 메모리 한도에 맞춰 적고 cgroup 한도를 읽는 자동 판정에 기대지 않는다
+          args: ["--auth", "--bind_ip_all"{{ with $m.wiredTigerCacheSizeGB }}, "--wiredTigerCacheSizeGB", {{ . | quote }}{{ end }}]
+          env:
+            - name: MONGO_INITDB_ROOT_USERNAME
+              valueFrom: {secretKeyRef: {name: {{ include "daegam.secretName.mongo" . }}, key: username}}
+            - name: MONGO_INITDB_ROOT_PASSWORD
+              valueFrom: {secretKeyRef: {name: {{ include "daegam.secretName.mongo" . }}, key: password}}
+          ports:
+            - {name: mongo, containerPort: 27017}
+          volumeMounts:
+            - {name: data, mountPath: /data/db}
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - >-
+                  mongosh --quiet -u "$MONGO_INITDB_ROOT_USERNAME"
+                  -p "$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin
+                  --eval "db.runCommand({ping:1}).ok"
+            periodSeconds: 10
+            timeoutSeconds: 5
+          resources:
+            {{- toYaml $m.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- with $m.storageClass }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ $m.size }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,7 @@
+# helm package 가 묶지 않는 것
+.DS_Store
+.git/
+*.swp
+*.bak
+*.tmp
+*~

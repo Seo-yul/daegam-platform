@@ -1,0 +1,130 @@
+{{- /* 플랫폼 API. 셀렉터와 파드 템플릿의 라벨은 app 하나다. 산 객체를 그대로 받아들여야 하므로 바꾸지 않는다 (P85 3절) */ -}}
+{{- if eq .Values.target "home" }}
+{{- $docparseSha := include "daegam.docparseTokenSha" . }}
+{{- $mongoSha := include "daegam.mongoAuthSha" . }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: daegam-platform
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: daegam-platform
+    {{- include "daegam.labels" . | nindent 4 }}
+spec:
+  # 리컨실과 spec 작업 워커는 MongoDB 리스(findOneAndUpdate)를 잡으므로 복제가 여럿이어도 한 파드만 돈다 (P6 F6)
+  replicas: {{ .Values.platform.replicas }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxUnavailable: 0, maxSurge: 1}
+  selector:
+    matchLabels: {app: daegam-platform}
+  template:
+    metadata:
+      labels: {app: daegam-platform}
+      annotations:
+        # ConfigMap 의 체크섬. 설정만 바뀌어도 파드가 새 값으로 다시 떠 home Cluster 를 덮어쓴다
+        daegam.devops.ai.kr/config-sha: {{ include "daegam.configSha" . | quote }}
+        {{- with $docparseSha }}
+        daegam.devops.ai.kr/docparse-token-sha: {{ . | quote }}
+        {{- end }}
+        {{- with $mongoSha }}
+        # 차트가 만든 MongoDB 비밀번호의 체크섬. URL 이 바뀌면 새 URL 로 다시 뜬다
+        daegam.devops.ai.kr/mongo-auth-sha: {{ . | quote }}
+        {{- end }}
+    spec:
+      serviceAccountName: daegam-platform
+      automountServiceAccountToken: true
+      {{- include "daegam.pullSecrets" . | nindent 6 }}
+      # 노드가 여럿이면 복제를 나눠 둔다. 노드가 하나여도 해가 없다
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: {app: daegam-platform}
+      # Service daegam-platform 이 DAEGAM_PLATFORM_PORT=tcp://… 같은 서비스 링크 env 를 넣지 않게 끈다. DAEGAM_* 이름이
+      # 가려지는 일이 없게 하려는 것이다
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: platform
+          image: {{ include "daegam.image" (list . .Values.images.platform) }}
+          imagePullPolicy: {{ include "daegam.pullPolicy" (list . .Values.images.platform) }}
+          ports:
+            - {name: http, containerPort: 9000}
+          # D15: env 는 모두 ConfigMap 과 Secret 에서 온다. 글자로 적는 것은 네임스페이스 fieldRef 하나다
+          envFrom:
+            - configMapRef: {name: daegam-platform-config}
+            - secretRef: {name: {{ include "daegam.secretName.platform" . }}}
+          env:
+            - name: DAEGAM_NAMESPACE
+              valueFrom:
+                fieldRef: {fieldPath: metadata.namespace}
+            # 문서 파싱 서비스(D61)를 부를 토큰. 그 서비스와 나눠 갖는 Secret 의 키 하나만 받는다
+            - name: DAEGAM_DOCPARSE_TOKEN
+              valueFrom:
+                secretKeyRef: {name: {{ include "daegam.secretName.docparse" . }}, key: token}
+            {{- with .Values.platform.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          # 파드를 지울 때 엔드포인트 제거와 SIGTERM 이 같이 나가고, Ingress 컨트롤러가 그것을 알기까지 내려가는 파드로
+          # 요청이 가 502 가 된다. 몇 초 더 받아 그 창을 닫는다. 이미지에 셸도 sleep 도 없으므로(D55) 쿠버네티스의 sleep
+          # 동작이다. 초는 Agent 파드와 같다(platform/daegam/k8s/templates/agent.py 의 PRESTOP_SECONDS)
+          lifecycle:
+            preStop:
+              sleep: {seconds: 5}
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 20
+            initialDelaySeconds: 10
+          resources:
+            {{- toYaml .Values.platform.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            # 업로드 본문(python-multipart)과 HOME
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        # 업로드 본문이 노드 디스크에 쌓인다. 요청 하나는 본문 상한을 넘지 못하지만 동시 요청은 라우트가 남용 상한을 보기
+        # 전에 쌓이므로 상한을 둔다. 넘으면 이 파드만 축출된다
+        - name: tmp
+          emptyDir: {sizeLimit: 1Gi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: daegam-platform
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: daegam-platform
+    {{- include "daegam.labels" . | nindent 4 }}
+spec:
+  selector: {app: daegam-platform}
+  ports:
+    - {name: http, port: 9000, targetPort: http}
+{{- if include "daegam.pdb" .Values.platform }}
+---
+# 노드 비우기·업그레이드 같은 자발적 중단 동안 플랫폼 파드를 하나는 남긴다. 노드가 하나인 클러스터는 끈다. 두면 재부팅 전
+# drain 이 둘째 파드를 내보내지 못해 멈춘다 (D54). 복제가 하나면 켜 두어도 두지 않는다(daegam.pdb)
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: daegam-platform
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "daegam.labels" . | nindent 4 }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: {app: daegam-platform}
+{{- end }}
+{{- end }}

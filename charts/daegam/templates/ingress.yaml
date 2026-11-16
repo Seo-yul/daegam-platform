@@ -1,0 +1,51 @@
+{{- /*
+대감 호스트의 Ingress (D52). 같은 호스트에서 경로로 가르므로 CORS 가 없고 CSP 의 connect-src 'self' 도 그대로다.
+  /api/·/.well-known/·/healthz   daegam-platform:9000  API, 발급자 디스커버리·JWKS(D40·D41), probe
+  / 나머지                        daegam-ui:8080        UI 정적 빌드
+끝의 / 는 Traefik 의 Prefix 가 글자 단위이기 때문이다. /api 로 적으면 /apiary 같은 UI 경로까지 플랫폼이 먹는다. /healthz 를
+플랫폼에 두는 것은 호스트의 /healthz 로 확인하는 곳이 UI 의 index.html 200 을 받아 거짓으로 건강하다고 읽지 않게 하려는
+것이다. ingress.tls 가 edge 면 앞단 프록시가 TLS 를 끝내므로 tls 가 없다.
+*/ -}}
+{{- if eq .Values.target "home" }}
+{{- if .Values.ingress.enabled }}
+{{- $tls := .Values.ingress.tls }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: daegam-platform
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "daegam.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . | quote }}
+  {{- end }}
+  {{- if not (has $tls (list "none" "edge")) }}
+  tls:
+    - hosts: [{{ .Values.host | quote }}]
+      secretName: {{ $tls }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.host | quote }}
+      http:
+        paths:
+          {{- range list (list "/api/" "Prefix") (list "/.well-known/" "Prefix") (list "/healthz" "Exact") }}
+          - path: {{ index . 0 }}
+            pathType: {{ index . 1 }}
+            backend:
+              service:
+                name: daegam-platform
+                port: {number: 9000}
+          {{- end }}
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: daegam-ui
+                port: {number: 8080}
+{{- end }}
+{{- end }}
