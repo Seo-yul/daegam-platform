@@ -1,0 +1,13 @@
+# ToolHive operator chart values the platform depends on (P50 G1). `make operator-install` passes this
+# file on every install and upgrade, on the local cluster and on every other cluster, and it is the whole of the
+# release's user-supplied values: a value set by hand with `helm upgrade --set` is dropped by the
+# next `make operator-install`.
+operator:
+  env:
+    # Neither the operator nor the proxies it runs call Stacklok: no update check, and no usage
+    # metrics (each proxy posts its tool call count every 15 minutes when this is on). The proxies
+    # take both from the operator's run configurations.
+    - name: TOOLHIVE_SKIP_UPDATE_CHECK
+      value: "true"
+    - name: TOOLHIVE_USAGE_METRICS_ENABLED
+      value: "false"

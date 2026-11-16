@@ -1,0 +1,50 @@
+{
+ "21st-remote": {
+  "evidence": "sent in the `x-api-key` header",
+  "headers": [
+   {
+    "name": "x-api-key",
+    "description": "21st API key"
+   }
+  ]
+ },
+ "browserbase-remote": {
+  "evidence": "supplying a Browserbase API key as the required `browserbaseApiKey` query parameter",
+  "url_secret": true
+ },
+ "cloudflare-remote": {
+  "evidence": "supports OAuth and API token authentication; the catalog has no oauth_config, so the token goes in a header",
+  "headers": [
+   {
+    "name": "Authorization",
+    "description": "Bearer <API token>"
+   }
+  ]
+ },
+ "datadog-remote": {
+  "evidence": "API key and application key authentication",
+  "headers": [
+   {
+    "name": "DD-API-KEY",
+    "description": "Datadog API key"
+   },
+   {
+    "name": "DD-APPLICATION-KEY",
+    "description": "Datadog application key"
+   }
+  ]
+ },
+ "google-maps-remote": {
+  "evidence": "a Google Maps API key passed via the X-Goog-Api-Key header",
+  "headers": [
+   {
+    "name": "X-Goog-Api-Key",
+    "description": "Google Maps API key"
+   }
+  ]
+ },
+ "vastlint": {
+  "evidence": "public tools need no credentials; the optional header comes as a structured field",
+  "none": true
+ }
+}
