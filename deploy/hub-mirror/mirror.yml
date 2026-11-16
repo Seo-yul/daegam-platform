@@ -1,0 +1,75 @@
+# 허브 미러의 job (P55 6절). 이 저장소에서는 돌지 않는다. 허브 키만 든 private 저장소의
+# .github/workflows/ 에 두고 손으로 돌린다(README.md). 스크립트와 카탈로그 스냅숏은 공개 플랫폼 저장소
+# DAEGAM_REPOSITORY 의 커밋 DAEGAM_REF(40자 SHA)에서 받는다. 그 커밋은 허브 키로 도는 코드라 바뀌는 태그를
+# 받지 않고, 그 변수를 정하는 사람(이 저장소의 관리자)만 돌 코드를 정한다. 액션은 모두 커밋 SHA 로 고정한다.
+# 입력은 release-images.yml 처럼 env 로 읽고 셸이나 make 에 글로 끼워 넣지 않는다
+name: hub-mirror
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream:
+        description: upstream image reference with its tag
+        required: true
+      server:
+        description: catalog server name (empty for an image outside the catalog)
+        required: false
+        default: ""
+      approve:
+        description: approve an image whose catalog server has no provenance
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  mirror:
+    runs-on: ubuntu-24.04
+    env:
+      HUB_PREFIX: ${{ vars.HUB_PREFIX }}
+      DAEGAM_REF: ${{ vars.DAEGAM_REF }}
+    steps:
+      - name: registry
+        id: registry
+        run: |
+          [ -n "$HUB_PREFIX" ] || { echo "::error::변수 HUB_PREFIX(허브 접두사)가 있어야 한다"; exit 1; }
+          [[ "$DAEGAM_REF" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::변수 DAEGAM_REF 는 플랫폼 커밋의 40자 SHA 여야 한다"; exit 1; }
+          echo "host=${HUB_PREFIX%%/*}" >>"$GITHUB_OUTPUT"
+      # 공개 플랫폼 저장소(내보낸 것)라 토큰 없이 받는다
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ vars.DAEGAM_REPOSITORY }}
+          ref: ${{ vars.DAEGAM_REF }}
+          persist-credentials: false
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.3
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      # 의존성은 비밀이 없는 단계에서 잠금 파일 그대로 받는다. 아래 단계는 다시 받지 않는다
+      - name: dependencies
+        run: uv sync --project platform --frozen
+      # 허브 접두사 아래에만 올릴 수 있는 계정이다. 제품 이미지에는 올리지 못한다
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ steps.registry.outputs.host }}
+          username: ${{ secrets.HUB_PUSH_USERNAME }}
+          password: ${{ secrets.HUB_PUSH_PASSWORD }}
+      - name: hub key
+        env:
+          HUB_PRIVATE_KEY: ${{ secrets.HUB_PRIVATE_KEY }}
+        run: |
+          install -m 600 /dev/null "$RUNNER_TEMP/hub.key"
+          printf '%s\n' "$HUB_PRIVATE_KEY" >"$RUNNER_TEMP/hub.key"
+      - name: make hub-mirror
+        env:
+          UV_NO_SYNC: "1"
+          HUB_KEY: ${{ runner.temp }}/hub.key
+          COSIGN_PASSWORD: ${{ secrets.HUB_KEY_PASSWORD }}
+          HUB_UPSTREAM: ${{ inputs.upstream }}
+          HUB_SERVER: ${{ inputs.server }}
+          HUB_APPROVE: ${{ inputs.approve && 'yes' || '' }}
+        run: make hub-mirror
+      - name: remove the hub key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/hub.key"

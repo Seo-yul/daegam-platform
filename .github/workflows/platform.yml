@@ -1,0 +1,110 @@
+# CI(platform): MongoDB 서비스 컨테이너 + ruff + pytest. 로컬 등가: make lint / make test.
+# 테스트 워크플로는 영역별 파일 7개(platform, ui, mcp-runtime, agent-runtime, mock-oidc, web-tools, sandbox)다. 릴리스
+# 후보 태그(release-images 가 부른다), 수동(workflow_dispatch), 매주 한 번 돈다. 이 파일과 agent-runtime.yml 은 DB 가 있어야
+# 도는 갈래라 PR 에서도 pr-check 가 바뀐 경로를 보고 부른다. sandbox.yml 은 리눅스 전용 시험 때문에 sandbox/ 가 바뀌면
+# pr-check 가 부른다. 로컬 게이트 `make verify-changed` 는 시험용 DB 주소가 없으면 이 pytest 를 건너뛴다. 나머지 넷은
+# 로컬 게이트가 돌리므로 PR 에서 돌지 않는다.
+
+name: platform
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 20 * * 0" # 매주 월요일 05:00 KST
+  # 릴리스 후보 태그에서 release-images 가 이미지를 굽기 전에 부른다. ref 는 그 태그다
+  workflow_call:
+    inputs:
+      ref:
+        type: string
+        default: ""
+      # PR 의 pr-check 가 런타임만 바뀐 PR 에 런타임 파일을 읽는 시험만 넘긴다(scripts/verify_changed.sh store-lanes).
+      # 비우면 전부다
+      pytest_args:
+        type: string
+        default: ""
+      # pr-check 는 자기 lint 잡이 ruff·shellcheck 를 이미 돌리므로 false 로 부른다
+      lint:
+        type: boolean
+        default: true
+
+# 혼자 돌 때(매주, 손으로)도 기본 토큰은 읽기만 한다. release-images 와 pr-check 가 부를 때는 부른 쪽 권한을 넘지 않는다
+permissions:
+  contents: read
+
+concurrency:
+  # 불릴 때 github.ref 는 부른 쪽 것이라, 손으로 돌린 release-images 가 매주 실행과 그룹을 나누지 않게 ref 입력을 먼저 쓴다
+  group: platform-${{ inputs.ref || github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_FROZEN: "1" # uv.lock 과 pyproject 가 어긋나면 실패한다 (lock 을 같이 커밋한다)
+  # 차트 시험(platform/tests/test_chart_*.py)이 helm 으로 렌더한다 (P85 12절). e2e-cluster.yml 과 같은 판이고, 이 잡은
+  # x86_64 러너라 linux-amd64 묶음의 체크섬이다
+  HELM_VERSION: v3.21.4
+  HELM_SHA256: 61f88ab166748cb19604d7884cb100ae9ccb13804ddeb98e08af167eacbb6a14
+
+jobs:
+  platform:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    services:
+      mongo:
+        image: mongo:7
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.runCommand({ping:1}).ok'"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+          --tmpfs /data/db
+    defaults:
+      run:
+        working-directory: platform
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: platform/uv.lock
+          python-version: "3.12"
+      - name: uv sync
+        run: uv sync
+      # 시험은 helm 이 없으면 건너뛰지 않고 실패한다. 받은 묶음은 체크섬이 맞을 때만 푼다
+      - name: helm
+        if: github.event_name != 'schedule'
+        working-directory: .
+        run: |
+          bin="$RUNNER_TEMP/bin"
+          mkdir -p "$bin"
+          curl -fsSL -o "$RUNNER_TEMP/helm.tgz" "https://get.helm.sh/helm-$HELM_VERSION-linux-amd64.tar.gz"
+          echo "$HELM_SHA256  $RUNNER_TEMP/helm.tgz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/helm.tgz" -C "$RUNNER_TEMP" linux-amd64/helm
+          mv "$RUNNER_TEMP/linux-amd64/helm" "$bin/helm"
+          chmod +x "$bin/helm"
+          echo "$bin" >>"$GITHUB_PATH"
+      - name: ruff
+        if: inputs.lint != false
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
+      # 셸 스크립트 lint(P64, make lint-scripts). 호스팅 Ubuntu 러너에는 shellcheck 가 들어 있다
+      - name: shellcheck
+        if: inputs.lint != false
+        working-directory: .
+        run: make lint-scripts
+      # 릴리스 후보 태그, PR(pr-check 가 부를 때), 수동 실행에서 돈다(매주 실행은 lint 만 돈다). 2 vCPU 러너라 xdist
+      # 워커는 둘이다(넷이면 앱을 세우는 준비가 CPU 를 다퉈 더 느렸다). Mongo 의 데이터 디렉터리는 tmpfs 다(위 services).
+      # 러너에서만 몇 분씩 기다리는 시험이 있어 rc10 은 pytest 만 30분, rc11 은 40분을 넘겼으므로 시한을 60분으로
+      # 둔다. 느린 시험 목록(--durations)과 240초를 넘게 도는 시험의 스택(faulthandler_timeout)을 남겨 그 시험을
+      # 찾는다. faulthandler 는 스택만 찍고 시험을 실패로 만들지 않는다
+      - name: pytest
+        if: github.event_name != 'schedule'
+        env:
+          DAEGAM_TEST_MONGO_URL: mongodb://localhost:27017
+          PYTEST_ARGS: ${{ inputs.pytest_args }}
+        run: |
+          read -ra selected <<<"$PYTEST_ARGS"
+          uv run pytest -q -n 2 --durations=30 -o faulthandler_timeout=240 "${selected[@]}"

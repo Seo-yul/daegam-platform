@@ -1,0 +1,316 @@
+# 릴리스 이미지(D53, D66). 릴리스 태그를 올리면 돈다. 손으로 다시 돌릴 수도 있다. 태그 꼴이 할 일을 정한다.
+#   X.Y.Z-rcN  candidate: 그 태그의 코드로 테스트 워크플로 일곱과 클러스터 e2e 잡을 먼저 돌리고, 모두 통과하면 제품
+#              이미지를 굽고 레지스트리에 올려 서명한다. make push-images 를 그대로 돌리므로 태그·서명·취약점 보고는 개발
+#              머신에서 올릴 때와 같다(docs/guide/images.md 3절)
+#   X.Y.Z      promote: 굽지 않는다. 그 정식 태그가 가리키는 Release 병합 커밋이 합친 후보 태그를 읽고, 후보 이미지의
+#              서명을 확인한 뒤 같은 digest 에 정식 태그를 붙인다(scripts/promote-images.sh). 서명 키를 쓰지 않는다
+# 태그를 올리면 GitHub 는 그 태그 커밋에 든 이 파일을 읽는다. 이 파일이 없는 커밋의 태그는 손으로 돌린다.
+# Secrets 이름과 키 다루기는 docs/guide/images.md 9절, 까닭과 위험은 D66 에 있다.
+# arm64 실행기에서 arm64 만 굽는다(QEMU 없음). 서명 키를 다루므로 액션을 커밋 해시로 고정한다. 해시 옆 주석이 그 해시의 판이다
+
+name: release-images
+
+# 레지스트리(호스트/프로젝트)는 Secrets 의 REGISTRY 다. 설치 주소를 저장소 파일에 두지 않고, Secrets 라 로그에서도 가려진다.
+# 호스트만 찍히는 자리는 잡마다 ::add-mask:: 로 가린다(make push-images·promote-images 도 이 값을 쓴다).
+# Secrets 다섯(REGISTRY, REGISTRY_USERNAME, REGISTRY_PASSWORD, COSIGN_PRIVATE_KEY, COSIGN_PASSWORD)은 environment
+# release 에 둔다. 그 environment 를 쓰는 잡은 route, candidate, promote 셋뿐이고, environment 의 배포 규칙이 릴리스 태그
+# (*.*.*)와 손으로 돌릴 기본 브랜치만 받는다. 다른 워크플로와 브랜치의 잡은 그 값을 받지 못한다
+
+on:
+  # *.*.* 는 rc 태그도 잡는다. 어느 잡이 돌지는 route 가 정규식으로 정한다
+  push:
+    tags: ["*.*.*"]
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "원격에 올린 릴리스 태그 (1.0.0-rc1, 1.0.0)"
+        required: true
+      rebuild:
+        description: "이미 레지스트리에 있는 후보 태그를 다시 굽는다 (설치본 확인 뒤에는 쓰지 않는다)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-images
+  cancel-in-progress: false
+
+jobs:
+  # 태그를 셸에 식으로 넣지 않고 env 로만 읽는다
+  route:
+    runs-on: ubuntu-latest
+    environment: release
+    outputs:
+      release: ${{ steps.kind.outputs.release }}
+      kind: ${{ steps.kind.outputs.kind }}
+      sha: ${{ steps.sha.outputs.sha }}
+    steps:
+      - id: kind
+        env:
+          RELEASE: ${{ github.event_name == 'push' && github.ref_name || inputs.release }}
+        run: |
+          if [[ $RELEASE =~ ^[0-9]+\.[0-9]+\.[0-9]+-rc[0-9]+$ ]]; then kind=candidate
+          elif [[ $RELEASE =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then kind=promote
+          else echo "::error::release 는 X.Y.Z 나 X.Y.Z-rcN 꼴이어야 한다"; exit 1; fi
+          { echo "release=$RELEASE"; echo "kind=$kind"; } >>"$GITHUB_OUTPUT"
+      # Secrets 가 빠졌으면 테스트와 클러스터 e2e 가 Actions 시간을 쓰기 전에 여기서 멈춘다. 값은 찍지 않는다
+      - name: check the secrets
+        env:
+          KIND: ${{ steps.kind.outputs.kind }}
+          HAS_SIGNING: ${{ secrets.COSIGN_PRIVATE_KEY != '' && secrets.COSIGN_PASSWORD != '' }}
+          HAS_REGISTRY: ${{ secrets.REGISTRY != '' && secrets.REGISTRY_USERNAME != '' && secrets.REGISTRY_PASSWORD != '' }}
+        run: |
+          [ "$HAS_REGISTRY" = true ] || { echo "::error::Secrets 에 REGISTRY·REGISTRY_USERNAME·REGISTRY_PASSWORD 가 있어야 한다"; exit 1; }
+          [ "$KIND" != candidate ] || [ "$HAS_SIGNING" = true ] \
+            || { echo "::error::후보는 Secrets 에 COSIGN_PRIVATE_KEY·COSIGN_PASSWORD 가 있어야 한다"; exit 1; }
+      # 태그가 가리키는 커밋을 한 번만 푼다. 테스트와 굽기가 같은 커밋을 보게 한다
+      - id: sha
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE: ${{ steps.kind.outputs.release }}
+          REPO: ${{ github.repository }}
+        run: echo "sha=$(gh api "repos/$REPO/commits/refs/tags/$RELEASE" --jq .sha)" >>"$GITHUB_OUTPUT"
+
+  # 굽기 전에 그 태그의 코드로 테스트 워크플로 일곱을 돌린다. PR 에서는 이 테스트가 돌지 않으므로 여기가 깨끗한
+  # Linux 에서 릴리스를 막는 실행이다. 하나라도 실패하면 candidate 가 돌지 않는다
+  test-platform:
+    needs: route
+    if: needs.route.outputs.kind == 'candidate'
+    uses: ./.github/workflows/platform.yml
+    with:
+      ref: ${{ needs.route.outputs.sha }}
+  test-agent-runtime:
+    needs: route
+    if: needs.route.outputs.kind == 'candidate'
+    uses: ./.github/workflows/agent-runtime.yml
+    with:
+      ref: ${{ needs.route.outputs.sha }}
+  test-mcp-runtime:
+    needs: route
+    if: needs.route.outputs.kind == 'candidate'
+    uses: ./.github/workflows/mcp-runtime.yml
+    with:
+      ref: ${{ needs.route.outputs.sha }}
+  test-mock-oidc:
+    needs: route
+    if: needs.route.outputs.kind == 'candidate'
+    uses: ./.github/workflows/mock-oidc.yml
+    with:
+      ref: ${{ needs.route.outputs.sha }}
+  test-ui:
+    needs: route
+    if: needs.route.outputs.kind == 'candidate'
+    uses: ./.github/workflows/ui.yml
+    with:
+      ref: ${{ needs.route.outputs.sha }}
+  test-web-tools:
+    needs: route
+    if: needs.route.outputs.kind == 'candidate'
+    uses: ./.github/workflows/web-tools.yml
+    with:
+      ref: ${{ needs.route.outputs.sha }}
+  test-sandbox:
+    needs: route
+    if: needs.route.outputs.kind == 'candidate'
+    uses: ./.github/workflows/sandbox.yml
+    with:
+      ref: ${{ needs.route.outputs.sha }}
+  # 같은 태그의 코드로 일회용 k3d 클러스터 위에서 e2e 를 조각으로 나눠 돌린다(조각은 e2e-cluster.yml
+  # 머리말, docs/guide/e2e.md 20절). 조각 하나라도 실패하면 candidate 가 돌지 않는다. 태그 메시지의 e2e: 줄이 고른
+  # 게이트도 막고, scripts/lib/e2e_select.py 의 NOT_BLOCKING_YET 게이트만 실패해도 막지 않는다
+  e2e-cluster:
+    needs: route
+    if: needs.route.outputs.kind == 'candidate'
+    uses: ./.github/workflows/e2e-cluster.yml
+    with:
+      ref: ${{ needs.route.outputs.sha }}
+      release: ${{ needs.route.outputs.release }}
+
+  # 기본은 arm64 실행기에서 arm64 만 굽는다(QEMU 없음).
+  # make push-images 의 PUSH_PLATFORMS 기본이 linux/arm64 다. amd64 는 이 파일 끝에 주석으로 둔 잡이 켤 때만 굽는다
+  candidate:
+    needs: [route, test-platform, test-agent-runtime, test-mcp-runtime, test-mock-oidc, test-ui, test-web-tools, test-sandbox, e2e-cluster]
+    if: needs.route.outputs.kind == 'candidate'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    environment: release
+    env:
+      REGISTRY: ${{ secrets.REGISTRY }}
+      RELEASE: ${{ needs.route.outputs.release }}
+      REBUILD: ${{ inputs.rebuild || false }}
+    steps:
+      # 굽기 전에 멈출 것을 먼저 본다. 입력은 셸에 식으로 넣지 않고 env 로만 읽는다
+      - name: check the release tag and secrets
+        id: registry
+        env:
+          HAS_KEY: ${{ secrets.COSIGN_PRIVATE_KEY != '' }}
+          HAS_PASSWORD: ${{ secrets.COSIGN_PASSWORD != '' }}
+          HAS_REGISTRY: ${{ secrets.REGISTRY_USERNAME != '' && secrets.REGISTRY_PASSWORD != '' }}
+        run: |
+          [ "$HAS_KEY" = true ] && [ "$HAS_PASSWORD" = true ] && [ "$HAS_REGISTRY" = true ] \
+            || { echo "::error::Secrets 에 COSIGN_PRIVATE_KEY·COSIGN_PASSWORD·REGISTRY_USERNAME·REGISTRY_PASSWORD 가 모두 있어야 한다"; exit 1; }
+          [ -n "$REGISTRY" ] || { echo "::error::Secrets 에 REGISTRY(호스트/프로젝트)가 있어야 한다"; exit 1; }
+          echo "::add-mask::${REGISTRY%%/*}"
+          echo "host=${REGISTRY%%/*}" >>"$GITHUB_OUTPUT"
+      # 도장(scripts/build-stamp.sh)은 HEAD 의 트리에서 나와 이력이 없어도 되지만, 태그와 이력을 다 받아 둔다
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.route.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      # cosign 3 은 cosign-installer v4 부터 설치된다. 판은 개발 머신과 맞춘다
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.3
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ steps.registry.outputs.host }}
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+      # 후보 태그가 이미 있으면 굽지 않는다. 설치본을 확인한 뒤 다시 구우면 후보 태그가 확인하지 않은 digest 로 움직인다
+      - name: refuse to move a candidate tag
+        run: |
+          . scripts/lib/images.sh
+          for c in $COMPONENTS; do
+            read -r name _ <<<"$(spec "$c")"
+            # 없다는 답(not found)만 없는 것으로 친다. 다른 실패(인증·네트워크·5xx)는 있는지 모르므로 멈춘다
+            if out="$(docker buildx imagetools inspect "$REGISTRY/$name:$RELEASE" 2>&1)"; then
+              [ "$REBUILD" = true ] || { echo "::error::$name:$RELEASE 가 이미 있다. 다시 구우려면 rebuild 로 손으로 돌린다"; exit 1; }
+            elif ! grep -qiE 'not found|manifest unknown' <<<"$out"; then
+              echo "::error::$name:$RELEASE 가 있는지 확인하지 못했다: $out"; exit 1
+            fi
+          done
+      # 키 파일은 다른 사용자가 읽지 못해야 서명 스크립트가 받는다. 다른 액션의 본 단계가 다 돈 뒤에 만들고, 그 액션들의
+      # 뒷정리 단계보다 먼저 지운다
+      - name: signing key
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+        run: |
+          install -m 600 /dev/null "$RUNNER_TEMP/cosign.key"
+          printf '%s\n' "$COSIGN_PRIVATE_KEY" >"$RUNNER_TEMP/cosign.key"
+      - name: make push-images
+        env:
+          COSIGN_KEY: ${{ runner.temp }}/cosign.key
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+        run: make push-images RELEASE="$RELEASE"
+      - name: remove the signing key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/cosign.key"
+
+  # ---- amd64 (지금은 굽지 않는다) ----
+  # amd64 노드가 생기면 에뮬레이션 대신 amd64 실행기에서 따로 굽고, 두 아키텍처를 한 인덱스로 묶어 그 인덱스에 서명한다.
+  # 켜는 방법(돌려 본 적 없는 초안이라 처음 켤 때 release 후보 하나로 확인한다):
+  #   1. candidate 의 make push-images 단계 env 에 PUSH_TAG_SUFFIX: -arm64 를 더한다. 두 굽기가 같은 태그를 덮지 않게
+  #      아키텍처마다 꼬리를 단 태그(판·도장·릴리스 + -arm64 / -amd64)를 올리고, 보고는 묶은 뒤로 미룬다
+  #   2. 아래 candidate-amd64 와 candidate-index 의 주석을 푼다
+  #   3. scripts/resolve-images.sh 는 --arch 의 판을 인덱스에서 찾아 digest 로 고정하므로 바꿀 것이 없다(scripts/lib/image_pin.py)
+  #
+  # candidate-amd64:
+  #   needs: [route, test-platform, test-agent-runtime, test-mcp-runtime, test-mock-oidc, test-ui, test-web-tools, test-sandbox, e2e-cluster]
+  #   if: needs.route.outputs.kind == 'candidate'
+  #   runs-on: ubuntu-latest
+  #   timeout-minutes: 90
+  #   environment: release
+  #   env:
+  #     REGISTRY: ${{ secrets.REGISTRY }}
+  #     RELEASE: ${{ needs.route.outputs.release }}
+  #   steps:
+  #     # candidate 와 같은 앞 단계: check the release tag and secrets, checkout(fetch-depth 0), cosign-installer,
+  #     # login-action, refuse to move a candidate tag, signing key
+  #     - name: make push-images (amd64)
+  #       env:
+  #         COSIGN_KEY: ${{ runner.temp }}/cosign.key
+  #         COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+  #         PUSH_PLATFORMS: linux/amd64
+  #         PUSH_TAG_SUFFIX: -amd64
+  #       run: make push-images RELEASE="$RELEASE"
+  #     - name: remove the signing key
+  #       if: always()
+  #       run: rm -f "$RUNNER_TEMP/cosign.key"
+  #
+  # candidate-index:
+  #   needs: [route, candidate, candidate-amd64]
+  #   runs-on: ubuntu-24.04-arm
+  #   timeout-minutes: 30
+  #   environment: release
+  #   env:
+  #     REGISTRY: ${{ secrets.REGISTRY }}
+  #     RELEASE: ${{ needs.route.outputs.release }}
+  #   steps:
+  #     # 앞 단계: checkout(ref route sha, fetch-depth 0), cosign-installer, login-action, signing key
+  #     # 판 번호는 scripts/lib/images.sh 의 기본값이다. Makefile 의 *_VERSION 만 올렸으면 그 값을 env 로 넘긴다
+  #     - name: one index per image, signed
+  #       env:
+  #         COSIGN_KEY: ${{ runner.temp }}/cosign.key
+  #         COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+  #       run: |
+  #         . scripts/lib/images.sh
+  #         . scripts/lib/signing.sh
+  #         signing_ready
+  #         for c in $COMPONENTS; do
+  #           read -r name _ _ version <<<"$(spec "$c")"
+  #           stamp="$(sh scripts/build-stamp.sh "$c")"
+  #           repo="$REGISTRY/$name"
+  #           docker buildx imagetools create -t "$repo:$version" -t "$repo:$stamp" -t "$repo:$RELEASE" \
+  #             "$repo:$stamp-arm64" "$repo:$stamp-amd64"
+  #           digest="$(docker buildx imagetools inspect "$repo:$stamp" --format '{{json .Manifest.Digest}}' | tr -d '"')"
+  #           sign_image "$repo@$digest" "$name" "$stamp"
+  #         done
+  #         bash scripts/image-report.sh
+  #     - name: remove the signing key
+  #       if: always()
+  #       run: rm -f "$RUNNER_TEMP/cosign.key"
+
+  promote:
+    needs: route
+    if: needs.route.outputs.kind == 'promote'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: release
+    env:
+      REGISTRY: ${{ secrets.REGISTRY }}
+      RELEASE: ${{ needs.route.outputs.release }}
+    steps:
+      # 스크립트는 이 워크플로가 돈 커밋(태그 푸시면 그 태그, 손으로 돌리면 기본 브랜치)에서 쓴다. 이 스크립트가 없던
+      # 때의 후보도 올릴 수 있게 하려는 것이다. 태그는 fetch-depth 0 으로 함께 받는다
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      # 정식 태그는 git merge -S <후보 태그> 로 만든 Release 병합 커밋이어야 한다. 병합 커밋의 mergetag 가 합친 후보
+      # 태그 이름을 담는다. 두 번째 부모가 그 후보 커밋이고 트리가 같아야 하며, 후보는 공개된 pre-release 여야 한다
+      - name: find the merged candidate
+        id: rc
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          commit="$(git rev-parse "refs/tags/$RELEASE^{commit}")"
+          git rev-parse -q --verify "$commit^2" >/dev/null || { echo "::error::$RELEASE 는 병합 커밋이 아니다"; exit 1; }
+          rc="$(git cat-file -p "$commit" | awk '/^mergetag /{m=1; next} m && /^ tag /{print $2; exit} m && !/^ /{m=0}')"
+          [[ $rc =~ ^[0-9]+\.[0-9]+\.[0-9]+-rc[0-9]+$ ]] || { echo "::error::$RELEASE 의 병합 커밋에 후보 태그(mergetag)가 없다"; exit 1; }
+          [ "$(git rev-parse "$rc^{commit}")" = "$(git rev-parse "$commit^2")" ] || { echo "::error::$rc 가 병합한 커밋과 다르다"; exit 1; }
+          git diff --quiet "$commit^2" "$commit" || { echo "::error::$RELEASE 가 $rc 와 다른 코드를 담는다"; exit 1; }
+          [ "$(gh release view "$rc" -R "$GITHUB_REPOSITORY" --json isPrerelease -q .isPrerelease)" = true ] \
+            || { echo "::error::$rc 가 공개된 pre-release 가 아니다"; exit 1; }
+          echo "rc=$rc" >>"$GITHUB_OUTPUT"
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.3
+      - name: registry host
+        id: registry
+        run: |
+          [ -n "$REGISTRY" ] || { echo "::error::Secrets 에 REGISTRY(호스트/프로젝트)가 있어야 한다"; exit 1; }
+          echo "::add-mask::${REGISTRY%%/*}"
+          echo "host=${REGISTRY%%/*}" >>"$GITHUB_OUTPUT"
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ steps.registry.outputs.host }}
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+      - name: promote-images
+        env:
+          RC: ${{ steps.rc.outputs.rc }}
+        run: bash scripts/promote-images.sh "$RC" "$RELEASE"

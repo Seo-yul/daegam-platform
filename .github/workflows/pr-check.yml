@@ -1,0 +1,179 @@
+# PR 검사. 몇 분 안에 끝나는 정적 검사(파이썬 프로젝트 다섯의 ruff 검사와 포맷, 셸 스크립트 shellcheck, ui 의 tsc)에
+# 더해, DB 가 있어야 도는 시험 갈래를 PR 마다 여기서 돌린다. 로컬 게이트(`make verify-changed`)는 시험용 DB 주소가
+# 없으면 그 갈래를 건너뛰고, 이 검사가 GitHub 의 서비스 컨테이너로 돌린다.
+#   platform       platform.yml 을 부른다(Mongo). 갈래는 scripts/verify_changed.sh 의 store-lanes 가 정한다: ui/·문서·런타임
+#                  밖의 파일(platform/, deploy/, scripts/, Makefile, .github/ 등)이 바뀌면 시험 전부, 런타임만 바뀌면
+#                  런타임 파일을 읽는 시험(runtime-link-tests)만이다
+#   agent-runtime  agent-runtime.yml 을 부른다(Postgres·Redis). agent-runtime/, Makefile, 이 파일이나 agent-runtime.yml 이
+#                  바뀌었을 때다
+#   sandbox        sandbox.yml 을 부른다. DB 는 없지만 샌드박스 서버의 리눅스 전용 시험을 macOS 의 로컬 게이트가 건너뛰므로
+#                  여기서 돈다. sandbox/, 이 파일이나 sandbox.yml 이 바뀌었을 때다
+# 세 워크플로는 lint: false 로 부른다. ruff·shellcheck 는 아래 lint 잡이 돌린다.
+# DB 가 필요 없는 ui·mcp-runtime·web-tools·mock-oidc 의 시험은 로컬 게이트가 돌리고, 일곱 워크플로 모두는 릴리스 후보
+# 태그에서 다시 돈다. PR 에서는 갈래를 바뀐 경로로 고르고, 런타임만 바뀐 PR 은 런타임 파일을 읽는 platform 시험만
+# 돌린다. 이미 통과한 트리는 다시 돌리지 않는다: PR 의 head 가 이미 develop 에 있거나,
+# 새 head 의 트리가 검사를 모두 통과한 앞 head 의 트리와 같을 때다(로컬 squash 가 head 를 바꿀 때). 건너뛴 까닭은 실행
+# 요약에 남는다. 문서(docs/, 루트 *.md, .claude/skills/)만 바꾼 PR 에서는 이 검사가 돌지 않는다. 시험은 PR 의 merge
+# 미리보기 커밋(refs/pull/N/merge)에서 돈다. 합칠 때 head 는 develop 위에 있으므로 트리가 같다.
+# check/** 브랜치 푸시에서도 돈다(P82). 그 브랜치에는 풀 리퀘스트 브랜치를 develop 에 합친 트리가 올라오고, 그때는
+# 바뀐 경로를 보지 않고 갈래를 모두 돌린다.
+
+name: pr-check
+
+on:
+  pull_request:
+    # 코드가 읽는 Markdown(assistant knowledge, skill fixture, docs 밖의 README)은 걸러 내지 않고 route 가 고른다.
+    # GitHub 경로 필터에서 * 는 / 를 넘지 않으므로 "*.md" 는 루트의 것만이다
+    paths-ignore:
+      - "docs/**"
+      - "*.md"
+      - ".claude/skills/**"
+  # 경로 필터를 두지 않는다. check/** 에는 develop 과 다른 트리만 올라온다
+  push:
+    branches: ["check/**"]
+
+permissions:
+  contents: read
+  pull-requests: read
+  # 같은 트리를 건너뛸 때 앞 head 의 검사 결과(check-runs)를 읽는다
+  checks: read
+
+concurrency:
+  group: pr-check-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_FROZEN: "1"
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: "**/uv.lock"
+          python-version: "3.12"
+      # 프로젝트마다 자기 lock 의 ruff 를 쓴다. dev 그룹만 깔아 앱 의존성은 받지 않는다
+      - name: ruff
+        run: |
+          for d in platform agent-runtime mcp-runtime web-tools deploy/dev/mock-oidc sandbox; do
+            (cd "$d" && uv run --only-dev ruff check . && uv run --only-dev ruff format --check .)
+          done
+      # 로컬 게이트와 같은 대상을 부른다. ubuntu-latest 에는 shellcheck 가 들어 있다
+      - name: shellcheck
+        run: make lint-scripts
+
+  ui-types:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: ui
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npx tsc -b
+
+  # 바뀐 파일로 DB 시험 갈래를 고른다. 파일 목록은 API 로 읽어 전체 이력을 받지 않는다. 입력은 셸에 식으로 넣지 않고
+  # env 로만 읽는다. shell: bash 라 pipefail 이 켜지고, store-lanes 의 출력은 꼴을 확인한 뒤에만 쓴다. check/** 푸시는
+  # PR 번호도 고를 것도 없이 갈래를 모두 돌린다
+  route:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      platform: ${{ steps.lanes.outputs.platform }}
+      platform_tests: ${{ steps.lanes.outputs.platform_tests }}
+      agent_runtime: ${{ steps.lanes.outputs.agent_runtime }}
+      sandbox: ${{ steps.lanes.outputs.sandbox }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: lanes
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          BASE: ${{ github.event.pull_request.base.ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          ACTION: ${{ github.event.action }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          skip() {
+            echo "::notice::no test lanes: $1"
+            echo "No test lanes ran: $1" >>"$GITHUB_STEP_SUMMARY"
+            { echo platform=false; echo platform_tests=; echo agent_runtime=false; echo sandbox=false; } >>"$GITHUB_OUTPUT"
+            exit 0
+          }
+          if [ "$EVENT" = push ]; then
+            echo "::notice::push to $GITHUB_REF_NAME: every test lane runs"
+            { echo platform=true; echo platform_tests=; echo agent_runtime=true; echo sandbox=true; } >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          status="$(gh api "repos/$REPO/compare/$BASE...$HEAD_SHA" --jq .status)"
+          if [ "$status" = identical ] || [ "$status" = behind ]; then
+            skip "head ${HEAD_SHA:0:8} is already on $BASE ($status)"
+          fi
+          if [ "$ACTION" = synchronize ] && [ -n "$BEFORE" ]; then
+            tree() { gh api "repos/$REPO/commits/$1" --jq .commit.tree.sha; }
+            before_tree="$(tree "$BEFORE")"
+            head_tree="$(tree "$HEAD_SHA")"
+            if [ -n "$before_tree" ] && [ "$before_tree" = "$head_tree" ]; then
+              not_green="$(gh api "repos/$REPO/commits/$BEFORE/check-runs?per_page=100" \
+                --jq '[.check_runs[] | select((.conclusion // "") | IN("success", "skipped", "neutral") | not)] | length')"
+              total="$(gh api "repos/$REPO/commits/$BEFORE/check-runs?per_page=100" --jq '.total_count')"
+              if [ "$not_green" = 0 ] && [ "$total" -gt 0 ]; then
+                skip "head ${HEAD_SHA:0:8} has the same tree as ${BEFORE:0:8}, whose $total checks all passed"
+              fi
+            fi
+          fi
+          gh api --paginate "repos/$REPO/pulls/$PR/files?per_page=100" \
+            --jq '.[] | .filename, (.previous_filename // empty)' >"$RUNNER_TEMP/changed"
+          files="$(gh api "repos/$REPO/pulls/$PR" --jq .changed_files)"
+          echo "changed files: $files"
+          if [ "$files" -ge 3000 ]; then
+            # API 가 3,000개까지만 돌려주므로 목록을 믿지 않고 둘 다 돌린다
+            echo "::notice::$files changed files (the API lists at most 3,000): every test lane runs"
+            { echo platform=true; echo platform_tests=; echo agent_runtime=true; echo sandbox=true; } >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          bash scripts/verify_changed.sh store-lanes <"$RUNNER_TEMP/changed" >"$RUNNER_TEMP/lanes"
+          cat "$RUNNER_TEMP/lanes"
+          if ! grep -qxE 'platform=(true|false)' "$RUNNER_TEMP/lanes" ||
+            ! grep -qxE 'agent_runtime=(true|false)' "$RUNNER_TEMP/lanes" ||
+            ! grep -qxE 'sandbox=(true|false)' "$RUNNER_TEMP/lanes" ||
+            ! grep -qxE 'platform_tests=[A-Za-z0-9_./ -]*' "$RUNNER_TEMP/lanes"; then
+            echo "::error::store-lanes printed an unexpected answer"
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/lanes" >>"$GITHUB_OUTPUT"
+
+  test-platform:
+    needs: route
+    if: needs.route.outputs.platform == 'true'
+    uses: ./.github/workflows/platform.yml
+    with:
+      pytest_args: ${{ needs.route.outputs.platform_tests }}
+      lint: false
+
+  test-agent-runtime:
+    needs: route
+    if: needs.route.outputs.agent_runtime == 'true'
+    uses: ./.github/workflows/agent-runtime.yml
+    with:
+      lint: false
+
+  test-sandbox:
+    needs: route
+    if: needs.route.outputs.sandbox == 'true'
+    uses: ./.github/workflows/sandbox.yml
+    with:
+      lint: false

@@ -1,0 +1,50 @@
+# CI(web-tools): ruff + pytest. 언제 도는지는 platform.yml 과 같다.
+
+name: web-tools
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 20 * * 0" # 매주 월요일 05:00 KST
+  # 릴리스 후보 태그에서 release-images 가 이미지를 굽기 전에 부른다. ref 는 그 태그다
+  workflow_call:
+    inputs:
+      ref:
+        type: string
+        default: ""
+
+# 혼자 돌 때(매주, 손으로)도 기본 토큰은 읽기만 한다. release-images 와 pr-check 가 부를 때는 부른 쪽 권한을 넘지 않는다
+permissions:
+  contents: read
+
+concurrency:
+  # 불릴 때 github.ref 는 부른 쪽 것이라, 손으로 돌린 release-images 가 매주 실행과 그룹을 나누지 않게 ref 입력을 먼저 쓴다
+  group: web-tools-${{ inputs.ref || github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_FROZEN: "1"
+
+jobs:
+  web-tools:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: web-tools
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: web-tools/uv.lock
+          python-version: "3.12"
+      - run: uv sync
+      - name: ruff
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
+      - name: pytest
+        run: uv run pytest -q

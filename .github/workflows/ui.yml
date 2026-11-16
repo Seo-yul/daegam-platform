@@ -1,0 +1,86 @@
+# CI(ui): 잡 하나에서
+# npm ci, tsc -b, vitest, build, openapi-typescript 드리프트 검사, Playwright 스모크를 차례로 한다.
+# 예전에는 ui 와 ui-smoke 가 잡 둘이었는데 체크아웃·npm ci 가 두 번 들어 합쳤다.
+# 드리프트 검사는 platform 앱에서 openapi.json 을 뽑아 schema.d.ts 를 재생성한 뒤 git diff --exit-code 다
+# (로컬 등가: make ui-types). 스모크는 목 API 9300 + vite 4173 이다 (make e2e-ui-smoke).
+
+name: ui
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 20 * * 0" # 매주 월요일 05:00 KST
+  # 릴리스 후보 태그에서 release-images 가 이미지를 굽기 전에 부른다. ref 는 그 태그다
+  workflow_call:
+    inputs:
+      ref:
+        type: string
+        default: ""
+
+# 혼자 돌 때(매주, 손으로)도 기본 토큰은 읽기만 한다. release-images 와 pr-check 가 부를 때는 부른 쪽 권한을 넘지 않는다
+permissions:
+  contents: read
+
+concurrency:
+  # 불릴 때 github.ref 는 부른 쪽 것이라, 손으로 돌린 release-images 가 매주 실행과 그룹을 나누지 않게 ref 입력을 먼저 쓴다
+  group: ui-${{ inputs.ref || github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_FROZEN: "1"
+
+jobs:
+  ui:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: npm ci
+        working-directory: ui
+        run: npm ci --no-audit --no-fund
+      - name: typecheck
+        working-directory: ui
+        run: npx tsc -b
+      - name: vitest
+        working-directory: ui
+        run: npx vitest run
+      - name: build
+        working-directory: ui
+        run: npm run build
+      # --- openapi-typescript 드리프트 ---
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: platform/uv.lock
+          python-version: "3.12"
+      - name: uv sync (platform)
+        working-directory: platform
+        run: uv sync
+      - name: regenerate ui/src/api/schema.d.ts
+        run: make ui-types
+      - name: schema.d.ts must be committed
+        run: |
+          git diff --exit-code -- ui/src/api/schema.d.ts || {
+            echo "::error::ui/src/api/schema.d.ts is out of date. Run 'make ui-types' and commit the result."
+            exit 1
+          }
+      # --- Playwright 스모크 (같은 node_modules 재사용) ---
+      - name: cache playwright browsers
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('ui/package-lock.json') }}
+      - name: playwright OS deps (러너에만 필요. 브라우저 본체는 위 캐시)
+        working-directory: ui
+        run: npx playwright install-deps chromium
+      - name: install chromium
+        run: make ui-e2e-install
+      - name: playwright smoke (목 API 9300 + vite 4173)
+        run: make e2e-ui-smoke

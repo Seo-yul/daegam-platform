@@ -1,0 +1,643 @@
+# 클러스터 e2e. arm64 실행기 안에 k3d 로 일회용 k3s 클러스터를 띄우고, 이미지를 그 자리에서 구워 노드에
+# 넣은 뒤 ToolHive 오퍼레이터·플랫폼(대감 차트, deploy/dev/values-local.yaml 의 header 모드)·lab 을 올려 e2e 를 돌린다.
+# 잡은 matrix 조각으로 나뉘어 나란히 돌고, 조각마다 자기 실행기와 클러스터를 쓴다. 한 잡에 다 넣으면 게이트 시간이 더해져
+# candidate 가 그만큼 더 기다릴 수 있다.
+#   core   막는 게이트 e2e-instance·e2e-gateway(cert-manager 를 올려 STEP 16 까지). 고르면 e2e-llm-gateway. 그 뒤 차트의
+#          기본 값 설치(P85 12절)에 대고 e2e-install 과 업그레이드, MongoDB root 사용자 가드를 보고, 끝에 k3d 클러스터를
+#          지우고 e2e-netpol(kind 와 Calico)
+#   agent  막는 게이트 e2e-chat·e2e-agent(header 모드, stub provider, lab Postgres. STEP 10m 의 두 파드도 이 노드에
+#          뜬다). 고르면 e2e-agent-redis·e2e-chat-redis·e2e-knowledge·e2e-assistant(e2e-assistant-oidc 를 함께 고르면 돌지
+#          않는다)·e2e-ui-full(Playwright, ingress)
+#   auth   인증 모드를 바꾸는 게이트만 두고, 그 가운데 하나라도 고를 때만 뜬다. e2e-mcp-auth·e2e-agent-oidc·
+#          e2e-assistant-oidc·e2e-oidc-platform(mock-oidc 파드)·e2e-agent-local. 게이트마다 모드를 바꾸고 EXIT trap 으로
+#          되돌리므로 header 모드 게이트와 한 클러스터를 나누지 않는다
+#   sandbox  e2e-sandbox 를 고를 때만 뜬다(샌드박스 이미지를 함께 굽는다). 게이트가 ConfigMap 을 고치고 플랫폼과
+#          daegam-docparse 를 한 벌씩으로 줄여 노드의 메모리를 작업 공간에 비우므로 다른 게이트와 클러스터를 나누지 않는다
+#   provisioning  e2e-provisioning 이나 e2e-evaluation 을 고를 때만 뜬다. e2e-provisioning 은 local 모드와 쉬는 창,
+#          매일 깨우기의 주기, 플랫폼 스위치를 ConfigMap 에서 바꿔 Agent 를 재우고 깨우므로 다른 게이트와 클러스터를
+#          나누지 않는다(P44). e2e-evaluation(P45)이 그 뒤에 같은 조각에서 header 모드 그대로 돈다. 평가 미리 보기도
+#          테넌트의 미리 보기 자리를 쓰므로 미리 보기를 띄우는 두 게이트를 한 클러스터에 모은다
+#   exchange  e2e-exchange 를 고를 때만 뜬다. 게이트가 local 모드로 바꾸고 게시된 Gateway 를 여러 번 다시 배포하며
+#          재적용이 사슬을 따라오기를 기다리므로 다른 게이트와 클러스터를 나누지 않는다(P57)
+# 늘 도는 게이트가 아닌 것은 후보 태그 메시지의 `e2e:` 줄이 이름이나 all 로 고를 때만 돈다. plan 잡이 그 줄을
+# scripts/lib/e2e_select.py 로 matrix 로 바꾸고, 게이트마다의 시간 상한도 거기 있다. 고른 게이트는 실패하면 조각을
+# 막는다. 새로 더해 k3d 에서 아직 통과하지 못한 게이트(soft_gates, 지금은 e2e-llm-gateway, e2e-sandbox, e2e-provisioning,
+# e2e-oidc-platform, e2e-exchange, e2e-evaluation 이고 목록은 e2e_select.py 의 NOT_BLOCKING_YET 이다)만 실패해도 막지
+# 않고, 그 실패는 경고와 잡 요약에 남는다(docs/guide/e2e.md 20절).
+# release-images 가 릴리스 후보 태그에서 테스트 워크플로 일곱과 나란히 부르고, 조각 하나라도 실패하면 candidate 가
+# 돌지 않는다(docs/guide/e2e.md 20절). 로컬 OrbStack 흐름과 같은 make 대상을 부르고 KUBE_CONTEXT 만 k3d 의 컨텍스트로
+# 바꾼다. 사내 방화벽이 없으므로 DAEGAM_CA_FILE 은 쓰지 않는다. 나누기 전 한 잡으로 잰 시간과 메모리는
+# docs/archive/reviews/2026-10-26-k3d-e2e-spike.md 에 있다.
+#   이미지      로컬처럼 docker build 로 굽고 k3d image import --mode direct 로 노드의 containerd 에 넣은 뒤 있는지
+#               본다. dev-<id> 태그는 노드에 없으므로 deploy-local 에 판 태그(PLATFORM_TAG·UI_TAG)를 준다. 새
+#               클러스터라 같은 태그의 옛 이미지가 없다. Agent 런타임 이미지는 모든 조각이 굽는다. core 의 기본 값
+#               설치에 대고 도는 e2e-install STEP 8 도 Agent 를 띄운다
+#   Traefik     k3s 에 딸린 것(kube-system)을 끄고 로컬처럼 Helm 으로 traefik 네임스페이스에 둔다. 플랫폼 ConfigMap 의
+#               컨트롤러 네임스페이스가 traefik 이고, k3s 는 NetworkPolicy 를 집행하므로 노출 정책이 그 네임스페이스를 연다
+#   spec2openapi  image-s2o·image-lab·lab-up 이 ../spec2openapi 를 읽으므로 S2O_VERSION 의 태그를 그 자리에 받는다
+# 조각마다 단계와 고른 게이트별로 걸린 시간과 그동안의 메모리 최댓값(MemTotal - MemAvailable)을 표로 남긴다(마지막
+# 단계, 잡 요약에도 쓴다).
+
+name: e2e-cluster
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        type: string
+        default: ""
+      # 후보 태그 이름. plan 잡이 그 태그 메시지의 e2e: 줄을 읽는다
+      release:
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-cluster-${{ inputs.ref || github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_FROZEN: "1"
+  # 판과 체크섬을 함께 고정한다. kubectl 은 클러스터와 판 차이가 하나 안이어야 한다
+  K3D_VERSION: v5.9.0
+  K3D_SHA256: 03cde5cf23e6e8e67de5a039ecf26e5b85aca82fba3e5d13dadf904cd218a250
+  K3S_IMAGE: rancher/k3s:v1.36.5-k3s1
+  KUBECTL_VERSION: v1.36.5
+  KUBECTL_SHA256: 88fc1aca8fd0c1b44fe379f67c39bd6858bdfc50241dc55775f84d0f5b31da3a
+  HELM_VERSION: v3.21.4
+  HELM_SHA256: b54c04b4e0b2540bbdc08c17a121dab70e9a2ed0de5705528fec68a5fd3b85a7
+  # e2e-netpol 의 kind. 노드 이미지는 kubectl 과 판 차이가 하나 안인 1.36 을 digest 로 고정한다(scripts/e2e_netpol.sh 가 읽는다)
+  KIND_VERSION: v0.33.0
+  KIND_SHA256: 20022bee6cfcd5086cb7234d218e3454e6090022f2a8f55d1fa7fcf42c3867a2
+  KIND_NODE_IMAGE: kindest/node:v1.36.4@sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed
+  TRAEFIK_CHART_VERSION: 41.6.1
+  S2O_REF: v0.5.0
+  CLUSTER: daegam
+  KUBE_CONTEXT: k3d-daegam
+
+jobs:
+  # 태그 메시지의 e2e: 줄을 조각 matrix 로 바꾼다. 태그가 서명된 annotated 태그가 아니면 실패한다(릴리스
+  # 절차가 그렇게 만든다). 고른 것은 잡 요약에 남는다
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          sparse-checkout: scripts/lib/e2e_select.py
+          sparse-checkout-cone-mode: false
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE: ${{ inputs.release }}
+        run: |
+          object="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE" --jq '.object.type + " " + .object.sha')"
+          [ "${object%% *}" = tag ] || { echo "::error::$RELEASE is not an annotated tag ($object)"; exit 1; }
+          gh api "repos/$GITHUB_REPOSITORY/git/tags/${object#* }" --jq .message >"$RUNNER_TEMP/message"
+          { echo "#### e2e gates of $RELEASE"; echo; echo '```'
+            python3 scripts/lib/e2e_select.py check <"$RUNNER_TEMP/message"
+            echo '```'; } | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "matrix=$(python3 scripts/lib/e2e_select.py matrix <"$RUNNER_TEMP/message")" >>"$GITHUB_OUTPUT"
+
+  e2e:
+    needs: plan
+    name: e2e (${{ matrix.shard }})
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 135
+    strategy:
+      # 한 조각이 실패해도 다른 조각은 끝까지 돌아 자기 결과를 남긴다. 어느 조각이든 실패하면 부른 잡이 실패한다
+      fail-fast: false
+      # 조각마다 shard, mock_oidc(mock-oidc 이미지와 파드), ui(Node 와 Playwright),
+      # sandbox_image(코드 실행 작업 공간의 이미지),
+      # netpol_minutes(e2e-netpol 의 상한, 0 이면 돌지 않는다), blocking_gates(막는 고른 게이트, `게이트:분` 목록),
+      # soft_gates(아직 막지 않는 고른 게이트), kill_grace(상한이 지나 TERM 을 보낸 뒤 KILL 까지의 분)다
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      # 2초마다 쓰는 메모리(MiB)를 적는다. 단계는 시작할 때 MARK 줄을 남기고, 마지막 단계가 MARK 사이마다 최댓값을 본다
+      - name: memory sampler
+        run: |
+          MEMLOG="$RUNNER_TEMP/mem.log"
+          echo "MEMLOG=$MEMLOG" >>"$GITHUB_ENV"
+          echo "MARK setup $(date +%s)" >"$MEMLOG"
+          # 안쪽 bash 가 2초마다 풀어야 하므로 작은따옴표로 넘긴다
+          # shellcheck disable=SC2016
+          nohup bash -c 'while :; do
+            echo "$(date +%s) $(awk "/^MemTotal:/{t=\$2} /^MemAvailable:/{a=\$2} END{print int((t-a)/1024)}" /proc/meminfo)"
+            sleep 2
+          done' >>"$MEMLOG" 2>/dev/null &
+          nproc; free -m; df -h / /var/lib/docker 2>/dev/null || df -h /
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+      - name: spec2openapi
+        run: git clone -q --depth 1 --branch "$S2O_REF" https://github.com/Seo-yul/spec2openapi.git ../spec2openapi
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: platform/uv.lock
+          python-version: "3.12"
+      # e2e-gateway STEP 9i 의 미러가 시험 키로 서명한다 (P55 F8). 판은 release-images 와 같다
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        if: ${{ matrix.shard == 'core' }}
+        with:
+          cosign-release: v3.1.3
+      - name: tools
+        run: |
+          echo "MARK tools $(date +%s)" >>"$MEMLOG"
+          bin="$RUNNER_TEMP/bin"; mkdir -p "$bin"
+          curl -fsSL -o "$bin/k3d" "https://github.com/k3d-io/k3d/releases/download/$K3D_VERSION/k3d-linux-arm64"
+          curl -fsSL -o "$bin/kubectl" "https://dl.k8s.io/release/$KUBECTL_VERSION/bin/linux/arm64/kubectl"
+          curl -fsSL -o "$RUNNER_TEMP/helm.tgz" "https://get.helm.sh/helm-$HELM_VERSION-linux-arm64.tar.gz"
+          sha256sum -c - <<EOF
+          $K3D_SHA256  $bin/k3d
+          $KUBECTL_SHA256  $bin/kubectl
+          $HELM_SHA256  $RUNNER_TEMP/helm.tgz
+          EOF
+          tar -xzf "$RUNNER_TEMP/helm.tgz" -C "$RUNNER_TEMP" linux-arm64/helm
+          mv "$RUNNER_TEMP/linux-arm64/helm" "$bin/helm"
+          chmod +x "$bin/k3d" "$bin/kubectl" "$bin/helm"
+          echo "$bin" >>"$GITHUB_PATH"
+      - name: uv sync (platform)
+        working-directory: platform
+        run: |
+          echo "MARK uv-sync $(date +%s)" >>"$MEMLOG"
+          uv sync
+      # e2e-ui-full 만 쓰는 준비라 실패해도 다음 단계로 간다. 늘 도는 게이트는 그대로 돌고, e2e-ui-full 은 돌지 않고
+      # 실패로 남아 조각을 실패시킨다. 브라우저는 캐시하지 않는다. ui.yml 의 캐시 키는 x64 실행기의 것이고, 이 잡은 후보 태그에서만 돈다
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        id: node
+        if: ${{ matrix.ui }}
+        continue-on-error: true
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: playwright
+        id: playwright
+        if: ${{ matrix.ui }}
+        continue-on-error: true
+        working-directory: ui
+        run: |
+          echo "MARK playwright $(date +%s)" >>"$MEMLOG"
+          npm ci --no-audit --no-fund
+          npx playwright install-deps chromium
+          npx playwright install chromium
+      # 조각의 게이트가 쓰는 이미지만 굽는다. web-tools 이미지는 어느 게이트도 띄우지 않는다. 샌드박스 이미지는 sandbox
+      # 조각이 쓴다. mock-oidc 이미지는 아래 mock-oidc 단계가 굽는다
+      - name: build images
+        env:
+          SANDBOX_IMAGE: ${{ matrix.sandbox_image }}
+        run: |
+          echo "MARK images $(date +%s)" >>"$MEMLOG"
+          targets=(image-s2o image-runtime image-lab image-platform image-ui image-agent)
+          if [ "$SANDBOX_IMAGE" = true ]; then targets+=(image-sandbox); fi
+          make "${targets[@]}"
+          docker images --format '{{.Repository}}:{{.Tag}} {{.Size}}' | grep -E '^(daegam-|spec2openapi)'
+      # e2e-gateway STEP 9i 의 허브 레지스트리 (P55 F8, scripts/hub_e2e_registry.sh). 노드의 containerd 가 그 CA 를 믿도록
+      # 클러스터를 만들기 전에 인증서와 registries.yaml 을 둔다. 레지스트리의 두 단계는 실패해도 다음으로 가고, 실패는 STEP 9i 만
+      # 실패로 센다(E2E_HUB_EXPECTED 는 있는데 E2E_HUB_DIR 가 없다). 다른 게이트와 e2e-gateway 의 다른 STEP 은 그대로 돈다
+      - name: hub registry certs
+        if: ${{ matrix.shard == 'core' }}
+        continue-on-error: true
+        run: |
+          echo "E2E_HUB_EXPECTED=1" >>"$GITHUB_ENV"
+          bash scripts/hub_e2e_registry.sh certs "$RUNNER_TEMP/hub"
+          echo "E2E_HUB_CERTS=$RUNNER_TEMP/hub" >>"$GITHUB_ENV"
+      - name: create the k3d cluster
+        run: |
+          echo "MARK cluster $(date +%s)" >>"$MEMLOG"
+          hub=()
+          if [ -n "${E2E_HUB_CERTS:-}" ]; then
+            hub=(--registry-config "$E2E_HUB_CERTS/registries.yaml" --volume "$E2E_HUB_CERTS/ca.crt:/etc/daegam-hub/ca.crt@server:*")
+          fi
+          k3d cluster create "$CLUSTER" --image "$K3S_IMAGE" --k3s-arg '--disable=traefik@server:*' ${hub[@]+"${hub[@]}"} \
+            --wait --timeout 180s
+          kubectl --context "$KUBE_CONTEXT" get nodes -o wide
+      # TLS zot(k3d-hub:5000)을 클러스터의 docker 네트워크에 띄우고 upstream registry 를 러너에 띄운다. 러너의 /etc/hosts 와
+      # CoreDNS 가 k3d-hub 를 찾는다
+      - name: hub registry
+        if: ${{ matrix.shard == 'core' && env.E2E_HUB_CERTS != '' }}
+        continue-on-error: true
+        run: |
+          echo "MARK hub-registry $(date +%s)" >>"$MEMLOG"
+          bash scripts/hub_e2e_registry.sh up "$E2E_HUB_CERTS" "k3d-$CLUSTER" "$KUBE_CONTEXT"
+          echo "E2E_HUB_DIR=$E2E_HUB_CERTS" >>"$GITHUB_ENV"
+      # tools 노드를 거치면 그 tar 가 먼저 지워져 넣지 못하고도 0 으로 끝날 때가 있다. 노드에 바로 넣고, 구운
+      # 이미지가 모두 노드의 containerd 에 있는지 본다
+      - name: import images
+        env:
+          SANDBOX_IMAGE: ${{ matrix.sandbox_image }}
+        run: |
+          echo "MARK import $(date +%s)" >>"$MEMLOG"
+          images=(daegam-platform:0.1.0 daegam-ui:0.1.0 daegam-mcp-runtime:0.1.0 daegam-agent-runtime:0.1.0
+            daegam-stub-spec-server:dev daegam-mock-soap:dev daegam-mock-petstore:dev daegam-header-echo:dev)
+          # 플랫폼의 기본 샌드박스 이미지다(platform/daegam/k8s/templates/sandbox.py DEFAULT_SANDBOX_IMAGE)
+          if [ "$SANDBOX_IMAGE" = true ]; then images+=(daegam-sandbox:0.1.0); fi
+          # k3d 가 성공이라 찍고도 노드에 이미지가 빠진 적이 있다(1.1.0-rc7 core 하나, rc8 auth 다섯). 빠진
+          # 것만 한 번 더 넣고 다시 본다
+          missing=("${images[@]}")
+          for attempt in 1 2; do
+            [ "$attempt" = 1 ] || echo "::warning::not in the k3d node after import, importing again: ${missing[*]}"
+            k3d image import -c "$CLUSTER" --mode direct "${missing[@]}"
+            have="$(docker exec "k3d-$CLUSTER-server-0" crictl images -o json)"
+            left=()
+            for i in "${missing[@]}"; do
+              grep -q "\"docker.io/library/$i\"" <<<"$have" || left+=("$i")
+            done
+            missing=(${left[@]+"${left[@]}"})
+            [ "${#missing[@]}" -gt 0 ] || break
+          done
+          for i in ${missing[@]+"${missing[@]}"}; do echo "::error::$i is not in the k3d node"; done
+          [ "${#missing[@]}" -eq 0 ]
+      - name: traefik
+        run: |
+          echo "MARK traefik $(date +%s)" >>"$MEMLOG"
+          helm repo add traefik https://traefik.github.io/charts >/dev/null
+          helm --kube-context "$KUBE_CONTEXT" upgrade -i traefik traefik/traefik --version "$TRAEFIK_CHART_VERSION" \
+            -n traefik --create-namespace --wait --timeout 180s
+          kubectl --context "$KUBE_CONTEXT" -n traefik get svc traefik
+      # e2e-ui-full 은 브라우저가 밟는 길(ingress 의 호스트)로 들어간다. 다른 게이트는 curl --resolve 로 같은 IP 에
+      # 못 박으므로 /etc/hosts 가 필요 없다
+      - name: hosts
+        id: hosts
+        if: ${{ matrix.ui }}
+        continue-on-error: true
+        run: |
+          host="$(bash -c '. scripts/lib/hosts.sh && local_host')"
+          ip=""
+          for _ in $(seq 30); do
+            ip="$(kubectl --context "$KUBE_CONTEXT" -n traefik get svc traefik -o jsonpath='{.status.loadBalancer.ingress[0].ip}')"
+            [ -n "$ip" ] && break
+            sleep 2
+          done
+          [ -n "$ip" ] || { echo "::error::traefik has no LoadBalancer IP"; exit 1; }
+          echo "$ip $host" | sudo tee -a /etc/hosts
+      - name: make operator-install
+        run: |
+          echo "MARK operator $(date +%s)" >>"$MEMLOG"
+          make operator-install KUBE_CONTEXT="$KUBE_CONTEXT"
+      # 자체 서명 ClusterIssuer 가 있으면 e2e-gateway STEP 16 이 SKIP 대신 cert-manager 경로를 실제로 돈다. agent·auth 조각의
+      # 게이트는 쓰지 않는다
+      - name: make cert-manager-up
+        if: ${{ matrix.shard == 'core' }}
+        run: |
+          echo "MARK cert-manager $(date +%s)" >>"$MEMLOG"
+          make cert-manager-up KUBE_CONTEXT="$KUBE_CONTEXT"
+      # 대감 차트를 deploy/dev/values-local.yaml 로 설치한다. Secret 셋은 차트가 만든다(P85 16절)
+      - name: make deploy-local
+        id: deploy
+        run: |
+          echo "MARK deploy $(date +%s)" >>"$MEMLOG"
+          make deploy-local KUBE_CONTEXT="$KUBE_CONTEXT" PLATFORM_TAG=0.1.0 UI_TAG=0.1.0
+      # oidc 로 바꾸는 게이트(e2e-mcp-auth, e2e-agent-oidc, e2e-assistant-oidc, e2e-oidc-platform)의 토큰을 낸다. 플랫폼
+      # ConfigMap 의 발급자가 이 파드다
+      - name: mock-oidc
+        if: ${{ matrix.mock_oidc }}
+        run: |
+          echo "MARK mock-oidc $(date +%s)" >>"$MEMLOG"
+          make image-mock-oidc
+          k3d image import -c "$CLUSTER" --mode direct daegam-mock-oidc:0.1.0
+          docker exec "k3d-$CLUSTER-server-0" crictl images -o json | grep -q '"docker.io/library/daegam-mock-oidc:0.1.0"'
+          kubectl --context "$KUBE_CONTEXT" apply -f deploy/dev/mock-oidc.yaml
+          kubectl --context "$KUBE_CONTEXT" -n daegam-system rollout status deploy/mock-oidc --timeout=180s
+      - name: make lab-up
+        id: lab
+        run: |
+          echo "MARK lab $(date +%s)" >>"$MEMLOG"
+          make lab-up KUBE_CONTEXT="$KUBE_CONTEXT"
+      # core 조각
+      - name: make e2e-instance
+        if: ${{ !cancelled() && steps.lab.outcome == 'success' && matrix.shard == 'core' }}
+        run: |
+          echo "MARK e2e-instance $(date +%s)" >>"$MEMLOG"
+          make e2e-instance KUBE_CONTEXT="$KUBE_CONTEXT"
+      - name: make e2e-gateway
+        if: ${{ !cancelled() && steps.lab.outcome == 'success' && matrix.shard == 'core' }}
+        run: |
+          echo "MARK e2e-gateway $(date +%s)" >>"$MEMLOG"
+          make e2e-gateway KUBE_CONTEXT="$KUBE_CONTEXT"
+      # agent 조각
+      - name: make e2e-chat
+        if: ${{ !cancelled() && steps.lab.outcome == 'success' && matrix.shard == 'agent' }}
+        run: |
+          echo "MARK e2e-chat $(date +%s)" >>"$MEMLOG"
+          make e2e-chat KUBE_CONTEXT="$KUBE_CONTEXT"
+      # E2E_LLM_PROVIDER 를 주지 않으므로 실제 모델 STEP 11 은 조건부 SKIP(cond_skip)이라 세지 않고 게이트는 0 으로
+      # 끝난다
+      - name: make e2e-agent
+        if: ${{ !cancelled() && steps.lab.outcome == 'success' && matrix.shard == 'agent' }}
+        run: |
+          echo "MARK e2e-agent $(date +%s)" >>"$MEMLOG"
+          make e2e-agent KUBE_CONTEXT="$KUBE_CONTEXT"
+      # 태그가 고른 게이트. 늘 도는 게이트가 실패했으면 돌지 않는다. 그래야 아래 진단이 실패한 게이트가 남긴 것(e2e-agent
+      # 의 support-e2e 는 e2e-agent-redis 가 같은 이름으로 덮는다)을 본다. 게이트마다 시간 상한(timeout, 끝나면 TERM 을
+      # 받아 EXIT trap 이 돌고, kill_grace 분 뒤에 KILL)이 있다. blocking_gates 는 하나가 실패해도 나머지를 돈 뒤 조각을
+      # 실패시키고, soft_gates 는 실패해도 막지 않는다. 막지 않는 실패의 이름은 진단과 요약이 읽는다. E2E_SHARED_STEPS=skip 은
+      # 늘 도는 e2e-agent·e2e-chat 이 이 후보에서 보는 단계를 변형 게이트(e2e-agent-oidc·-local·-redis, e2e-chat-redis)가
+      # 조건부로 건너뛰게 한다(docs/guide/e2e.md 3·4절). 손으로 돌리는 게이트는 모든 단계를 돈다
+      - name: picked gates
+        if: ${{ success() && (matrix.blocking_gates != '' || matrix.soft_gates != '') }}
+        env:
+          E2E_SHARED_STEPS: skip
+          PICKED: ${{ matrix.blocking_gates }}
+          SOFT: ${{ matrix.soft_gates }}
+          GRACE: ${{ matrix.kill_grace }}
+          UI_READY: ${{ steps.node.outcome == 'success' && steps.playwright.outcome == 'success' && steps.hosts.outcome == 'success' }}
+        run: |
+          failed=""
+          # run_gate NAME MINUTES BLOCKS(1|0)
+          run_gate() {
+            local g="$1" minutes="$2" blocks="$3" why="" rc=0
+            echo "MARK $g $(date +%s)" >>"$MEMLOG"
+            if [ "$g" = e2e-ui-full ] && [ "$UI_READY" != true ]; then
+              why="its setup (node, playwright or hosts) failed"
+            else
+              echo "::group::make $g (at most $minutes min)"
+              timeout -k "${GRACE}m" "${minutes}m" make "$g" KUBE_CONTEXT="$KUBE_CONTEXT" || rc=$?
+              echo "::endgroup::"
+              case "$rc" in
+                0) ;;
+                124) why="timed out after $minutes min" ;;
+                137) why="timed out after $minutes min and killed after $GRACE more" ;;
+                *) why="exit $rc" ;;
+              esac
+            fi
+            [ -n "$why" ] || return 0
+            # 막든 막지 않든 e2e-ui-full 이 실패하면 그 결과(ui/test-results)를 올린다
+            [ "$g" != e2e-ui-full ] || echo "UI_FULL_FAILED=1" >>"$GITHUB_ENV"
+            if [ "$blocks" = 1 ]; then
+              echo "::error::$g failed on k3d: $why"
+              failed="$failed $g"
+            else
+              echo "::warning::$g failed on k3d: $why (not blocking until its first pass)"
+              echo "$g" >>"$RUNNER_TEMP/soft-failed"
+              echo "SOFT_FAILED=1" >>"$GITHUB_ENV"
+            fi
+          }
+          for entry in $PICKED; do run_gate "${entry%%:*}" "${entry##*:}" 1; done
+          for entry in $SOFT; do run_gate "${entry%%:*}" "${entry##*:}" 0; done
+          [ -z "$failed" ] || { echo "picked gates failed:$failed"; exit 1; }
+      # 게이트가 실패했을 때 돈다(늘 도는 게이트가 실패했으면 고른 게이트는 돌지 않았다). 실패한 게이트의 Agent 파드가
+      # 남아 있어 런타임 로그를 읽을 수 있다. core 조각에서는 고르는 파드가 없다. 막지 않는 게이트만 실패한 조각을 이
+      # 단계가 실패시키지 않게 막지 않는다
+      - name: diagnostics
+        if: ${{ !cancelled() && (failure() || env.SOFT_FAILED == '1') }}
+        continue-on-error: true
+        run: |
+          echo "MARK diagnostics $(date +%s)" >>"$MEMLOG"
+          k=(kubectl --context "$KUBE_CONTEXT")
+          "${k[@]}" get pods -A -o wide || true
+          "${k[@]}" get events -A --sort-by=.lastTimestamp 2>/dev/null | tail -n 80 || true
+          "${k[@]}" -n daegam-system logs deploy/daegam-platform --tail=200 || true
+          "${k[@]}" -n toolhive-system logs deploy/toolhive-operator --tail=100 || true
+          # 코드 실행 작업 공간 파드(sandbox 조각)의 상태와 마지막 종료다
+          "${k[@]}" get pods -A -l daegam.devops.ai.kr/resource=sandbox -o wide 2>/dev/null || true
+          "${k[@]}" get pods -A -l daegam.devops.ai.kr/resource=sandbox -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name} {.status.containerStatuses[0].restartCount} {.status.containerStatuses[0].lastState.terminated.reason} {.status.containerStatuses[0].lastState.terminated.exitCode}{"\n"}{end}' 2>/dev/null || true
+          "${k[@]}" get pods -A -l daegam.devops.ai.kr/resource=agent-instance --no-headers \
+            -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name 2>/dev/null |
+            while read -r ns pod; do
+              echo "--- $ns/$pod"
+              "${k[@]}" -n "$ns" logs "$pod" -c agent --tail=150 </dev/null || true
+            done
+      - name: e2e-ui-full results
+        if: ${{ !cancelled() && env.UI_FULL_FAILED == '1' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: e2e-ui-full-test-results
+          path: ui/test-results
+          retention-days: 7
+          if-no-files-found: ignore
+      # 차트의 기본 값 설치 (P85 12절). core 조각의 고른 게이트와 진단 뒤에 deploy-local 의 릴리스를 지우고, 남은
+      # Secret 셋과 PVC 를 확인한 뒤 daegam-system 을 지운다. 그것들도 네임스페이스와 함께 간다. 그 뒤 차트를 기본 값에
+      # host, Ingress 의 TLS Secret(자체 서명), 노드에 넣은 이미지의 접두 docker.io/library 와 IfNotPresent 만 더해
+      # restricted 를 집행하는 네임스페이스에 설치하고, 차트가 만든 첫 관리자로 e2e 관리자를 만든다. 이 잡의 로그는
+      # 공개다. 차트가 만든 비밀번호와 토큰은 읽자마자 ::add-mask:: 로 가리고, helm 은 --debug 와 --dry-run=server 없이
+      # 부른다. 그 출력은 만든 Secret 을 싣기 때문이다. 단계마다의 timeout-minutes 합은 scripts/lib/e2e_select.py 의
+      # DEFAULT_INSTALL 이다
+      - name: chart default-values install
+        id: chart_install
+        if: ${{ !cancelled() && matrix.shard == 'core' && steps.deploy.outcome == 'success' }}
+        timeout-minutes: 14
+        run: |
+          # 지우기, 네임스페이스 지우기, 설치, 관리자 만들기의 시간은 요약 표에 따로 남는다(MARK)
+          echo "MARK chart-uninstall $(date +%s)" >>"$MEMLOG"
+          k=(kubectl --context "$KUBE_CONTEXT")
+          h=(helm --kube-context "$KUBE_CONTEXT")
+          ns=daegam-system
+          "${h[@]}" uninstall daegam -n "$ns" --wait --timeout 3m
+          # helm uninstall 이 남기는 것: 차트가 만든 Secret 셋(keep)과 MongoDB 의 PVC
+          "${k[@]}" -n "$ns" get secret daegam-platform-secrets daegam-docparse-token daegam-mongo-auth -o name
+          "${k[@]}" -n "$ns" get pvc data-mongodb-0 -o name
+          echo "MARK chart-namespace $(date +%s)" >>"$MEMLOG"
+          "${k[@]}" delete namespace "$ns" --timeout=3m
+          echo "MARK chart-install $(date +%s)" >>"$MEMLOG"
+          host="$(bash -c '. scripts/lib/hosts.sh && local_host')"
+          openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj "/CN=$host" -addext "subjectAltName=DNS:$host" \
+            -keyout "$RUNNER_TEMP/tls.key" -out "$RUNNER_TEMP/tls.crt" 2>/dev/null
+          "${k[@]}" create namespace "$ns"
+          "${k[@]}" label namespace "$ns" pod-security.kubernetes.io/enforce=restricted
+          "${k[@]}" -n "$ns" create secret tls daegam-tls --cert "$RUNNER_TEMP/tls.crt" --key "$RUNNER_TEMP/tls.key"
+          cat >"$RUNNER_TEMP/default-values.yaml" <<EOF
+          host: $host
+          ingress:
+            tls: daegam-tls
+          images:
+            registry: docker.io/library
+            pullPolicy: IfNotPresent
+          EOF
+          "${h[@]}" upgrade --install daegam charts/daegam -n "$ns" -f "$RUNNER_TEMP/default-values.yaml" --wait --timeout 6m
+          echo "MARK chart-admin $(date +%s)" >>"$MEMLOG"
+          secret() { "${k[@]}" -n "$ns" get secret "$1" -o "jsonpath={.data.$2}" | base64 -d; }
+          admin="$(secret daegam-platform-secrets DAEGAM_LOCAL_BOOTSTRAP_USERNAME)"
+          admin_pw="$(secret daegam-platform-secrets DAEGAM_LOCAL_BOOTSTRAP_PASSWORD)"
+          echo "::add-mask::$admin_pw"
+          echo "::add-mask::$(secret daegam-mongo-auth password)"
+          echo "::add-mask::$(secret daegam-docparse-token token)"
+          new_pw="$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')"
+          e2e_first="$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')"
+          e2e_pw="$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')"
+          for v in "$new_pw" "$e2e_first" "$e2e_pw"; do echo "::add-mask::$v"; done
+          # 브라우저가 밟는 길: 클러스터의 기본 IngressClass(Traefik)가 TLS 를 끝내고 /healthz 를 플랫폼으로 보낸다.
+          # e2e-install 은 Ingress 를 지나지 않으므로 여기서 실패해도 경고만 남기고 간다
+          ip="$("${k[@]}" -n traefik get svc traefik -o jsonpath='{.status.loadBalancer.ingress[0].ip}')"
+          curl -fsS -m 10 --cacert "$RUNNER_TEMP/tls.crt" --resolve "$host:443:$ip" "https://$host/healthz" \
+            || echo "::warning::https://$host/healthz through Traefik did not answer (default IngressClass, TLS Secret)"
+          echo
+          # 첫 관리자로 들어가 첫 로그인의 비밀번호 바꾸기를 지나고, e2e 전용 platform-admin 을 만들어 그 바꾸기도 끝낸다.
+          # 값은 환경으로만 넘겨 명령줄에 남기지 않는다
+          "${k[@]}" -n "$ns" port-forward svc/daegam-platform 19000:9000 >/dev/null 2>&1 &
+          pf=$!
+          for _ in $(seq 30); do curl -fsS -m 2 -o /dev/null http://127.0.0.1:19000/healthz && break; sleep 1; done
+          API=http://127.0.0.1:19000/api ADMIN="$admin" ADMIN_PW="$admin_pw" NEW_PW="$new_pw" E2E_USER=e2e-admin \
+            E2E_FIRST="$e2e_first" E2E_PW="$e2e_pw" python3 - <<'EOF'
+          import json, os, urllib.error, urllib.request
+
+          e = os.environ
+
+          def post(path, body, token=None):
+              headers = {"Content-Type": "application/json"}
+              if token:
+                  headers["Authorization"] = f"Bearer {token}"
+              req = urllib.request.Request(e["API"] + path, json.dumps(body).encode(), headers, method="POST")
+              try:
+                  with urllib.request.urlopen(req, timeout=20) as r:
+                      return json.load(r)
+              except urllib.error.HTTPError as err:
+                  raise SystemExit(f"POST {path} -> {err.code}")
+
+          def sign_in(user, password, new):
+              out = post("/auth/login", {"username": user, "password": password})
+              if out["must_change_password"]:
+                  body = {"current_password": password, "new_password": new}
+                  out = post("/auth/password", body, out["access_token"])
+              return out["access_token"]
+
+          token = sign_in(e["ADMIN"], e["ADMIN_PW"], e["NEW_PW"])
+          post("/users", {"username": e["E2E_USER"], "password": e["E2E_FIRST"], "platform_admin": True}, token)
+          sign_in(e["E2E_USER"], e["E2E_FIRST"], e["E2E_PW"])
+          print(f"signed in as the first admin; created the platform-admin {e['E2E_USER']} and changed its password")
+          EOF
+          kill "$pf"
+          # e2e-install 이 읽는 설치 값 파일과 e2e 관리자의 비밀번호. 비밀번호는 다음 단계만 읽는 0600 파일에 두고 잡의
+          # 환경($GITHUB_ENV)에는 넣지 않는다
+          (umask 077; printf '%s' "$e2e_pw" >"$RUNNER_TEMP/e2e-install.pw")
+          cat >"$RUNNER_TEMP/install.env" <<EOF
+          INSTALL_CONTEXT=$KUBE_CONTEXT
+          DAEGAM_HOST=$host
+          TRAEFIK_NAMESPACE=traefik
+          E2E_INSTALL_USER=e2e-admin
+          E2E_REQUIRE_LIMITS=false
+          EOF
+      - name: chart default-values e2e-install
+        id: chart_e2e
+        if: ${{ !cancelled() && steps.chart_install.outcome == 'success' }}
+        timeout-minutes: 20
+        run: |
+          echo "MARK chart-e2e-install $(date +%s)" >>"$MEMLOG"
+          # 비밀번호 파일은 읽자마자 지운다. 상한이 지나면 TERM 을 보내 EXIT trap 이 만든 것을 걷고, 2분 뒤 KILL 한다.
+          # 단계의 상한(20분)보다 먼저 끝난다
+          pw_file="$RUNNER_TEMP/e2e-install.pw"
+          pw="$(cat "$pw_file")"
+          rm -f "$pw_file"
+          [ ! -e "$pw_file" ]
+          rc=0
+          INSTALL_ENV_FILE="$RUNNER_TEMP/install.env" E2E_INSTALL_PASSWORD="$pw" timeout -k 2m 18m \
+            make e2e-install INSTALL_CONTEXT="$KUBE_CONTEXT" E2E_INSTALL_USER=e2e-admin || rc=$?
+          case "$rc" in
+            0) ;;
+            124) echo "::error::e2e-install timed out after 18 min"; exit 1 ;;
+            137) echo "::error::e2e-install timed out after 18 min and was killed after 2 more"; exit 1 ;;
+            *) exit "$rc" ;;
+          esac
+      # 같은 값의 업그레이드가 차트가 만든 Secret 셋의 data 를 그대로 둔다. 값은 찍지 않고 지문만 맞댄다
+      - name: chart default-values upgrade keeps the Secrets
+        id: chart_upgrade
+        if: ${{ !cancelled() && steps.chart_install.outcome == 'success' }}
+        timeout-minutes: 4
+        run: |
+          echo "MARK chart-upgrade $(date +%s)" >>"$MEMLOG"
+          fingerprint() {
+            kubectl --context "$KUBE_CONTEXT" -n daegam-system get secret daegam-platform-secrets daegam-docparse-token \
+              daegam-mongo-auth -o json | python3 -c 'import hashlib, json, sys
+          items = json.load(sys.stdin)["items"]
+          rows = sorted([i["metadata"]["name"], i["data"]] for i in items)
+          print(hashlib.sha256(json.dumps(rows, sort_keys=True).encode()).hexdigest())'
+          }
+          before="$(fingerprint)"
+          helm --kube-context "$KUBE_CONTEXT" upgrade daegam charts/daegam -n daegam-system \
+            -f "$RUNNER_TEMP/default-values.yaml" --wait --timeout 3m
+          [ "$(fingerprint)" = "$before" ] || { echo "::error::the upgrade changed the generated Secrets"; exit 1; }
+          # 한 렌더가 만든 값을 두는 숨은 키는 릴리스의 값에 남지 않는다
+          helm --kube-context "$KUBE_CONTEXT" get values daegam -n daegam-system --all -o json |
+            python3 -c 'import json, sys; sys.exit("release values hold __daegamGeneratedSecrets" if "__daegamGeneratedSecrets" in json.load(sys.stdin) else 0)'
+          echo "the upgrade kept the data of the three generated Secrets"
+      # MongoDB root 사용자 가드: PVC 가 있는데 daegam-mongo-auth 가 없으면 다음 업그레이드를 렌더가 거절한다. 실패의 글은
+      # 렌더 오류라 비밀이 없지만 가드의 문장만 찍는다
+      - name: chart default-values MongoDB root-user guard
+        id: chart_guard
+        if: ${{ !cancelled() && steps.chart_upgrade.outcome == 'success' }}
+        timeout-minutes: 3
+        run: |
+          echo "MARK chart-guard $(date +%s)" >>"$MEMLOG"
+          k=(kubectl --context "$KUBE_CONTEXT" -n daegam-system)
+          "${k[@]}" get pvc data-mongodb-0 -o name
+          "${k[@]}" delete secret daegam-mongo-auth
+          rc=0
+          helm --kube-context "$KUBE_CONTEXT" upgrade daegam charts/daegam -n daegam-system \
+            -f "$RUNNER_TEMP/default-values.yaml" >"$RUNNER_TEMP/guard.out" 2>&1 || rc=$?
+          grep -o 'the PVC data-mongodb-0 exists[^;]*' "$RUNNER_TEMP/guard.out" || true
+          if [ "$rc" = 0 ] || ! grep -q 'the PVC data-mongodb-0 exists' "$RUNNER_TEMP/guard.out"; then
+            grep -m1 -o '^Error: .\{0,200\}' "$RUNNER_TEMP/guard.out" || true
+            echo "::error::the upgrade was not refused by the MongoDB root-user guard (exit $rc)"
+            exit 1
+          fi
+      - name: chart default-values diagnostics
+        if: ${{ !cancelled() && (steps.chart_install.outcome == 'failure' || steps.chart_e2e.outcome == 'failure' || steps.chart_upgrade.outcome == 'failure' || steps.chart_guard.outcome == 'failure') }}
+        continue-on-error: true
+        run: |
+          k=(kubectl --context "$KUBE_CONTEXT")
+          "${k[@]}" -n daegam-system get pods,pvc,secrets -o wide || true
+          "${k[@]}" -n daegam-system get events --sort-by=.lastTimestamp 2>/dev/null | tail -n 40 || true
+          "${k[@]}" -n daegam-system logs deploy/daegam-platform --tail=150 || true
+      # e2e-netpol 은 kind 로 Calico 를 단 두 노드 클러스터를 따로 만든다. 위 진단 뒤에 k3d 클러스터를 지워 메모리와
+      # CPU 를 비우고 돈다. 실패의 상태는 스크립트가 찍는다. k3d 를 쓰지 않으므로 앞 게이트가 실패했어도 돌아 자기 결과를
+      # 남긴다. 클러스터 이름은 워크플로의 CLUSTER(daegam) 가 아닌 daegam-netpol 이다
+      - name: make e2e-netpol
+        if: ${{ !cancelled() && matrix.netpol_minutes > 0 }}
+        env:
+          MINUTES: ${{ matrix.netpol_minutes }}
+          GRACE: ${{ matrix.kill_grace }}
+        run: |
+          echo "MARK e2e-netpol $(date +%s)" >>"$MEMLOG"
+          k3d cluster delete "$CLUSTER" || true
+          why=""
+          if curl -fsSL -o "$RUNNER_TEMP/bin/kind" \
+              "https://github.com/kubernetes-sigs/kind/releases/download/$KIND_VERSION/kind-linux-arm64" &&
+            echo "$KIND_SHA256  $RUNNER_TEMP/bin/kind" | sha256sum -c - && chmod +x "$RUNNER_TEMP/bin/kind"; then
+            rc=0
+            CLUSTER=daegam-netpol timeout -k "${GRACE}m" "${MINUTES}m" make e2e-netpol || rc=$?
+            case "$rc" in
+              0) ;;
+              124) why="timed out after $MINUTES min" ;;
+              137) why="timed out after $MINUTES min and killed after $GRACE more" ;;
+              *) why="exit $rc" ;;
+            esac
+          else
+            why="kind $KIND_VERSION could not be fetched or verified"
+          fi
+          [ -z "$why" ] || { echo "::error::e2e-netpol failed: $why"; exit 1; }
+      - name: time and memory per step
+        if: ${{ always() }}
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          echo "MARK end $(date +%s)" >>"$MEMLOG"
+          kubectl --context "$KUBE_CONTEXT" top nodes 2>/dev/null || true
+          docker stats --no-stream --format '{{.Name}} {{.MemUsage}}' 2>/dev/null || true
+          df -h / || true
+          python3 - "$MEMLOG" "$SHARD" <<'EOF' | tee -a "$GITHUB_STEP_SUMMARY"
+          import sys
+          print(f"#### e2e ({sys.argv[2]})\n")
+          marks, peaks, cur = [], {}, None
+          for line in open(sys.argv[1]):
+              p = line.split()
+              if len(p) == 3 and p[0] == "MARK":
+                  cur = p[1]; marks.append((cur, int(p[2]))); continue
+              if len(p) == 2 and cur:
+                  peaks[cur] = max(peaks.get(cur, 0), int(p[1]))
+          total = int(open("/proc/meminfo").readline().split()[1]) // 1024
+          print(f"| step | seconds | peak MiB (of {total}) |\n|---|---:|---:|")
+          for (name, t), (_, nxt) in zip(marks, marks[1:]):
+              print(f"| {name} | {nxt - t} | {peaks.get(name, '-')} |")
+          print(f"| total | {marks[-1][1] - marks[0][1]} | {max(peaks.values(), default=0)} |")
+          EOF
+          if [ -s "$RUNNER_TEMP/soft-failed" ]; then
+            { echo; echo "Failed, not blocking until their first pass on k3d: $(paste -sd ' ' "$RUNNER_TEMP/soft-failed")"; } |
+              tee -a "$GITHUB_STEP_SUMMARY"
+          fi
