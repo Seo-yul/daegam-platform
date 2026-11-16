@@ -1,0 +1,117 @@
+[project]
+name = "daegam"
+version = "0.1.0"
+description = "daegam control plane: spec pipeline, MCP server management"
+requires-python = ">=3.12"
+license = "LicenseRef-PolyForm-Strict-1.0.0"
+dependencies = [
+    "spec2openapi[mcp]==0.7.0",
+    # mcp-runtime 과 같은 이유로 == 핀이다(mcp-runtime/pyproject.toml, library-fit-review [하]7).
+    # spec2openapi 의 fastmcp>=3.0 은 상한이 없어서 상류가 httpx 지원을 걷은 fastmcp 를 내면
+    # 그대로 끌려 들어온다. 범위 핀으로 풀지 않는다.
+    "fastmcp==4.1.2",
+    "openapi-spec-validator>=0.7",
+    "fastapi>=0.115",
+    # /api/docs·/api/redoc 의 swagger-ui·redoc 번들. 이 배포판이 FastAPI 기본 화면이 CDN 에서 부르는
+    # 파일을 패키지 데이터로 싣고 와서 이미지 안에서 같은 origin 으로 낸다(daegam/api_docs). 브라우저에서
+    # 도는 코드라 판은 손으로만 올리도록 == 핀이다
+    "fastapi-offline==1.7.7",
+    "pydantic>=2",
+    "uvicorn>=0.30",
+    "pyyaml>=6.0",
+    # WSDL 판별이 lxml.etree 를 직접 쓴다. spec2openapi 의 전이 의존성에 기대지 않는다 (D29)
+    "lxml>=6,<7",
+    # run_in_threadpool·ASGI 타입·UploadFile 을 직접 import 한다. fastapi 가 끌어오지만 직접 적는다 (D29)
+    "starlette>=1,<2",
+    # 비서 턴 태스크의 종료 처리가 CancelScope(shield=True) 를 직접 쓴다. starlette 가 끌어오지만
+    # 직접 적는다 (D29)
+    "anyio>=4,<5",
+    "python-multipart>=0.0.9",
+    "pymongo>=4.18.3",  # 4.18.2 이하는 HIGH CVE-2026-96748·96749·106435
+    "kubernetes>=31",
+    "PyJWT[crypto]>=2.14",
+    # Redis TLS 의 CA 와 서버 인증서를 읽고 시험이 만든다(P61, tests/helpers/tls.py). PyJWT[crypto] 가
+    # 끌어오지만 직접 적는다 (D29)
+    "cryptography>=46,<51",
+    "httpx>=0.28",
+    # urlfetch 와 도메인 목록이 호스트를 UTS 46 A-label 로 맞춘다. httpx 가 끌어오지만 직접 적는다 (D29)
+    "idna>=3.7",
+    # 스케줄의 cron 규칙을 지역 시각으로 늘어놓는다. 시간대 규칙은 services/runs/clock.py 의 래퍼가
+    # 맡는다(P41 3절, F0a). BSD-3-Clause, 의존성 없음 (D29)
+    "cronsim>=2.7,<3",
+    # mcp 2·fastmcp 4 계열이 쓰는 httpx2 를 K8s·MCP 클라이언트에서 직접 import 한다.
+    # 상류가 끌어와 주지만 직접 적는다 (D29)
+    "httpx2>=2,<3",
+    # Spec Generator 의 모델 호출. agent-runtime 과 같은 라이브러리·같은 범위라 두 평면이
+    # 모델을 부르는 방식이 하나다. 모델 계열별 인자 제약(gpt-5 의 max_completion_tokens 등)을
+    # 여기서 분기하지 않는 이유이기도 하다. langchain-anthropic 의 하한은 anthropic 2.x 를 받는
+    # 판(1.7.7 부터 상한이 없다) 가운데 시험한 판이다
+    "langchain-anthropic>=1.7.10,<2",
+    "langchain-openai>=1.6,<2",
+    # 메시지·BaseChatModel 을 직접 import 한다. 위 두 패키지의 전이 의존성에 기대지 않는다 (D29)
+    "langchain-core>=1.6,<2",
+    # 위 두 패키지가 끌어오는 SDK 다. LLM 전송 규칙(daegam/llm_http.py)의 클라이언트, 연결 확인의
+    # models.list, 예외 타입이 직접 쓰고, 범위는 agent-runtime 과 같다 (D29).
+    # anthropic 2.x 는 API 판 2026-10-21 을 보내고(temperature·top_p·top_k 는 400) 키를
+    # `Authorization: Bearer` 로 싣는다. 다음 메이저가 전송을 또 바꿀 수 있어 <3 으로 막는다
+    "openai>=3.8.0",
+    "anthropic>=2.7.0,<3",
+    "mcp>=2,<3",
+    # agent.json compile 결과를 agent-runtime/schema/agent.schema.json 으로 검증한다 (D26)
+    "jsonschema>=4.23",
+    # Knowledge (D32): postgres Database verify 와 pgvector 테이블·행 쓰기. agent-runtime 과 같은
+    # 범위라 두 평면의 psycopg 가 하나다. distroless 이미지에 libpq 가 없어 binary 휠을 쓴다 (D29)
+    "psycopg[binary,pool]>=3.2",
+    # 문서의 PDF 텍스트 추출 (D32, D61). 문서 파싱 서비스의 하위 프로세스에서만 돈다
+    "pypdf>=6.21.4,<7",  # 6.21.3 이하는 HIGH CVE-2026-119203~119209
+    # 문서의 xlsx 추출 (D61). 읽기 전용·값만으로 연다. python-pptx 는 Pillow(이미지 해석기)를 끌어오므로
+    # 쓰지 않는다. pptx·docx·hwpx 는 zip 과 안전 XML 파서로 직접 읽는다. openpyxl 은 자기 XML 파서를
+    # 쓰므로 DTD 는 그 앞에서 거절한다(daegam/documents/ooxml.py)
+    "openpyxl>=3.1,<4",
+    # 설치돼 있으면 openpyxl 이 XML 을 defusedxml 로 읽어 DTD 와 엔티티를 스스로 거절한다
+    # (openpyxl.DEFUSEDXML). ooxml.py 의 DTD 거절과 겹쳐 지키는 두 번째 방어다
+    "defusedxml>=0.7.1",
+    # Knowledge 문서의 usage.tokens 추정(cl100k_base). langchain-openai 가 끌어오지만 직접 쓴다 (D29)
+    "tiktoken>=0.9",
+    # Database verify 의 redis 분기가 redis.asyncio 를 직접 import 한다(D33). agent-runtime 과 같은
+    # 범위이고 그쪽 langgraph-checkpoint-redis 가 끌어오는 redisvl 이 요구하는 범위다 (D29)
+    "redis>=6.3,<9",
+    # Gateway 소유자가 쓴 Cedar(authz_policy)를 저장할 때 문장마다 파싱한다(T63). Cedar 엔진(Rust)의
+    # 파이썬 바인딩이고 런타임 의존이 없다. ToolHive 는 cedar-go 로 읽으므로 이것은 저장 때의 검사이고
+    # 배포의 최종 판정은 오퍼레이터의 MCPAuthzConfig Valid 조건이다
+    "cedarpy>=4.12.1,<5",
+    # 평가 사례의 개인정보 검사가 Agent 가 쓴 pii_mask 정규식을 시간 한도(timeout=)를 걸어
+    # 돌린다(P45 8절). 표준 re 에는 한도가 없다. tiktoken 이 끌어오지만 직접 적는다 (D29)
+    "regex>=2024.11.6",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "httpx>=0.28",
+    "ruff>=0.6",
+    "pytest-xdist>=3.8.0",
+    # test_llm_http.py 가 SDK 의 OpenTelemetry 를 끈 것을 문맥의 span 으로 시험한다. anthropic 이
+    # 끌어오지만 직접 import 하므로 직접 적고, 범위는 anthropic 2.7.0 의 요구와 같다 (D29)
+    "opentelemetry-api>=1.1.0,<2",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["daegam"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
