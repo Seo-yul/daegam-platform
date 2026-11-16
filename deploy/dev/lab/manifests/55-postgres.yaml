@@ -1,0 +1,77 @@
+# Postgres for P12 (D26)·P15 (D32): Agent memory 노드의 체크포인터·세션 색인·공유 카운터와 Knowledge Base 의 pgvector 테이블이 붙는 Database(kind postgres).
+# 이미지는 pgvector/pgvector:pg16 이다. 공식 postgres:16 에 vector 확장만 얹은 것이라 env·probe·uid 999 가 같고, e2e-knowledge 가 CREATE EXTENSION vector 를 슈퍼유저(POSTGRES_USER)로 한다.
+# e2e-agent 가 이것을 Database 로 등록·verify 하고 HITL 을 Postgres 경로(교차 파드 재개)로 실증한다.
+# 비영속(emptyDir)이며 e2e 는 닿는 Postgres 하나만 필요하다.
+# 비밀번호에 URL 예약 문자(@ : / #)를 일부러 넣었다. 플랫폼이 만드는 DAEGAM_DB_0_URL 은 이 값으로 깨지고
+# 런타임은 개별 env 로 접속 문자열을 조립하므로(agent-runtime/runtime/sessions.py) 그 경로가 실증된다.
+# e2e-agent 는 이 Secret 을 kubectl 로 읽어 Database 등록 본문에 넣는다 (값의 정본은 여기 하나다).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres-credentials
+  namespace: daegam-spike
+type: Opaque
+stringData:
+  username: daegam
+  password: "pg@ss:w/rd#1"
+  database: agent
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: daegam-spike
+  labels: {app: postgres}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: postgres}
+  template:
+    metadata:
+      labels: {app: postgres}
+    spec:
+      automountServiceAccountToken: false
+      # 공식 이미지의 postgres 사용자는 uid 999 다. non-root 로 띄우고 emptyDir 을 fsGroup 으로 쓰기 가능하게 한다
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+      containers:
+        - name: postgres
+          image: pgvector/pgvector:pg16
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: POSTGRES_USER
+              valueFrom: {secretKeyRef: {name: postgres-credentials, key: username}}
+            - name: POSTGRES_PASSWORD
+              valueFrom: {secretKeyRef: {name: postgres-credentials, key: password}}
+            - name: POSTGRES_DB
+              valueFrom: {secretKeyRef: {name: postgres-credentials, key: database}}
+            - {name: PGDATA, value: /var/lib/postgresql/data/pgdata}
+          ports:
+            - {name: postgres, containerPort: 5432}
+          readinessProbe:
+            exec:
+              command: [sh, -c, "pg_isready -h 127.0.0.1 -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
+            periodSeconds: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+          volumeMounts:
+            - {name: data, mountPath: /var/lib/postgresql/data}
+            - {name: run, mountPath: /var/run/postgresql}
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: run
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: daegam-spike
+spec:
+  selector: {app: postgres}
+  ports:
+    - {name: postgres, port: 5432, targetPort: postgres}

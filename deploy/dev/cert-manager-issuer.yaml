@@ -1,0 +1,14 @@
+# 로컬 실측용 ClusterIssuer (T5). `make cert-manager-up` 이 cert-manager 를 올린 뒤 적용한다.
+#
+# selfSigned 라 바깥 CA 도 도메인 소유 증명도 필요 없다. cert-manager 가 Certificate 마다 자기가 서명한
+# 잎 인증서를 내고 `<k8s.name>-tls` Secret 에 넣는다. e2e 의 https 호출은 `curl -sSk` 라(scripts/lib/mcp_rpc.sh)
+# 체인을 검증하지 않으므로 이것으로 `tls.mode: cert-manager` 경로 전체가 돈다.
+#
+# 운영에서 쓸 것이 아니다. 진짜 발급자는 테넌트가 자기 클러스터에 두고 플랫폼은 이름만 고른다
+# (`cluster_issuer_names`, services/exposure.py).
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: daegam-selfsigned
+spec:
+  selfSigned: {}

@@ -1,0 +1,51 @@
+# D안: fixed runtime image, spec + profile injected by an initContainer into an
+# emptyDir. See docs/archive/plan/phase-1-spike.md F4 and docs/archive/plan/phase-3-control-plane.md F1
+# (daegam-mcp-runtime serves only the tools listed in profile.json).
+apiVersion: toolhive.stacklok.dev/v1beta1
+kind: MCPServer
+metadata:
+  name: calculator
+  namespace: daegam-spike
+spec:
+  image: daegam-mcp-runtime:0.1.0
+  transport: streamable-http
+  proxyPort: 8080
+  mcpPort: 8000
+  env:
+    - name: SPEC2OPENAPI_ENDPOINT
+      value: http://mock-soap.daegam-spike.svc:18080/calc
+  podTemplateSpec:
+    spec:
+      volumes:
+        - {name: spec, emptyDir: {}}
+        - {name: tmp, emptyDir: {}}
+      initContainers:
+        - name: fetch-spec
+          image: curlimages/curl:8.14.1
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+          env:
+            - name: SPEC_TOKEN
+              valueFrom:
+                secretKeyRef: {name: calculator-spec-token, key: token}
+          command: ["sh", "-c"]
+          args:
+            - >-
+              set -e;
+              curl -fsSL -H "Authorization: Bearer $SPEC_TOKEN"
+              http://stub-spec-server.daegam-spike.svc:8080/specs/calculator/v1/openapi.yaml
+              -o /config/openapi.yaml;
+              curl -fsSL -H "Authorization: Bearer $SPEC_TOKEN"
+              http://stub-spec-server.daegam-spike.svc:8080/specs/calculator/v1/profile.json
+              -o /config/profile.json
+          volumeMounts:
+            - {name: spec, mountPath: /config}
+      containers:
+        - name: mcp
+          imagePullPolicy: IfNotPresent
+          volumeMounts:
+            - {name: spec, mountPath: /config, readOnly: true}
+            - {name: tmp, mountPath: /tmp}

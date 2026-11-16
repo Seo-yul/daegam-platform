@@ -1,0 +1,61 @@
+# P38 F0 lab: the collector llm-otel (OTel Collector core) between the gateway (OTLP gRPC protobuf, 4317) and P37's
+# ingest (OTLP/HTTP JSON with the ingest token from the Secret llm-otel-token, key token). lab.sh otel applies it.
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: llm-otel}
+data:
+  config.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc: {endpoint: "0.0.0.0:4317"}
+    processors:
+      batch: {timeout: 2s}
+    exporters:
+      otlp_http:
+        traces_endpoint: http://daegam-platform.daegam-system.svc:9000/api/telemetry/v1/traces
+        encoding: json
+        compression: none
+        headers: {Authorization: "Bearer ${env:INGEST_TOKEN}"}
+        sending_queue: {enabled: true, queue_size: 5000}
+        retry_on_failure: {enabled: true, initial_interval: 1s, max_interval: 30s, max_elapsed_time: 900s}
+      debug: {verbosity: basic}
+    service:
+      telemetry: {logs: {level: info}}
+      pipelines:
+        traces: {receivers: [otlp], processors: [batch], exporters: [otlp_http, debug]}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: llm-otel}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: llm-otel}}
+  template:
+    metadata: {labels: {app: llm-otel}}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: otel
+          image: otel/opentelemetry-collector:0.135.0
+          imagePullPolicy: IfNotPresent
+          args: ["--config=/conf/config.yaml"]
+          env: [{name: INGEST_TOKEN, valueFrom: {secretKeyRef: {name: llm-otel-token, key: token}}}]
+          ports: [{containerPort: 4317}]
+          resources: {requests: {cpu: 20m, memory: 64Mi}, limits: {memory: 256Mi}}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts: [{name: conf, mountPath: /conf}]
+      volumes: [{name: conf, configMap: {name: llm-otel}}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: llm-otel}
+spec: {selector: {app: llm-otel}, ports: [{port: 4317, targetPort: 4317, name: otlp-grpc}]}

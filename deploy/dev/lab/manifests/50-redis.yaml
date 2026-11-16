@@ -1,0 +1,69 @@
+# Redis for P3 F4/F8: Data Service verify (PING) and CACHE_* binding checks.
+# Also the Agent memory node's checkpointer (D33, `make e2e-agent-redis`): langgraph-checkpoint-redis needs
+# RediSearch and RedisJSON, which the official redis:8 image bundles (redis:7 has no modules and verify marks it
+# capabilities.checkpointer=modules_missing). Keys are daegam-agent:<instance id>:* plus the library's root-level
+# write_keys_zset:<session id>:*; the e2e deletes its own keys and FT indexes in STEP 12.
+# Ephemeral (no persistence); the e2e only needs a reachable Redis.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: redis-credentials
+  namespace: daegam-spike
+type: Opaque
+stringData:
+  password: "rd@ss:w/rd#1"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: daegam-spike
+  labels: {app: redis}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: redis}
+  template:
+    metadata:
+      labels: {app: redis}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+      containers:
+        - name: redis
+          image: redis:8
+          imagePullPolicy: IfNotPresent
+          # 인증을 켠다. Database 로 등록할 때 플랫폼이 비밀번호를 Secret 으로 받아 쓰는 실제
+          # 경로를 e2e 가 그대로 밟게 된다. 비밀번호에 기호를 섞어 DSN 인코딩도 함께 본다
+          args: ["redis-server", "--save", "", "--appendonly", "no", "--requirepass", "$(REDIS_PASSWORD)"]
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom: {secretKeyRef: {name: redis-credentials, key: password}}
+          ports:
+            - {name: redis, containerPort: 6379}
+          readinessProbe:
+            exec:
+              command: [sh, -c, 'redis-cli -a "$REDIS_PASSWORD" --no-auth-warning ping']
+            periodSeconds: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - {name: data, mountPath: /data}
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: daegam-spike
+spec:
+  selector: {app: redis}
+  ports:
+    - {name: redis, port: 6379, targetPort: redis}

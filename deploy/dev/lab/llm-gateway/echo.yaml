@@ -1,0 +1,68 @@
+# P38 F0 lab: two echo upstreams (llm-echo, llm-echo-b for the second priority group) and a client pod that runs
+# the spike's measurements from inside the cluster. All three use the agent runtime image; lab.sh fills IMAGE and
+# creates the ConfigMap llm-echo from deploy/dev/lab/llm_echo.py and llm-spike from the measurement scripts.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: llm-echo}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: llm-echo}}
+  template:
+    metadata: {labels: {app: llm-echo}}
+    spec:
+      containers:
+        - name: echo
+          image: IMAGE
+          imagePullPolicy: IfNotPresent
+          command: ["python", "/echo/llm_echo.py"]
+          env: [{name: PYTHONPATH, value: /app}, {name: PORT, value: "8080"}]
+          ports: [{containerPort: 8080}]
+          readinessProbe: {httpGet: {path: /healthz, port: 8080}}
+          resources: {requests: {cpu: 50m, memory: 128Mi}, limits: {memory: 1Gi}}
+          volumeMounts: [{name: echo, mountPath: /echo}]
+      volumes: [{name: echo, configMap: {name: llm-echo}}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: llm-echo}
+spec: {selector: {app: llm-echo}, ports: [{port: 8080, targetPort: 8080}]}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: llm-echo-b}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: llm-echo-b}}
+  template:
+    metadata: {labels: {app: llm-echo-b}}
+    spec:
+      containers:
+        - name: echo
+          image: IMAGE
+          imagePullPolicy: IfNotPresent
+          command: ["python", "/echo/llm_echo.py"]
+          env: [{name: PYTHONPATH, value: /app}, {name: PORT, value: "8080"}]
+          ports: [{containerPort: 8080}]
+          readinessProbe: {httpGet: {path: /healthz, port: 8080}}
+          resources: {requests: {cpu: 50m, memory: 128Mi}, limits: {memory: 1Gi}}
+          volumeMounts: [{name: echo, mountPath: /echo}]
+      volumes: [{name: echo, configMap: {name: llm-echo}}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: llm-echo-b}
+spec: {selector: {app: llm-echo-b}, ports: [{port: 8080, targetPort: 8080}]}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: llm-client, labels: {app: llm-client}}
+spec:
+  containers:
+    - name: client
+      image: IMAGE
+      imagePullPolicy: IfNotPresent
+      command: ["python", "-c", "import time; time.sleep(10**9)"]
+      env: [{name: PYTHONPATH, value: /app}]
+      resources: {requests: {cpu: 50m, memory: 128Mi}, limits: {memory: 2Gi}}
+      volumeMounts: [{name: spike, mountPath: /spike}]
+  volumes: [{name: spike, configMap: {name: llm-spike}}]

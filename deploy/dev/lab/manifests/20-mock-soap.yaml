@@ -1,0 +1,40 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mock-soap
+  namespace: daegam-spike
+  labels: {app: mock-soap}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: mock-soap}
+  template:
+    metadata:
+      labels: {app: mock-soap}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+      containers:
+        - name: soap
+          image: daegam-mock-soap:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - {name: soap, containerPort: 18080}
+          readinessProbe:
+            tcpSocket: {port: soap}
+            periodSeconds: 2
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mock-soap
+  namespace: daegam-spike
+spec:
+  selector: {app: mock-soap}
+  ports:
+    - {name: soap, port: 18080, targetPort: soap}

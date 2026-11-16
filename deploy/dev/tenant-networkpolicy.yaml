@@ -1,0 +1,27 @@
+# Reference NetworkPolicy the platform creates in every tenant namespace (P6 F3a).
+# ingress only: pods in the tenant namespace and pods in daegam-system may reach the
+# tenant's pods (MCP proxies, vMCP, agent runtime); every other namespace is denied.
+# No egress policy: backends (SOAP/REST), Okta JWKS and the mock OIDC must stay reachable.
+#
+# The platform renders this from services/tenancy.py with metadata.namespace set to the
+# tenant namespace; apply here with `kubectl -n <tenant-ns> apply -f`.
+# OrbStack (Flannel) does NOT enforce NetworkPolicy; `make e2e-netpol` proves
+# enforcement on kind + Calico.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: daegam-tenant-ingress
+  labels:
+    app.kubernetes.io/managed-by: daegam
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        # same namespace
+        - podSelector: {}
+        # the platform namespace (initContainer spec fetch is outbound, but the
+        # platform reaches proxies/agents for health and e2e)
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: daegam-system

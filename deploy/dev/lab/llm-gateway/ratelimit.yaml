@@ -1,0 +1,86 @@
+# P38 F0 lab: the global token limit (P38 section 7). envoyproxy/ratelimit reads the ConfigMap llm-ratelimit through
+# a directory watch (RUNTIME_WATCH_ROOT=false sees the ConfigMap's symlink swap) and counts in llm-redis. lab.sh
+# ratelimit creates the Secret llm-redis (a random password) and applies this file.
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: llm-ratelimit}
+data:
+  config.yaml: |
+    domain: daegam-llm
+    descriptors:
+      - key: tenant
+        rate_limit: {unit: minute, requests_per_unit: 1000000}
+      - key: tenant
+        value: p38spike
+        rate_limit: {unit: minute, requests_per_unit: 300}
+      - key: provider
+        value: echo-anthropic
+        rate_limit: {unit: minute, requests_per_unit: 400}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: llm-ratelimit}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: llm-ratelimit}}
+  template:
+    metadata: {labels: {app: llm-ratelimit}}
+    spec:
+      automountServiceAccountToken: false
+      securityContext: {runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532, seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: ratelimit
+          image: envoyproxy/ratelimit:f4e76690@sha256:83b1664a194ff9fc1ff30b0868573115a2d01a1b6e2a3f8961724f9a79bf1cd0
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/ratelimit"]
+          env:
+            - {name: USE_STATSD, value: "false"}
+            - {name: LOG_LEVEL, value: info}
+            - {name: REDIS_SOCKET_TYPE, value: tcp}
+            - {name: REDIS_URL, value: "llm-redis:6379"}
+            - {name: REDIS_AUTH, valueFrom: {secretKeyRef: {name: llm-redis, key: password}}}
+            - {name: RUNTIME_ROOT, value: /data}
+            - {name: RUNTIME_SUBDIRECTORY, value: ratelimit}
+            - {name: RUNTIME_WATCH_ROOT, value: "false"}
+            - {name: RUNTIME_IGNOREDOTFILES, value: "true"}
+            - {name: GRPC_PORT, value: "8081"}
+            - {name: PORT, value: "8080"}
+          ports: [{containerPort: 8081, name: grpc}, {containerPort: 8080, name: http}]
+          readinessProbe: {httpGet: {path: /healthcheck, port: 8080}, periodSeconds: 5}
+          resources: {requests: {cpu: 20m, memory: 32Mi}, limits: {memory: 128Mi}}
+          securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+          volumeMounts: [{name: config, mountPath: /data/ratelimit/config}]
+      volumes: [{name: config, configMap: {name: llm-ratelimit}}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: llm-ratelimit}
+spec: {selector: {app: llm-ratelimit}, ports: [{port: 8081, targetPort: 8081, name: grpc}]}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: llm-redis}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: llm-redis}}
+  template:
+    metadata: {labels: {app: llm-redis}}
+    spec:
+      automountServiceAccountToken: false
+      securityContext: {runAsNonRoot: true, runAsUser: 999, runAsGroup: 999, seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: redis
+          image: redis:8.2@sha256:e5f23377739f95a2f530b9c99f93accb4f634577f09d00a7d8e0638f2fdf69e0
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c", "exec redis-server --requirepass \"$REDIS_PASSWORD\" --save '' --appendonly no"]
+          env: [{name: REDIS_PASSWORD, valueFrom: {secretKeyRef: {name: llm-redis, key: password}}}]
+          ports: [{containerPort: 6379}]
+          resources: {requests: {cpu: 20m, memory: 32Mi}, limits: {memory: 128Mi}}
+          securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+          volumeMounts: [{name: data, mountPath: /data}]
+      volumes: [{name: data, emptyDir: {}}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: llm-redis}
+spec: {selector: {app: llm-redis}, ports: [{port: 6379, targetPort: 6379}]}

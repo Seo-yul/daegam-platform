@@ -1,0 +1,52 @@
+# ConfigMap `calculator-spec` (keys openapi.yaml, profile.json) is created by
+# `make lab-up` from $(SPEC2OPENAPI_DIR)/examples/calculator.openapi.yaml and
+# deploy/dev/lab/profile.json.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stub-spec-server
+  namespace: daegam-spike
+  labels: {app: stub-spec-server}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: stub-spec-server}
+  template:
+    metadata:
+      labels: {app: stub-spec-server}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+      containers:
+        - name: server
+          image: daegam-stub-spec-server:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - {name: http, containerPort: 8080}
+          env:
+            - name: SPEC_TOKEN
+              valueFrom:
+                secretKeyRef: {name: calculator-spec-token, key: token}
+          volumeMounts:
+            - {name: spec, mountPath: /data, readOnly: true}
+          readinessProbe:
+            tcpSocket: {port: http}
+            periodSeconds: 2
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+      volumes:
+        - name: spec
+          configMap: {name: calculator-spec}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: stub-spec-server
+  namespace: daegam-spike
+spec:
+  selector: {app: stub-spec-server}
+  ports:
+    - {name: http, port: 8080, targetPort: http}

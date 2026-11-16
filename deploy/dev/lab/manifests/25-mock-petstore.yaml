@@ -1,0 +1,42 @@
+# Mock Petstore (Swagger 2.0 sample) backend. In-memory; resets on restart.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mock-petstore
+  namespace: daegam-spike
+  labels: {app: mock-petstore}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: mock-petstore}
+  template:
+    metadata:
+      labels: {app: mock-petstore}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+      containers:
+        - name: petstore
+          image: daegam-mock-petstore:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - {name: http, containerPort: 18081}
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 2
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mock-petstore
+  namespace: daegam-spike
+spec:
+  selector: {app: mock-petstore}
+  ports:
+    - {name: http, port: 18081, targetPort: http}

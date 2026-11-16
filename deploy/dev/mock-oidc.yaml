@@ -1,0 +1,54 @@
+# Mock OIDC provider for dev/e2e (P6). issuer = http://mock-oidc.daegam-system.svc:8080
+# Clients: agent-dev (scope mcp.invoke) for the agent runtime, api-dev (scope daegam.api)
+# for platform API calls. Test user tokens are enabled (POST /_test/token).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mock-oidc
+  namespace: daegam-system
+  labels: {app: mock-oidc}
+spec:
+  replicas: 1  # >1 needs MOCK_OIDC_KEY_PEM so every replica signs with the same key
+  selector:
+    matchLabels: {app: mock-oidc}
+  template:
+    metadata:
+      labels: {app: mock-oidc}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: oidc
+          image: daegam-mock-oidc:0.1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - {name: http, containerPort: 8080}
+          env:
+            - {name: MOCK_OIDC_ISSUER, value: "http://mock-oidc.daegam-system.svc:8080"}
+            - {name: MOCK_OIDC_AUDIENCE, value: daegam-mcp}
+            - {name: MOCK_OIDC_CLIENTS, value: "agent-dev:agent-dev-secret:mcp.invoke,api-dev:api-dev-secret:daegam.api"}
+            - {name: MOCK_OIDC_ALLOW_TEST_TOKENS, value: "true"}
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          resources:
+            requests: {cpu: 20m, memory: 64Mi}
+            limits: {memory: 256Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mock-oidc
+  namespace: daegam-system
+spec:
+  selector: {app: mock-oidc}
+  ports:
+    - {name: http, port: 8080, targetPort: http}

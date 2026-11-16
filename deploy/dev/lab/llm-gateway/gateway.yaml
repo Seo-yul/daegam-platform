@@ -1,0 +1,41 @@
+# P38 F0 lab: agentgateway standalone in daegam-llm, shaped like P38 section 4's table. lab.sh fills IMAGE and REV and
+# PRESTOP and creates the Secret llm-gateway-config (config.yaml plus one key file per provider slug, one volume).
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: llm-gateway, labels: {app: llm-gateway}}
+spec:
+  replicas: 2
+  strategy: {type: RollingUpdate, rollingUpdate: {maxUnavailable: 0, maxSurge: 1}}
+  selector: {matchLabels: {app: llm-gateway}}
+  template:
+    metadata:
+      labels: {app: llm-gateway}
+      annotations: {daegam.devops.ai.kr/config-rev: REV}
+    spec:
+      terminationGracePeriodSeconds: 330
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: agentgateway
+          image: IMAGE
+          imagePullPolicy: IfNotPresent
+          args: ["-f", "/config/config.yaml"]
+          ports: [{containerPort: 8080, name: http}]
+          readinessProbe: {httpGet: {path: /healthz/ready, port: 15021}, periodSeconds: 2}
+          lifecycle: {preStop: {sleep: {seconds: PRESTOP}}}
+          resources: {requests: {cpu: 50m, memory: 64Mi}, limits: {memory: 512Mi}}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts: [{name: config, mountPath: /config, readOnly: true}]
+      volumes: [{name: config, secret: {secretName: llm-gateway-config}}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: llm-gateway}
+spec: {selector: {app: llm-gateway}, ports: [{port: 8080, targetPort: 8080, name: http}]}
