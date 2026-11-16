@@ -1,0 +1,58 @@
+[project]
+name = "daegam-mcp-runtime"
+version = "0.1.0"
+description = "daegam mcp-runtime: fixed image that serves /config/openapi.yaml + /config/profile.json as an MCP server"
+requires-python = ">=3.12"
+license = "LicenseRef-PolyForm-Strict-1.0.0"
+# 핀 이유:
+# spec2openapi 의 fastmcp>=3.0 은 상한이 없어서 상류가 새 판을 내면 그대로 끌려 들어온다.
+# 그래서 == 로만 핀하고 범위 핀으로 풀지 않는다.
+#
+# 추적하던 httpx2 이전은 0.7.0 에서 끝났다 (T7). 0.6.0 은 legacy httpx.AsyncClient 를 만들고
+# FastMCP 4.0.x 가 그것을 FastMCPDeprecationWarning 만 내고 받아 줬는데, 0.7.0 은 httpx2 를 쓴다.
+# 그래서 전이 의존에서 httpx 가 빠졌고 그것을 직접 import 하던 테스트를 httpx2 로 옮겼다.
+dependencies = [
+    "fastmcp==4.1.2",
+    "spec2openapi[mcp]==0.7.0",
+    "pydantic>=2",
+    # Request·JSONResponse 를 직접 import 한다 (D29)
+    "starlette>=1,<2",
+    # 관리자 CA 를 더할 기본 TLS 문맥을 httpx2.create_ssl_context 로 만들어 클라이언트의 기본 루트와 맞춘다
+    # (runtime/main.py `_verify_with_ca`, D29). 플랫폼·agent-runtime 과 같은 범위다
+    "httpx2>=2,<3",
+    "pyyaml>=6.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.6",
+    # tests/test_private_ca.py 가 시험 CA 를 만들고 기본 루트로 certifi 묶음을 둔다 (D29). 범위는 플랫폼·web-tools 와 같다
+    "certifi",
+    "cryptography>=46,<51",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["runtime"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
+
+[tool.ruff]
+line-length = 100
+# tests/mock_soap_server.py 는 spec2openapi tests 에서 복사한 것이라 lint 하지 않는다.
+# 상류 파일과 다른 점은 쓰지 않던 start_server 를 뺀 것 하나다
+exclude = ["tests/mock_soap_server.py"]
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

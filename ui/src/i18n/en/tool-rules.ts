@@ -1,0 +1,53 @@
+import type { Messages } from "../types";
+import { plural } from "./plural";
+
+export const toolRules: Messages["toolRules"] = {
+  title: "Tool rules",
+  callers: "Who may call",
+  callersHint:
+    "Leave this empty to let every member and Agent of this tenant call the Tool. Select a role, a group (oidc mode) or an Agent to allow only those; a role includes every higher role.",
+  agentHint:
+    "An Agent selected here can call this Tool for everyone who can use that Agent. Roles and groups apply only to people who call this Tool directly. If you select only roles or groups, no Agent can call this Tool.",
+  namespaceHint: "Members who can deploy images in this tenant can reach the server's container without these rules. Argument conditions still apply.",
+  itemHint: "Item rules select roles only, so with a rule no Agent can call this Tool.",
+  readOnly: "Read-only",
+  readOnlyHint:
+    "Mark a Tool read-only only if it writes no data outside. Agents' approval settings use this mark as their default, and in chats that hold outside content, Tools that are not read-only do not run without approval. A changed mark reaches each Agent when it is deployed again.",
+  conditions: "Argument conditions",
+  conditionsHint: "Calls that do not meet a condition are refused with a Tool error and never reach the backend. Conditions apply to every caller alike.",
+  operators: {
+    equals: "Equals",
+    one_of: "One of",
+    min: "Minimum",
+    max: "Maximum",
+    max_length: "Maximum length",
+    prefix: "Starts with",
+  },
+  optional: "Pass when the argument is absent",
+  gatewayHint: "These rules apply only to calls through this Gateway, on top of the servers' Tool rules. A call a server refuses cannot be opened here.",
+  gatewayPinHint: "A backend with rules offers only the Tools it had when this Gateway was deployed. Tools that the backend adds or renames appear only after you deploy the Gateway again.",
+  itemPinHint: "An item with rules offers only the Tools it had when its rules were saved. Tools that a new image adds or renames appear only after you save the rules again.",
+  deletedAgent: "Deleted Agent",
+  opensNotice: "You removed every caller. When you save, this Tool opens to every member and Agent of this tenant.",
+  ruledTools: (count: number): string => `${plural(count, "Tool", "Tools")} with rules`,
+  roles: "Roles",
+  groups: "Groups",
+  groupsHint: "Separate several groups with commas.",
+  agents: "Agents",
+  noAgents: "This tenant has no Agents.",
+  argument: "Argument",
+  operator: "Operator",
+  value: "Value",
+  valuesHint: "Separate the values of a 'One of' condition with commas.",
+  addCondition: "Add condition",
+  removeCondition: "Remove condition",
+  noArguments: "This Backend API version holds no argument list, so it cannot take conditions. Upload the spec again to add them.",
+  notOffered: "Not offered",
+  noTools: "The Tools to set rules on are not known yet. Check the Tool list first.",
+  editRequired: "You need permission to edit this resource to change its rules.",
+  save: "Save rules",
+  saving: "Saving…",
+  saved: "Rules saved.",
+  openedSaved: (tools: string): string => `You removed every caller, so these Tools open to every member and Agent of this tenant: ${tools}`,
+  rollingSaved: (agents: string): string => `These Agents may restart once to add the information that tells them apart to their tokens: ${agents}`,
+};
