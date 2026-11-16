@@ -1,0 +1,34 @@
+Daegam
+Copyright (c) 2026 Yoon Seoyul
+
+Daegam is licensed under the PolyForm Strict License 1.0.0 (see LICENSE). The material below comes from other projects
+and keeps its own license. The Apache License 2.0 text is in LICENSES/Apache-2.0.txt.
+
+platform/daegam/data/public_suffix_list.dat
+  The Public Suffix List (https://publicsuffix.org). Mozilla Public License 2.0; the file keeps its MPL header.
+
+platform/daegam/data/hub_catalog.json
+  Converted from a release of toolhive-catalog (https://github.com/stacklok/toolhive-catalog) by Stacklok; the file
+  names its release. Apache License 2.0.
+
+ui/src/components/icons/brand.tsx
+  Logo path data from simple-icons (https://simpleicons.org), CC0 1.0. The logos are trademarks of their owners
+  (MCP, Kubernetes and others named in the file).
+  The Daegam seal mark in the same file, ui/public/favicon.svg, favicon.ico and apple-touch-icon.png carry the
+  letters 대 and 감 as outlines taken from Noto Serif KR Black (https://github.com/notofonts/noto-cjk), Copyright
+  2017-2024 Adobe (http://www.adobe.com/). SIL Open Font License 1.1.
+
+Pretendard font, bundled into the daegam-ui image from the npm package `pretendard`
+  Pretendard, Copyright (c) 2021 Kil Hyung-jin, with Reserved Font Name Pretendard
+  (https://github.com/orioncactus/pretendard). SIL Open Font License 1.1.
+
+platform/tests/fixtures/petstore-swagger2.json
+  Swagger Petstore 2.0 sample (https://github.com/swagger-api/swagger-petstore). Apache License 2.0.
+
+Files from spec2openapi (https://github.com/Seo-yul/spec2openapi), Copyright 2026 Yoon Seoyul, Apache License 2.0 there
+  mcp-runtime/tests/mock_soap_server.py (start_server removed)
+  mcp-runtime/tests/fixtures/calculator.openapi.yaml
+  mcp-runtime/tests/fixtures/petstore.openapi.yaml (examples/petstore-upgraded.openapi.yaml)
+  platform/tests/fixtures/calculator.wsdl, orders.wsdl, orders.openapi.yaml, legacy-swagger.json
+  and the files derived from them: platform/tests/fixtures/mixed.openapi.yaml and
+  mcp-runtime/tests/fixtures/calculator-auth-header.wsdl

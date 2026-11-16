@@ -1,0 +1,30 @@
+.DS_Store
+*.log
+.env
+.venv/
+__pycache__/
+node_modules/
+/tmp/
+# 로컬 설정과 worktree 는 넣지 않고, 프로젝트 스킬만 저장소에 둔다
+.claude/*
+!.claude/skills/
+!.claude/workflows/
+# 저장소 뿌리의 로컬 작업 폴더(<이름>-dev). .env·kubeconfig·인프라 상태가 섞일 수 있어 통째로 뺀다(.dockerignore 와 같다)
+/*-dev/
+platform/daegam/ui_dist/
+ui/openapi.json
+ui/dist/
+ui/tsconfig.tsbuildinfo
+ui/test-results/
+ui/playwright-report/
+# 로컬 녹화 결과. 프레임이 수백 MB 라 저장소에 넣지 않는다
+ui/tour-out/
+# 로컬 녹화 산출물
+ui/demo-out/
+
+# TLS 검사 프록시의 루트 인증서는 저장소에 넣지 않는다 (DAEGAM_CA_FILE 로 경로만 전달)
+*proxy-ca*.pem
+
+# 이미지 서명 개인 키 (D66). ~/.config/daegam/cosign.key 에 두고 저장소에는 공개 키 deploy/cosign.pub 만 넣는다
+cosign.key
+

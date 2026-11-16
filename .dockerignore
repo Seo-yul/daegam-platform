@@ -1,0 +1,39 @@
+# Build context for platform/Dockerfile is the repo root (it needs platform/, agent-runtime/schema and web-tools/schema). The UI has its own
+# image and context (ui/Dockerfile, ui/.dockerignore, D52), so ui/ stays out and a UI-only change never touches this image.
+# Everything the image does not need stays out so rebuilds are fast and cache-friendly.
+.git
+.claude
+.github
+# 저장소 뿌리의 로컬 작업 폴더(<이름>-dev). .env 와 kubeconfig 가 있을 수 있어 빌드 컨텍스트로 도커 데몬에 보내지 않는다
+*-dev
+docs
+spike
+deploy
+# 설치 차트(P85). 이미지에 들지 않고, 운영자의 값 파일이 빌드 컨텍스트로 가지 않게 뺀다
+charts
+# 운영자의 설치(ops/ 가 있는 저장소에만 있다, P85 9절). 그 값과 스크립트가 빌드 컨텍스트로 가지 않게 뺀다
+ops
+mcp-runtime
+scripts
+# agent-runtime: the platform image only needs the agent.json contract (platform/Dockerfile copies
+# agent-runtime/schema/agent.schema.json). The runtime code has its own image (make image-agent).
+agent-runtime/*
+!agent-runtime/schema
+agent-runtime/schema/fixtures
+agent-runtime/schema/check.py
+# web-tools: the platform image only needs the tool contract (platform/Dockerfile copies web-tools/schema/tools.json)
+web-tools/*
+!web-tools/schema
+# sandbox: the code execution workspace image has its own context (sandbox/Dockerfile, P40)
+sandbox
+**/.venv
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.ruff_cache
+**/.mypy_cache
+platform/tests
+platform/data
+platform/daegam/ui_dist
+ui
+*.log
