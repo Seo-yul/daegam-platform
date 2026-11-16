@@ -1,0 +1,47 @@
+[project]
+name = "daegam-web-tools"
+version = "0.1.0"
+description = "daegam web tools: platform-managed MCP tools without state (web_fetch) behind a Gateway (P39b, D64)"
+requires-python = ">=3.12"
+license = "LicenseRef-PolyForm-Strict-1.0.0"
+# fastmcp 는 플랫폼·mcp-runtime 과 같은 판으로 == 핀한다. 범위 핀은 상류 새 판을 그대로 끌어온다
+dependencies = [
+    "fastmcp==4.1.2",
+    "httpx>=0.28",
+    # urlfetch 가 to_thread.run_sync 의 abandon_on_cancel 과 limiter 를 쓴다
+    "anyio>=4.1",
+    "certifi",
+    # urlfetch 가 호스트를 UTS 46 A-label 로 맞춘다. httpx 가 끌어오지만 직접 적는다 (D29)
+    "idna>=3.7",
+    "lxml>=5",
+    "markdownify>=0.13",
+    "starlette>=1,<2",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.6",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["webtools"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
