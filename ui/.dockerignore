@@ -1,0 +1,13 @@
+# ui/Dockerfile 의 컨텍스트(ui/)에서 이미지가 안 쓰는 것. 빌드는 package*.json, 설정 파일, src/, public/,
+# index.html, docker/ 만 읽는다
+node_modules
+dist
+tour-out
+test-results
+playwright-report
+e2e
+playwright*.ts
+openapi.json
+*.tsbuildinfo
+*.log
+.vite
