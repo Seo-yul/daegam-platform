@@ -1,0 +1,43 @@
+[project]
+name = "daegam-sandbox"
+version = "0.1.0"
+description = "daegam sandbox: the per-session code execution workspace pod and its server (P40, D95)"
+requires-python = ">=3.12"
+license = "LicenseRef-PolyForm-Strict-1.0.0"
+# 이미지가 싣는 데이터 작업 묶음이다(P40 10절). 서버(daegam_sandbox)는 표준 라이브러리만
+# 쓰고 이 묶음을 import 하지 않는다. 명령이 쓰는 venv(/app/.venv)에만 깔린다. 테넌트가 고르는 패키지는 없다
+dependencies = [
+    "numpy>=2.3,<3",
+    "pandas>=2.3,<4",
+    "matplotlib>=3.10,<4",
+    "openpyxl>=3.1,<4",
+    "python-docx>=1.2,<2",
+    "pypdf>=6.21.4,<7",  # 6.21.3 이하는 HIGH CVE-2026-119203~119209 (플랫폼과 같은 하한)
+    "pillow>=12,<14",
+]
+
+# 로컬 시험과 CI 는 dev 그룹만 깐다(uv run --only-dev). 서버 시험은 데이터 묶음이 필요 없고, 묶음이 import
+# 되는지는 이미지 굽기의 빌드 단계가 본다
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "ruff>=0.6",
+]
+
+[tool.uv]
+# 묶음은 나온 지 두 주가 지난 판만 잠근다. 판을 올릴 때 이 날짜를 함께 옮기고 uv lock 을 다시 한다.
+# 보안 판이 그보다 새로우면 그 패키지만 날짜를 따로 둔다(pypdf 6.21.4 는 2026-10-28 에 나왔다)
+exclude-newer = "2026-10-26T00:00:00Z"
+exclude-newer-package = { pypdf = "2026-10-29T00:00:00Z" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# 프로젝트를 깔지 않으므로 소스 트리에서 daegam_sandbox 를 읽는다
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
