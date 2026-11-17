@@ -40,6 +40,8 @@ CTX="${KUBE_CONTEXT:-k3d-daegam}"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/daegam-f0-p54.XXXXXX")"
 # F0 도구의 포트. lib/e2e_ports.sh 의 표에 없는 자리이고 F0 도구와 함께 사라진다
 API_PORT="${E2E_API_PORT:-19090}"; OIDC_PORT="${E2E_OIDC_PORT:-19091}"
+# vMCP 앞단의 /api/backends/health 를 읽는 port-forward 의 로컬 포트(front_lists_echo)
+HEALTH_PORT="${E2E_FRONT_HEALTH_PORT:-19100}"
 TENANT="${F0_TENANT:-f0-front}"
 OTHER="${F0_OTHER_TENANT:-f0-front-x}"
 MCP_CLIENT_NAME="daegam-f0-p54"
@@ -59,9 +61,12 @@ S3_HOST="f0-s3.e2e.local"; S3_PROBE_HOST="f0-s3-probe.e2e.local"
 MCP_GROUP="mcp-$TENANT"; T_GROUP="daegam-$TENANT"
 SPIKE_URL="http://mcp-calculator-proxy.${SPIKE_NS}.svc.cluster.local:8080/mcp"
 NS=""; S1_ID=""; S1_K8S=""
+PF_HEALTH=""   # front_lists_echo 가 여는 상태 port-forward 의 루프 pid. 신호로 끝나도 정리가 닫는다
 
 cleanup() {
   f0_restore_mode
+  # stop_pf 는 WORK 의 pid·멈춤 파일을 쓰므로 WORK 를 지우기 전에 닫는다
+  stop_pf "$PF_HEALTH" "$HEALTH_PORT"
   rm -rf "$WORK"
 }
 on_exit cleanup
@@ -355,28 +360,52 @@ f0_1_oidc() {
 
 # front_lists_echo STEP HOST OUT VMCP -> 시험 Ingress HOST 로 vMCP 앞단(NS 의 VMCP)이 echo 를 알릴 때까지 5초 간격으로
 # 12번 본다. 마지막 목록을 FRONT_TOOLS 에 남기고 echo 가 있으면 0 이다. 새 vMCP 파드의 첫 상태 확인이 실패하면 ToolHive
-# 0.53 은 그 백엔드를 다음 확인(30초 뒤)까지 라우팅하지 않으므로, 바꾸기 전에 백엔드가 라우팅될 때까지 기다린다. 첫 번째와
-# echo 가 보인 때(또는 마지막)의 status.discoveredBackends 를 결과 줄로 남긴다. B1 의 바꾸기 조건(healthy·degraded)이
-# 실제 라우팅과 맞는지 그 줄로 본다
+# 0.53 은 그 백엔드를 다음 확인(30초 뒤)까지 라우팅하지 않으므로, 바꾸기 전에 백엔드가 라우팅될 때까지 기다린다. 시도마다
+# 목록과 함께 status.discoveredBackends(30초마다 쓰는 사본)와 vMCP 의 /api/backends/health(라우팅이 읽는 실시간 상태)를
+# 결과 줄로 남긴다. B1 의 바꾸기 조건(실시간 상태의 healthy·degraded, P54 6절)이 실제 라우팅과 맞는지 그 줄로 본다
 front_lists_echo() {
-  local step="$1" host="$2" out="$3" vmcp="$4" i
+  local step="$1" host="$2" out="$3" vmcp="$4" i rc=1
   FRONT_TOOLS=""
+  # 시험 Ingress 는 노출 경로(/mcp, /.well-known)만 잇는다. 상태 경로는 vMCP Service 를 port-forward 해 읽는다
+  start_pf "$NS" "svc/vmcp-$vmcp" "${HEALTH_PORT}:4483"; PF_HEALTH="$PF_PID"
+  wait_port "$HEALTH_PORT" 10 || true
   for ((i = 1; i <= 12; i++)); do
     # 지난 시도의 파일이 남아 있으면 이번 시도가 실패해도 그 목록을 읽는다
     rm -f "$out"
     f0_tool probe --url "http://$host/mcp" --ip "$LB_IP" --rows session --out "$out" >/dev/null 2>&1 || true
     FRONT_TOOLS="$(tool_names "$out")"
-    case " $FRONT_TOOLS " in
-      *" echo "*)
-        f0_note "$step" "try $i of 12: vMCP front lists [$FRONT_TOOLS]; status.discoveredBackends $(front_backends "$vmcp")"
-        return 0 ;;
-    esac
-    [ "$i" != 1 ] \
-      || f0_note "$step" "try 1 of 12: vMCP front lists [$FRONT_TOOLS]; status.discoveredBackends $(front_backends "$vmcp")"
-    sleep 5
+    f0_note "$step" "try $i of 12: vMCP front lists [$FRONT_TOOLS]; status.discoveredBackends $(front_backends "$vmcp"); /api/backends/health $(front_live_health)"
+    case " $FRONT_TOOLS " in *" echo "*) rc=0; break ;; esac
+    [ "$i" = 12 ] || sleep 5
   done
-  f0_note "$step" "try 12 of 12: vMCP front lists [$FRONT_TOOLS]; status.discoveredBackends $(front_backends "$vmcp")"
-  return 1
+  stop_pf "$PF_HEALTH" "$HEALTH_PORT"; PF_HEALTH=""
+  return "$rc"
+}
+
+# front_live_health -> port-forward 한 vMCP 앞단의 GET /api/backends/health 에서 백엔드마다 "이름=상태 failures=N
+# check=시각 error=분류" 를 찍는다. 읽지 못하거나 모양이 다르면(Status 가 없거나 문자열이 아닌 값) 그렇다고 찍고 받은
+# 키를 보인다. 실제 상태처럼 보이는 값을 지어내지 않는다. curl 이 실패하면 port-forward 를 다시 붙여, 갈아 끼운 파드에
+# 묶인 채 끊긴 것(curl 52 등)이 다음 시도까지 살아나게 한다. f0_redact 를 거친다
+front_live_health() {
+  local raw rc=0
+  raw="$(curl -sS --max-time 3 "http://127.0.0.1:$HEALTH_PORT/api/backends/health" 2>&1)" || rc=$?
+  [ "$rc" = 0 ] || restart_pf "$HEALTH_PORT"
+  printf '%s' "$raw" | python3 -c 'import json, sys
+raw = sys.stdin.read()
+try:
+    d = json.loads(raw)
+    rows = []
+    for name, s in sorted((d.get("backends") or {}).items()):
+        status = s.get("Status") if isinstance(s, dict) else None
+        if isinstance(status, str) and status:
+            rows.append("%s=%s failures=%s check=%s error=%s" % (name, status, s.get("ConsecutiveFailures"),
+                        str(s.get("LastCheckTime") or "-")[:19], s.get("LastErrorCategory") or "-"))
+        else:
+            shape = sorted(s) if isinstance(s, dict) else type(s).__name__
+            rows.append("%s=no Status, got %s" % (name, shape))
+    print("; ".join(rows) if rows else "monitoring_enabled=%s, no backends" % d.get("monitoring_enabled"))
+except Exception as e:
+    print("unreadable (%s): %s" % (type(e).__name__, " ".join(raw.split())[:160]))' | f0_redact
 }
 
 # front_backends VMCP -> NS 의 VirtualMCPServer VMCP 의 status.discoveredBackends 를 "이름=상태" 로 찍는다
