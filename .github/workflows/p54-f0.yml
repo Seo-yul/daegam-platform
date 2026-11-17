@@ -287,13 +287,16 @@ jobs:
       - name: diagnostics
         if: ${{ failure() }}
         continue-on-error: true
+        # 항목이 실패로 센 행이 있을 때마다 돈다. 로그는 공개이므로 자격 증명처럼 보이는 값을 지운다(scripts/f0/redact.sh)
         run: |
           k=(kubectl --context "$KUBE_CONTEXT")
-          "${k[@]}" get pods -A -o wide || true
-          "${k[@]}" get events -A --sort-by=.lastTimestamp 2>/dev/null | tail -n 80 || true
-          "${k[@]}" -n daegam-system logs deploy/daegam-platform --tail=200 || true
-          "${k[@]}" -n toolhive-system logs deploy/toolhive-operator --tail=150 || true
-          "${k[@]}" get mcpremoteproxies,virtualmcpservers,mcpserverentries,mcpauthzconfigs -A || true
+          {
+            "${k[@]}" get pods -A -o wide || true
+            "${k[@]}" get events -A --sort-by=.lastTimestamp 2>/dev/null | tail -n 80 || true
+            "${k[@]}" -n daegam-system logs deploy/daegam-platform --tail=200 || true
+            "${k[@]}" -n toolhive-system logs deploy/toolhive-operator --tail=150 || true
+            "${k[@]}" get mcpremoteproxies,virtualmcpservers,mcpserverentries,mcpauthzconfigs -A || true
+          } 2>&1 | bash scripts/f0/redact.sh
       - name: summary
         if: ${{ always() }}
         run: |

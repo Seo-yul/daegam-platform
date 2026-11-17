@@ -713,6 +713,10 @@ def lag(args: argparse.Namespace) -> int:
         r for r in failed if r["t"] >= switch and r["init"] == 200 and r.get("server") in old
     ]
     print(f"  of which the session opened on the old front and its call failed: {len(straddled)}")
+    # 막대(P54 12절 F0.2)가 보는 수다. 바꾼 뒤에 시작해 새 앞단에서 열린 세션의 실패만 센다. 바꾸기
+    # 전의 실패와 바꾸기에 걸친 세션(F0.3 의 주제, 릴리스 노트)은 넘김이 끊은 호출이 아니다
+    dropped = [r for r in failed if r["t"] >= switch and r not in straddled]
+    print(f"dropped calls after the switch: {len(dropped)}")
     for r in failed:
         print(
             f"  {r['t'] - switch:+.2f}s init={r['init']} server={r.get('server')} "

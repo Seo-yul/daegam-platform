@@ -289,6 +289,15 @@ f0_1_rows() {
   f0_block "F0.1 $mode" "$F0_OUT/f0.1-$mode-compare.md"
   # 프록시 앞단이 허용 토큰으로 답하지 않았으면 두 앞단이 같이 실패해도 "같다" 로 읽히므로 멈춘다
   [ "$rc" = 0 ] || die "F0.1-$mode" "the proxy front did not answer the allowed token (BASELINE INVALID above)"
+  # vMCP 앞단이 Tool 을 프록시 앞단과 다르게 알리면 Tool 에 기대는 행(목록 항목, 호출, 30초 넘는 호출, 거절된 호출)은 앞단을
+  # 재지 못한 것이다. 그 원인을 읽을 진단을 남기고 실패로 센다. 다른 모드의 행은 이어서 잰다
+  local want got
+  want="$(tool_names "$F0_OUT/f0.1-$mode-proxy.json")"
+  got="$(tool_names "$F0_OUT/f0.1-$mode-vmcp.json")"
+  if [ "$got" != "$want" ]; then
+    vmcp_diag "F0.1 $mode" "$NS" "front-$S1_K8S" "app.kubernetes.io/instance=$S1_K8S"
+    record_fail "F0.1-$mode" "the vMCP front lists [$got], the proxy front [$want]; see diag-front-$S1_K8S.txt"
+  fi
 }
 
 # rebuild_front STEP -> 모드를 바꾼 뒤 플랫폼이 다시 렌더한 프록시 앞단을 기다리고 그것으로 vMCP 앞단을 다시 만든다.
@@ -348,6 +357,7 @@ f0_1_oidc() {
 
 f0_2() {
   local k8s url code_blocked code_open code_proxy switch_at deleted_at proxy_svc policy rc=0 i name_old name_new
+  local front_tools dropped
   measured_server F0.2 f0-handover "$(exposure_tls "$S2_HOST" "$CERT_MANAGER_TLS")"
   k8s="$MS_K8S"; url="https://$S2_HOST/mcp"
   cert_ready F0.2 "$MS_ID"
@@ -369,6 +379,26 @@ f0_2() {
   code_open="$(traefik_status "http://$S2_PROBE_HOST/mcp" 24)"
   # 옛 앞단과 새 앞단은 initialize 의 serverInfo.name 으로 가른다(loop, lag). 둘이 같으면 라우팅 지연을 잴 수 없다
   name_new="$(server_name "http://$S2_PROBE_HOST/mcp")"
+  # 두 kind 를 고르는 정책 아래에서도 시험 Ingress 로 닿지 않으면 아래의 목록 확인이 아무것도 읽지 못한다
+  [ "$code_open" = 200 ] \
+    || die F0.2 "the vMCP front does not answer through Traefik with the both-kinds policy (proxy-only policy -> $code_blocked, both-kinds policy -> $code_open)"
+  # 루프가 부르는 echo 를 vMCP 앞단이 바꾸기 전에 알려야 바꾼 뒤의 실패를 넘김의 실패로 읽을 수 있다. 백엔드를 찾는 데
+  # 걸리는 몇 초를 기다리도록 60초 동안 5초마다 본다
+  front_tools=""
+  for ((i = 0; i < 12; i++)); do
+    f0_tool probe --url "http://$S2_PROBE_HOST/mcp" --ip "$LB_IP" --rows session \
+      --out "$F0_OUT/f0.2-front-before.json" >/dev/null 2>&1 || true
+    front_tools="$(tool_names "$F0_OUT/f0.2-front-before.json")"
+    case " $front_tools " in *" echo "*) break ;; esac
+    sleep 5
+  done
+  f0_note F0.2 "vMCP front before the switch lists [$front_tools]"
+  case " $front_tools " in
+    *" echo "*) ;;
+    *)
+      vmcp_diag F0.2 "$NS" "front-$k8s" "app.kubernetes.io/instance=$k8s"
+      die F0.2 "the vMCP front does not list echo within 60s before the switch, so the handover cannot be measured; see diag-front-$k8s.txt" ;;
+  esac
   policy="$("${K[@]}" -n "$NS" get networkpolicy "f0-expose-both-$k8s" -o jsonpath='{.spec.podSelector}')"
   "${K[@]}" -n "$NS" delete networkpolicy "daegam-expose-$k8s" >/dev/null
   sleep 5
@@ -399,6 +429,13 @@ f0_2() {
   f0_loop_stop "$WORK" f0.2 "$switch_at" "$deleted_at" || rc=$?
   f0_block F0.2 "$F0_OUT/lag-f0.2.txt"
   [ "$rc" = 0 ] || die F0.2 "the call loop has no successful call before the switch (BASELINE INVALID above)"
+  # 12절의 막대(404, 503, 끊긴 호출)는 바꾼 뒤에 시작해 새 앞단에서 연 세션의 실패만 본다(f0_tool lag 의 dropped).
+  # 바꾸기 전의 실패와 바꾸기에 걸친 세션의 404 는 F0.3 과 릴리스 노트의 몫이다. 하나라도 있으면 진단을 남기고 실패로 센다
+  dropped="$(sed -n 's/^dropped calls after the switch: \([0-9][0-9]*\).*/\1/p' "$F0_OUT/lag-f0.2.txt" | head -n 1)"
+  if [ "${dropped:-0}" != 0 ]; then
+    vmcp_diag F0.2 "$NS" "front-$k8s" "app.kubernetes.io/instance=$k8s"
+    record_fail F0.2 "$dropped calls dropped after the switch (lag-f0.2.txt)"
+  fi
   cert_state "$k8s" "$S2_HOST" >"$F0_OUT/f0.2-cert-after.txt"
   f0_block "F0.2 before" "$F0_OUT/f0.2-cert-before.txt"
   f0_block "F0.2 after" "$F0_OUT/f0.2-cert-after.txt"
@@ -469,6 +506,11 @@ f0_3() {
   [ "$(json_of "$F0_OUT/f0.3-session.json" 'next((s.get("ok") for s in d["steps"] if s["step"] == "call before the switch"), False)')" = True ] \
     || die F0.3 "the session's call before the switch failed, so the steps after it say nothing about the switch"
   f0_note F0.3 "session opened on the proxy front (serverInfo $old); after the switch Traefik answered as $name; the same session called three times, then a new session"
+  # 새 세션의 호출이 실패하면 그것은 SDK 의 동작이 아니라 vMCP 앞단의 실패다. 진단을 남기고 실패로 센다
+  if [ "$(json_of "$F0_OUT/f0.3-session.json" 'next((s.get("ok") for s in d["steps"] if s["step"] == "new session: call"), False)')" != True ]; then
+    vmcp_diag F0.3 "$NS" "front-$k8s" "app.kubernetes.io/instance=$k8s"
+    record_fail F0.3 "a new session on the vMCP front could not call echo, so the vMCP front itself failed; see diag-front-$k8s.txt"
+  fi
 }
 
 # ---------- F1 ----------
@@ -677,13 +719,15 @@ case "$mode" in
     f0_server_up F0
     f0_rest_backend F0 f0-rest
     for item in "${items[@]}"; do
+      before="$FAILED"
       case "$item" in
         f0.1) f0_1_header; f0_1_local; f0_header_connect F0.1; f0_1_oidc; f0_header_connect F0.1 ;;
         f0.2) f0_2 ;;
         f0.3) f0_3 ;;
         *) die F0 "unknown item $item (f0.1 f0.2 f0.3)" ;;
       esac
-      pass "$(tr '[:lower:]' '[:upper:]' <<<"$item")" "results in $F0_OUT"
+      # 항목 안에서 실패로 센 행(record_fail)이 있으면 PASS 를 찍지 않는다. 종료 코드는 finish 가 정한다
+      [ "$FAILED" != "$before" ] || pass "$(tr '[:lower:]' '[:upper:]' <<<"$item")" "results in $F0_OUT"
     done
     ;;
   f1)

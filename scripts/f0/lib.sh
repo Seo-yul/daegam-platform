@@ -20,6 +20,14 @@
 # f0_header_connect STEP         header 모드의 플랫폼에 붙는다 (PF_API, 빈 AUTH)
 # f0_server_up STEP              daegam-f0 에 시험 서버(f0_server.py)를 플랫폼과 같은 이미지로 띄운다. 주소는 F0_HTTP·F0_SSE
 #                                (클러스터 안)이다
+# f0_server_log ITEM             시험 서버의 로그 끝을 F0_OUT/diag-f0-mcp.txt 에 남기고 찍는다
+# f0_redact                      표준 입력에서 자격 증명처럼 보이는 값을 지워 내보낸다(redact.sh. 지우는 것은 그 파일 머리)
+# tool_names FILE                f0_tool probe 결과 FILE 의 tools/list 이름을 정렬해 공백으로 이어 찍는다. 파일이나 행이 없으면
+#                                빈 줄이다
+# vmcp_diag ITEM NS VMCP [SELECTOR [SELECTOR_NS]]
+#                                vMCP 가 백엔드를 어떻게 보는지 F0_OUT/diag-VMCP.txt 에 남기고 찍는다. VirtualMCPServer 의
+#                                status(discoveredBackends), vMCP 파드 로그 중 감사 이벤트가 아닌 줄, SELECTOR 가 고르는
+#                                백엔드 파드의 로그(SELECTOR_NS, 기본 NS)다. 모두 f0_redact 를 거친다
 # f0_server_scale STEP N         시험 서버의 레플리카를 N 으로 두고 그만큼 Ready 이거나 0 이 될 때까지 기다린다
 # f0_rest_backend STEP NAME      시험 서버의 REST 백엔드를 Backend API NAME 으로 올리고 BACKEND_API_ID·BACKEND_API_VERSION 을
 #                                남긴다(lib/e2e_api.sh upload_backend_api)
@@ -110,6 +118,37 @@ f0_block() { # ITEM FILE
 }
 
 f0_tool() { "${LAB_PY[@]}" "$HERE/f0_tool.py" "$@"; }
+
+f0_redact() { bash "$HERE/redact.sh"; }
+
+tool_names() { # FILE
+  json_of "$1" '" ".join(sorted(t["name"] for t in ((d.get("rows") or {}).get("tools/list") or {}).get("tools") or []))' \
+    2>/dev/null || true
+}
+
+vmcp_diag() { # ITEM NS VMCP [SELECTOR [SELECTOR_NS]]
+  local item="$1" ns="$2" vmcp="$3" sel="${4:-}" sel_ns="${5:-$2}" out="$F0_OUT/diag-$3.txt"
+  {
+    echo "VirtualMCPServer $ns/$vmcp status:"
+    "${K[@]}" -n "$ns" get virtualmcpserver "$vmcp" -o jsonpath='{.status}' 2>&1 || true
+    echo
+    echo
+    echo "vMCP pod log, lines that are not audit events (last 150):"
+    "${K[@]}" -n "$ns" logs -l "app.kubernetes.io/name=virtualmcpserver,app.kubernetes.io/instance=$vmcp" \
+      --tail=3000 2>&1 | grep -v -e '"audit_id"' -e '"auditId"' | tail -n 150 || true
+    if [ -n "$sel" ]; then
+      echo
+      echo "backend pods in $sel_ns ($sel), last 100 lines each:"
+      "${K[@]}" -n "$sel_ns" logs -l "$sel" --all-containers --prefix --tail=100 2>&1 || true
+    fi
+  } | f0_redact >"$out"
+  f0_block "$item" "$out"
+}
+
+f0_server_log() { # ITEM
+  "${K[@]}" -n "$F0_NS" logs deploy/f0-mcp --tail=150 2>&1 | f0_redact >"$F0_OUT/diag-f0-mcp.txt" || true
+  f0_block "$1" "$F0_OUT/diag-f0-mcp.txt"
+}
 
 f0_now() { python3 -c 'import time; print(f"{time.time():.3f}")'; }
 

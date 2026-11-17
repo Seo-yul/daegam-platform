@@ -98,6 +98,23 @@ gw_pf() {
 
 # ---------- F0.4 ----------
 
+# pair_state LABEL -> 그 항목의 Gateway 가 어땠는지 한 마디. f0_4 안에서 부르고 그 labels·urls 를 읽는다(동적 범위)
+pair_state() {
+  local i
+  for i in "${!labels[@]}"; do
+    [ "${labels[$i]}" = "$1" ] || continue
+    if [ -z "${urls[$i]}" ]; then
+      echo "did not become Ready"
+    elif [ ! -s "$F0_OUT/f0.4-$1.json" ]; then
+      echo "was Ready but its probe failed"
+    else
+      echo "answered"
+    fi
+    return 0
+  done
+  echo "was not created"
+}
+
 f0_4() {
   local s k n idx url transport name item_ids=() gw_ids=() gw_k8s=() gw_ns=() urls=() labels=() code i
   local pod_ip cluster_ip t0 back tenant_ns spec r l proxy_name rc
@@ -139,6 +156,13 @@ f0_4() {
     [ -n "${urls[$i]}" ] || continue
     F0_TOKEN="$PERSON" F0_REFUSED_TOKEN="$INTRUDER" f0_tool probe --url "${urls[$i]}" --rows unauthenticated,session,refused \
       --out "$F0_OUT/f0.4-${labels[$i]}.json" || f0_note F0.4 "${labels[$i]}: probe failed"
+    # Tool 을 하나도 알리지 않은 Gateway 는 그 백엔드를 어떻게 보는지 남긴다. 항목의 서버가 다른 네임스페이스면 그쪽 파드다
+    if [ -z "$(tool_names "$F0_OUT/f0.4-${labels[$i]}.json")" ]; then
+      case "${labels[$i]}" in
+        f0-spike-*) vmcp_diag F0.4 "${gw_ns[$i]}" "${gw_k8s[$i]}" "app.kubernetes.io/instance=calculator" daegam-spike ;;
+        *) vmcp_diag F0.4 "${gw_ns[$i]}" "${gw_k8s[$i]}" "app=f0-mcp" "$F0_NS" ;;
+      esac
+    fi
   done
   for s in "${SERVERS[@]}"; do
     if [ -s "$F0_OUT/f0.4-f0-$s-remote.json" ] && [ -s "$F0_OUT/f0.4-f0-$s-entry.json" ]; then
@@ -147,11 +171,17 @@ f0_4() {
         >"$F0_OUT/f0.4-$s-compare.md" || rc=$?
       f0_block "F0.4 $s" "$F0_OUT/f0.4-$s-compare.md"
       # remote(기준)가 사람의 토큰으로 답하지 않았으면 이 서버의 견줌은 아무것도 말하지 않는다. 다른 서버는 잰다
-      [ "$rc" = 0 ] || f0_note F0.4 "$s: COMPARISON INVALID, the remote item's Gateway did not answer the person's token"
+      [ "$rc" = 0 ] || record_fail F0.4 "$s: COMPARISON INVALID, the remote item's Gateway f0g-$s-remote did not answer the person's token"
+    elif [ -s "$F0_OUT/f0.4-f0-$s-remote.json" ]; then
+      # 기준(remote)은 답했고 entry 쪽만 Ready 가 아니거나 답하지 않았다. P54b 11절 F0.4 의 막대가 보는 결과다(SSE 면
+      # SSE remote 항목의 변환을 막는다). 잰 결과이므로 실패로 세지 않는다
+      f0_note F0.4 "$s: MEASURED, the remote item's Gateway f0g-$s-remote answered and the entry item's Gateway f0g-$s-entry $(pair_state "f0-$s-entry")"
     else
-      f0_note F0.4 "$s: no comparison (a Gateway of the pair did not become Ready)"
+      record_fail F0.4 "$s: no comparison, the remote item's Gateway f0g-$s-remote $(pair_state "f0-$s-remote") (the entry item's Gateway f0g-$s-entry $(pair_state "f0-$s-entry"))"
     fi
   done
+  # SSE 항목의 실패가 시험 서버 쪽인지 가를 수 있게 시험 서버의 로그 끝을 남긴다
+  f0_server_log F0.4
 
   # 감사 이벤트: vMCP 파드와 remote 항목의 프록시 파드
   sleep 5
@@ -371,7 +401,8 @@ case "$mode" in
     traefik_ip F0
     f0_server_up F0
     f0_4
-    pass F0.4 "results in $F0_OUT"
+    # 견줌이 무효인 서버가 있으면(record_fail) PASS 를 찍지 않는다. 다른 서버의 결과는 남는다
+    [ "$FAILED" -gt 0 ] || pass F0.4 "results in $F0_OUT"
     ;;
   f1)
     phase="${1:-}"
