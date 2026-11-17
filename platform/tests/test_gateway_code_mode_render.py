@@ -204,6 +204,24 @@ def _later(client, minutes: int) -> None:
     run_data_plane_auth(client, now=utcnow() + timedelta(minutes=minutes))
 
 
+def test_a_running_code_mode_gateway_stays_open_through_ticks_and_redeploys(
+    client, fake_clusters, mongo
+):
+    """도는 렌더가 실은 스크립트(Agent 쪽 소스에는 든다, P56 6.5절)를 판정은 보지 않는다. 그래서
+    다음 틱과 재배포가 그것을 예약 이름으로 거절해 code mode 를 닫지 않는다."""
+    cid, items, calc, _server = _env(client, fake_clusters, mongo)
+    gw = _deploy(client, mongo, cid, items, calc)
+    assert _applied(mongo, gw["id"]) is True
+    for minutes in (10, 20):
+        _later(client, minutes)
+        assert _rendered(fake_clusters) == (True, True)
+        assert _applied(mongo, gw["id"]) is True
+    assert not any(w.startswith(CODE_MODE_CLOSED) for w in _status_warnings(client, gw["id"]))
+    r = client.post(f"{GW}/{gw['id']}/redeploy", json={})
+    assert r.status_code < 300, r.text
+    assert _rendered(fake_clusters) == (True, True)
+
+
 def test_an_old_toolhive_closes_code_mode_with_its_cause(client, fake_clusters, mongo):
     cid, items, calc, _server = _env(client, fake_clusters, mongo)
     gw = _deploy(client, mongo, cid, items, calc)

@@ -27,10 +27,12 @@
   `internal`, 그 밖은 백엔드 종류(`image`·`remote`·`entry`·`platform`)이고 `published` 는 원본을
   따른다. 백엔드 종류를 모르는 이름은 `origins` 에 넣지 않는다. 이름을 모르는 백엔드가 하나라도
   있는 Gateway 는 어느 이름이 그 백엔드의 것인지 알 수 없어 `origins` 가 빈다. P43 의 바깥 표시와
-  읽기 표시가 이것으로
-  갈린다(`agent_tool_safety.py`). 기능 `tool_safety` 를 아는 이미지에서는 캔버스의 읽기 전용 표시가
-  서버나 항목의 표시가 설 수 없는 Tool(`remote`·`entry` 와 규칙 없는 `image`)에만 효과가
-  있다(`node_effects`).
+  읽기 표시가 이것으로 갈린다(`agent_tool_safety.py`). 기능 `tool_safety` 를 아는 이미지에서는
+  캔버스의 읽기 전용 표시가 서버나 항목의 표시가 설 수 없는 Tool(`remote`·`entry` 와 규칙 없는
+  `image`)에만 효과가 있다(`node_effects`).
+- 도는 렌더가 code mode 를 실은 Gateway 는 `execute_tool_script` 를 효과 `read`, 종류 `script` 로
+  더 낸다(P56 6.5절). 그 Gateway 의 Tool 이 모두 읽기라는 판정이 그 효과 뒤에 선다. 게시된 원본의
+  스크립트는 소비자가 내놓지 않으므로(`published_pins`) 소비자의 이름에서 뺀다.
 
 검증·컴파일은 스레드 풀에서 돌므로 서비스가 효과의 재료를 미리 읽어 `GraphContext.source_tools`
 (소스 id → `SourceTools`)에 둔다(`ToolEffectLoader`).
@@ -39,11 +41,12 @@
 from __future__ import annotations
 
 from collections.abc import Collection, Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, NamedTuple
 
 from pydantic import ValidationError
 
+from daegam.k8s.templates.vmcp import CODE_MODE_TOOL
 from daegam.services.advertised_names import (
     ExposedTool,
     gateway_exposed_name,
@@ -67,6 +70,10 @@ ORIGIN_PLATFORM = PLATFORM_KIND
 THIRD_PARTY_ORIGINS = frozenset({"image", "remote", "entry"})
 """서버가 읽기 전용 여부를 알려 주지 않는 백엔드 종류다. 결과는 처음부터 바깥 내용이고 캔버스의 읽기
 전용 표시가 효과를 낸다(P43 2·4절)."""
+ORIGIN_SCRIPT = "script"
+"""code mode Gateway 의 `execute_tool_script` 다(P56 6.5절). `internal` 도 바깥 서비스도 아니다.
+효과는 `read` 이고, 결과는 늘 바깥 내용이며 캔버스의 어느 표시도 효과가 없다
+(`agent_tool_safety`)."""
 READ_METHODS = frozenset({"GET", "HEAD"})
 WEB_FETCH = "fetch"
 WEB_SEARCH = "search"
@@ -112,6 +119,21 @@ class SourceTools:
 
 
 UNKNOWN_SOURCE = SourceTools(names=None)
+
+
+def without_script(tools: SourceTools) -> SourceTools:
+    """Gateway 가 자기 렌더로 내는 스크립트(종류 `script`)를 뺀 소스다. code mode 판정은 백엔드가
+    광고하는 이름만 본다(P56 6.2절). 스크립트를 넣은 채로 판정하면 예약 이름으로 거절되어, 판정이
+    매 렌더 code mode 를 열고 닫는다. 백엔드가 같은 이름을 낸 것은 그대로 둔다."""
+    if tools.origins.get(CODE_MODE_TOOL) != ORIGIN_SCRIPT:
+        return tools
+    return replace(
+        tools,
+        names=tuple(n for n in tools.names if n != CODE_MODE_TOOL) if tools.names else tools.names,
+        effects={n: e for n, e in tools.effects.items() if n != CODE_MODE_TOOL},
+        origins={n: o for n, o in tools.origins.items() if n != CODE_MODE_TOOL},
+        marked=tools.marked - {CODE_MODE_TOOL},
+    )
 
 
 def method_effect(method: str | None) -> str:
@@ -278,7 +300,9 @@ def gateway_source(
 
     필터 없는 게시 백엔드는 원본 Gateway 가 지금 광고하는 것을 그대로 낸다. 그 아래에 웹 Tool 이
     있으면 이름을 모르는 웹 소스다. 스냅샷이 원본이 웹 Tool 을 얻기 전의 것이어도 검증이
-    `web_tools_unknown_names` 로 막게 하려는 것이다."""
+    `web_tools_unknown_names` 로 막게 하려는 것이다. 원본의 `execute_tool_script` 는 빼고, 이
+    Gateway 의 도는 렌더가 code mode 를 실었으면(`code_mode_applied`) 이 Gateway 의 스크립트를
+    끝에 더한다(모듈 머리)."""
     if gw.deployed_revision is None:
         return UNKNOWN_SOURCE
     resolution, overrides = gw.deployed_conflict_resolution, gw.tool_overrides
@@ -293,6 +317,8 @@ def gateway_source(
     exposed: list[str] = []
     for tool in gateway_tools(gw.deployed_backends, resolution, overrides):
         b = backends[tool.backend]
+        if b.kind == "published" and tool.original == CODE_MODE_TOOL:
+            continue  # 게시된 원본의 스크립트는 이 Gateway 가 내놓지 않는다(`published_pins`)
         below = published.get(b.hub_item_id) if b.kind == "published" else None
         if b.kind == "internal":
             below = servers.get(b.server_id or "")
@@ -324,6 +350,12 @@ def gateway_source(
             effects.setdefault(name, EFFECT_WEB)
             web.setdefault(name, kind)
             origins.setdefault(name, ORIGIN_PLATFORM)
+    if gw.code_mode_applied and CODE_MODE_TOOL not in effects:
+        # 도는 렌더가 실은 스크립트다. 이름은 접두사 없이 그대로다(P56 6.5절)
+        effects[CODE_MODE_TOOL] = EFFECT_READ
+        origins[CODE_MODE_TOOL] = ORIGIN_SCRIPT
+        marked.add(CODE_MODE_TOOL)
+        exposed.append(CODE_MODE_TOOL)
     return SourceTools(
         names=tuple(dict.fromkeys(exposed)) if known else None,
         effects=effects,

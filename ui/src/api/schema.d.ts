@@ -6495,7 +6495,7 @@ export interface components {
             /** Tool Origins */
             tool_origins?: {
                 [key: string]: {
-                    [key: string]: "internal" | "platform" | "image" | "remote" | "entry";
+                    [key: string]: "internal" | "platform" | "image" | "remote" | "entry" | "script";
                 };
             };
             /** Tool Marked */

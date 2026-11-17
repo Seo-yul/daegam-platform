@@ -34,7 +34,7 @@ from daegam.services.hub import HubService, proxied
 from daegam.services.platform_tools import check_backends, require_same_cluster
 from daegam.services.published_backends import owner_forbids, published_source
 from daegam.services.rule_compile import source_forbids
-from daegam.services.tool_effects import SourceTools, ToolEffectLoader
+from daegam.services.tool_effects import SourceTools, ToolEffectLoader, without_script
 from daegam.services.tool_pins import PINNED_AGENTS_KEEP_TOOLS, pin_states, pins_behind
 from daegam.services.tool_rules import (
     ToolRuleError,
@@ -310,8 +310,9 @@ class GatewayValidator:
         self, doc: Gateway, sample: Gateway
     ) -> tuple[CodeModeVerdict, SourceTools]:
         """(판정, 그 판정이 읽은 광고 이름과 효과). sample 은 판정할 스냅샷이고, 노출과 소유자
-        Cedar 는 doc 에서 읽는다(배포·재배포는 메모리에 얹은 새 노출을 읽는다)."""
-        tools = (await self.tool_effects.load({sample.id: sample}, {}))[sample.id]
+        Cedar 는 doc 에서 읽는다(배포·재배포는 메모리에 얹은 새 노출을 읽는다). 이 Gateway 가 자기
+        렌더로 내는 스크립트는 빼고 판정한다(`without_script`)."""
+        tools = without_script((await self.tool_effects.load({sample.id: sample}, {}))[sample.id])
         found = code_mode_verdict(
             tools,
             exposed=doc.exposure.enabled,

@@ -53,6 +53,9 @@ describe("lib/toolSafety", () => {
     expect(isOutside("create_order", "internal", "write", { create_order: true })).toBe(true);
     expect(isOutside("web_fetch", "platform", "web", { web_fetch: false })).toBe(true);
     expect(outsideFixed(undefined, "write") && outsideFixed("platform", "web") && !outsideFixed("internal", "write")).toBe(true);
+    // code mode 스크립트는 읽기여도 늘 바깥이다 (P56 6.5절)
+    expect(outsideFixed("script", "read")).toBe(true);
+    expect(isOutside("execute_tool_script", "script", "read", { execute_tool_script: false })).toBe(true);
     // 기본값으로 돌아가면 키를 지운다
     expect(withOutside({ create_order: true }, "create_order", "internal", false)).toEqual({});
     expect(withOutside(undefined, "send_mail", "remote", false)).toEqual({ send_mail: false });
@@ -83,6 +86,23 @@ describe("tools 노드의 외부 내용 표시", () => {
     expect(stored().outside).toEqual({ create_order: true });
     await user.click(screen.getByTestId("tool-outside-create_order"));
     expect(stored().outside).toEqual({});
+  });
+
+  it("code mode 스크립트는 외부 내용으로 고정되어 바꿀 수 없다 (P56 6.5절)", () => {
+    const gw = gatewayFixture();
+    function Script() {
+      const [data] = useState<ToolsData>({ ...defaultNodeData("tools"), source: { kind: "gateway_instance", id: gw.id }, allow_tools: ["Add", "execute_tool_script"] } as ToolsData);
+      const options = inspectorOptions({
+        gateways: [gw],
+        toolEffects: { [NODE]: { Add: "read", execute_tool_script: "read" } },
+        toolOrigins: { [NODE]: { Add: "internal", execute_tool_script: "script" } },
+      });
+      return <ToolsPanel nodeId={NODE} data={data} update={() => undefined} options={options} hasMemory />;
+    }
+    renderWithProviders(<Script />);
+    expect(screen.getByTestId("tool-outside-execute_tool_script")).toBeChecked();
+    expect(screen.getByTestId("tool-outside-execute_tool_script")).toBeDisabled();
+    expect(screen.getByTestId("tool-outside-Add")).not.toBeDisabled();
   });
 
   it("승인 설정이 없는 쓰기 Tool 은 memory 노드가 있으면 승인, 없으면 거절 배지다", () => {

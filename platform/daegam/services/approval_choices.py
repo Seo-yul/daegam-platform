@@ -12,7 +12,9 @@
   `rememberable` 로 허락했을 때만이고, 거부는 소스의 Tool 이름이면 된다. 모든 Agent 에 내장된
   Tool 이름(파일 Tool 일곱과 `execute`)은 선택을 받지 않는다. 런타임은 그 이름의 소스 Tool 을
   버린다. Agent 에 따라 내장되는 이름(`write_todos`, `task`, `structured_response`)은 소스
-  Tool 이면 받고, 그 Agent 에 내장이면 런타임이 그 선택을 쓰지 않는다.
+  Tool 이면 받고, 그 Agent 에 내장이면 런타임이 그 선택을 쓰지 않는다. Gateway 소스의
+  `execute_tool_script` 는 기억한 승인을 받지 않는다. 그 정적 규칙에는 스크립트가 부르는 Gateway
+  Tool 의 승인이 합쳐져 있어(P56 6.5절) 기억한 승인이 그것을 건너뛰기 때문이다. 거부는 받는다.
 - **기억하기(`to_remember`).** 결정마다의 `remember` 다. approve 는 approve 결정과만, reject 는
   reject 결정과만 짝이다. Tool 이름은 대기 요청에서, 규칙은 배포된 리비전에서 읽는다. 세션 소유자
   자신의 결정이 아니면(소유자를 모름, 승인자의 결정), 대기 요청이 소유자의 것이 아니면, 실행
@@ -44,6 +46,8 @@ from typing import Any
 from pymongo.errors import PyMongoError
 
 from daegam.errors import ServiceError
+from daegam.k8s.templates.vmcp import CODE_MODE_TOOL
+from daegam.services.agent_code_mode import GATEWAY_SOURCE
 from daegam.services.agent_features import TOOL_SAFETY
 from daegam.services.tool_effects import UNKNOWN_SOURCE, tools_nodes
 from daegam.services.tool_pins import ToolPins, pinned_tools, valid_pins
@@ -116,7 +120,7 @@ class ChoiceRules:
             return None
         approve = all(
             n.names is not None and name in n.approval and name in n.rememberable for n in offering
-        )
+        ) and not (name == CODE_MODE_TOOL and any(n.source[0] == GATEWAY_SOURCE for n in offering))
         raw = json.dumps(
             sorted(
                 [

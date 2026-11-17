@@ -46,8 +46,9 @@ UPLOAD_ID_MAX_CHARS = 64
 # Tool 효과 (P39b 14절 4부, `services/tool_effects.py`)
 ToolEffect = Literal["read", "write", "web"]
 # Tool 을 내는 백엔드의 종류 (P43 2절, `services/tool_effects.py`). internal 은 우리 mcp-runtime,
-# platform 은 웹 Tool, 나머지는 서버가 읽기 전용 여부를 알려 주지 않는 Tool 이다
-ToolOrigin = Literal["internal", "platform", "image", "remote", "entry"]
+# platform 은 웹 Tool, script 는 code mode Gateway 의 execute_tool_script(P56 6.5절), 나머지는
+# 서버가 읽기 전용 여부를 알려 주지 않는 Tool 이다
+ToolOrigin = Literal["internal", "platform", "image", "remote", "entry", "script"]
 
 
 class AgentIssueOut(BaseModel):

@@ -145,6 +145,21 @@ def test_an_approve_needs_a_rememberable_rule_on_every_node_offering_the_name() 
     assert any_name.rule("task") is not None
 
 
+def test_a_gateways_script_never_takes_a_remembered_approve() -> None:
+    """Gateway 의 `execute_tool_script` 정적 규칙에는 스크립트가 부르는 Tool 의 승인이 합쳐져 있어
+    기억한 승인이 그것을 건너뛸 수 없다(P56 6.5절). 거부는 받는다."""
+    script = "execute_tool_script"
+    rules = _rules(
+        _spec(
+            allow_tools=["Add", "Divide", script],
+            approval={script: ["approve"]},
+            rememberable=[script],
+        )
+    )
+    rule = _rule(rules, script)
+    assert rule.approve is False and rule.digest
+
+
 def test_a_node_whose_names_are_unknown_may_offer_any_name() -> None:
     spec = _spec(rememberable=["Divide"])
     node_of(spec, NODE)["data"]["allow_tools"] = []
