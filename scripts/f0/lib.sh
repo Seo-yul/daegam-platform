@@ -38,8 +38,9 @@
 #                                f0_tool loop 를 뒤에서 돌린다. 기록은 F0_OUT/loop-NAME.jsonl, pid 와 멈춤 파일은 DIR 이다.
 #                                F0_TOKEN 이 있으면 그 토큰으로 부른다
 # f0_loop_stop DIR NAME SWITCH_AT [DELETED_AT]
-#                                멈추고 SWITCH_AT 을 바꾼 때로 본 lag 요약을 F0_OUT/lag-NAME.txt 에 쓴다. 요약을 쓰지 못할
-#                                때만 줄을 찍는다
+#                                멈추고 SWITCH_AT 을 바꾼 때로 본 lag 요약을 F0_OUT/lag-NAME.txt 에 쓴다. lag 의 종료
+#                                코드를 돌려준다. 3 은 바꾸기 전에 된 호출이 없다는 뜻이고, 그 밖의 0 아닌 값은 요약이
+#                                실패한 것이라 줄도 찍는다
 # hub_item STEP NAME KIND URL TRANSPORT [ACCESS_JSON]
 #                                허브 항목을 만들고(409 는 그 이름의 항목을 잇는다) ITEM_ID 를 남긴다. remote 면 READY_TIMEOUT
 #                                까지 Ready 를 기다리고 그 phase 를 ITEM_PHASE 에 남긴다(Ready 가 아니어도 멈추지 않는다. 부르는
@@ -247,7 +248,7 @@ f0_loop_start() { # DIR NAME URL TOOL ARGS
 }
 
 f0_loop_stop() { # DIR NAME SWITCH_AT [DELETED_AT]
-  local dir="$1" name="$2" pid i
+  local dir="$1" name="$2" pid i rc=0
   touch "$dir/stop-$name"
   pid="$(cat "$dir/pid-$name" 2>/dev/null || true)"
   for ((i = 0; i < 30; i++)); do
@@ -255,7 +256,9 @@ f0_loop_stop() { # DIR NAME SWITCH_AT [DELETED_AT]
     sleep 1
   done
   f0_tool lag --loop "$F0_OUT/loop-$name.jsonl" --switch-at "$3" ${4:+--deleted-at "$4"} >"$F0_OUT/lag-$name.txt" \
-    || echo "!! lag summary of loop $name failed (see $F0_OUT/loop-$name.log)"
+    || rc=$?
+  [ "$rc" = 0 ] || [ "$rc" = 3 ] || echo "!! lag summary of loop $name failed with exit $rc (see $F0_OUT/loop-$name.log)"
+  return "$rc"
 }
 
 hub_item() { # STEP NAME KIND URL TRANSPORT [ACCESS_JSON]
@@ -328,13 +331,18 @@ f1_next_round() {
 f1_mark_install() { f0_now >"$F1_STATE/install-at-r$(f1_get round)"; }
 
 f1_stop_loops() { # PHASE NAME...
-  local phase="$1" round name loop
+  local phase="$1" round name loop rc
   shift
   round="$(f1_get round)"
   for name in "$@"; do
     loop="$name-r$round"
-    f0_loop_stop "$F1_STATE" "$loop" "$(cat "$F1_STATE/install-at-r$round")" \
-      || f1_fail "$phase" "$loop: no call succeeded before the install, so its failures say nothing about the install"
+    rc=0
+    f0_loop_stop "$F1_STATE" "$loop" "$(cat "$F1_STATE/install-at-r$round")" || rc=$?
+    case "$rc" in
+      0) ;;
+      3) f1_fail "$phase" "$loop: no call succeeded before the install, so its failures say nothing about the install" ;;
+      *) f1_fail "$phase" "$loop: the lag summary failed (exit $rc)" ;;
+    esac
     f0_block "F1 $phase $loop (switch = the install's start)" "$F0_OUT/lag-$loop.txt"
   done
 }

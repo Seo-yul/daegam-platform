@@ -206,11 +206,14 @@ jobs:
           done
           for i in ${missing[@]+"${missing[@]}"}; do echo "::error::$i is not in the k3d node"; done
           [ "${#missing[@]}" -eq 0 ]
+      # 접근 로그를 켠다. F0.2 가 바꾼 때 끊긴 호출을 세면 그 앞뒤의 줄을 scripts/f0/redact.sh 를 거쳐 남긴다. 요청 머리는
+      # 남기지 않는다(차트의 기본값을 그대로 적는다)
       - name: traefik
         run: |
           helm repo add traefik https://traefik.github.io/charts >/dev/null
           helm --kube-context "$KUBE_CONTEXT" upgrade -i traefik traefik/traefik --version "$TRAEFIK_CHART_VERSION" \
-            -n traefik --create-namespace --wait --timeout 180s
+            -n traefik --create-namespace --wait --timeout 180s \
+            --set accessLog.enabled=true --set accessLog.format=json --set accessLog.fields.headers.defaultMode=drop
           kubectl --context "$KUBE_CONTEXT" -n traefik get svc traefik
       # F1 의 첫 설치는 앞 트리의 것이다(ToolHive 판, cert-manager, lab 까지). 이 트리의 오퍼레이터는 B1 을 설치할 때
       # 올리고, 되돌린 설치에서도 내리지 않는다. CRD 는 앞으로만 간다(릴리스 흐름과 같다)

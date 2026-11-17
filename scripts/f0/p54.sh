@@ -353,11 +353,43 @@ f0_1_oidc() {
   f0_restore_mode
 }
 
+# front_lists_echo STEP HOST OUT VMCP -> 시험 Ingress HOST 로 vMCP 앞단(NS 의 VMCP)이 echo 를 알릴 때까지 5초 간격으로
+# 12번 본다. 마지막 목록을 FRONT_TOOLS 에 남기고 echo 가 있으면 0 이다. 새 vMCP 파드의 첫 상태 확인이 실패하면 ToolHive
+# 0.53 은 그 백엔드를 다음 확인(30초 뒤)까지 라우팅하지 않으므로, 바꾸기 전에 백엔드가 라우팅될 때까지 기다린다. 첫 번째와
+# echo 가 보인 때(또는 마지막)의 status.discoveredBackends 를 결과 줄로 남긴다. B1 의 바꾸기 조건(healthy·degraded)이
+# 실제 라우팅과 맞는지 그 줄로 본다
+front_lists_echo() {
+  local step="$1" host="$2" out="$3" vmcp="$4" i
+  FRONT_TOOLS=""
+  for ((i = 1; i <= 12; i++)); do
+    # 지난 시도의 파일이 남아 있으면 이번 시도가 실패해도 그 목록을 읽는다
+    rm -f "$out"
+    f0_tool probe --url "http://$host/mcp" --ip "$LB_IP" --rows session --out "$out" >/dev/null 2>&1 || true
+    FRONT_TOOLS="$(tool_names "$out")"
+    case " $FRONT_TOOLS " in
+      *" echo "*)
+        f0_note "$step" "try $i of 12: vMCP front lists [$FRONT_TOOLS]; status.discoveredBackends $(front_backends "$vmcp")"
+        return 0 ;;
+    esac
+    [ "$i" != 1 ] \
+      || f0_note "$step" "try 1 of 12: vMCP front lists [$FRONT_TOOLS]; status.discoveredBackends $(front_backends "$vmcp")"
+    sleep 5
+  done
+  f0_note "$step" "try 12 of 12: vMCP front lists [$FRONT_TOOLS]; status.discoveredBackends $(front_backends "$vmcp")"
+  return 1
+}
+
+# front_backends VMCP -> NS 의 VirtualMCPServer VMCP 의 status.discoveredBackends 를 "이름=상태" 로 찍는다
+front_backends() {
+  "${K[@]}" -n "$NS" get virtualmcpserver "$1" \
+    -o jsonpath='{range .status.discoveredBackends[*]}{.name}={.status} {end}' 2>/dev/null || echo "unreadable"
+}
+
 # ---------- F0.2 ----------
 
 f0_2() {
   local k8s url code_blocked code_open code_proxy switch_at deleted_at proxy_svc policy rc=0 i name_old name_new
-  local front_tools dropped
+  local dropped cut since
   measured_server F0.2 f0-handover "$(exposure_tls "$S2_HOST" "$CERT_MANAGER_TLS")"
   k8s="$MS_K8S"; url="https://$S2_HOST/mcp"
   cert_ready F0.2 "$MS_ID"
@@ -382,23 +414,11 @@ f0_2() {
   # 두 kind 를 고르는 정책 아래에서도 시험 Ingress 로 닿지 않으면 아래의 목록 확인이 아무것도 읽지 못한다
   [ "$code_open" = 200 ] \
     || die F0.2 "the vMCP front does not answer through Traefik with the both-kinds policy (proxy-only policy -> $code_blocked, both-kinds policy -> $code_open)"
-  # 루프가 부르는 echo 를 vMCP 앞단이 바꾸기 전에 알려야 바꾼 뒤의 실패를 넘김의 실패로 읽을 수 있다. 백엔드를 찾는 데
-  # 걸리는 몇 초를 기다리도록 60초 동안 5초마다 본다
-  front_tools=""
-  for ((i = 0; i < 12; i++)); do
-    f0_tool probe --url "http://$S2_PROBE_HOST/mcp" --ip "$LB_IP" --rows session \
-      --out "$F0_OUT/f0.2-front-before.json" >/dev/null 2>&1 || true
-    front_tools="$(tool_names "$F0_OUT/f0.2-front-before.json")"
-    case " $front_tools " in *" echo "*) break ;; esac
-    sleep 5
-  done
-  f0_note F0.2 "vMCP front before the switch lists [$front_tools]"
-  case " $front_tools " in
-    *" echo "*) ;;
-    *)
-      vmcp_diag F0.2 "$NS" "front-$k8s" "app.kubernetes.io/instance=$k8s"
-      die F0.2 "the vMCP front does not list echo within 60s before the switch, so the handover cannot be measured; see diag-front-$k8s.txt" ;;
-  esac
+  # 루프가 부르는 echo 를 vMCP 앞단이 바꾸기 전에 알려야 바꾼 뒤의 실패를 넘김의 실패로 읽을 수 있다
+  if ! front_lists_echo F0.2 "$S2_PROBE_HOST" "$F0_OUT/f0.2-front-before.json" "front-$k8s"; then
+    vmcp_diag F0.2 "$NS" "front-$k8s" "app.kubernetes.io/instance=$k8s"
+    die F0.2 "the vMCP front does not list echo in 12 tries before the switch, so the handover cannot be measured; see diag-front-$k8s.txt"
+  fi
   policy="$("${K[@]}" -n "$NS" get networkpolicy "f0-expose-both-$k8s" -o jsonpath='{.spec.podSelector}')"
   "${K[@]}" -n "$NS" delete networkpolicy "daegam-expose-$k8s" >/dev/null
   sleep 5
@@ -428,13 +448,29 @@ f0_2() {
   sleep 30
   f0_loop_stop "$WORK" f0.2 "$switch_at" "$deleted_at" || rc=$?
   f0_block F0.2 "$F0_OUT/lag-f0.2.txt"
-  [ "$rc" = 0 ] || die F0.2 "the call loop has no successful call before the switch (BASELINE INVALID above)"
+  [ "$rc" != 3 ] || die F0.2 "the call loop has no successful call before the switch (BASELINE INVALID above)"
+  [ "$rc" = 0 ] || die F0.2 "the lag summary of the call loop failed (exit $rc), so the switch cannot be judged"
   # 12절의 막대(404, 503, 끊긴 호출)는 바꾼 뒤에 시작해 새 앞단에서 연 세션의 실패만 본다(f0_tool lag 의 dropped).
   # 바꾸기 전의 실패와 바꾸기에 걸친 세션의 404 는 F0.3 과 릴리스 노트의 몫이다. 하나라도 있으면 진단을 남기고 실패로 센다
   dropped="$(sed -n 's/^dropped calls after the switch: \([0-9][0-9]*\).*/\1/p' "$F0_OUT/lag-f0.2.txt" | head -n 1)"
-  if [ "${dropped:-0}" != 0 ]; then
+  [ -n "$dropped" ] || die F0.2 "lag-f0.2.txt has no 'dropped calls after the switch' line"
+  if [ "$dropped" != 0 ]; then
     vmcp_diag F0.2 "$NS" "front-$k8s" "app.kubernetes.io/instance=$k8s"
     record_fail F0.2 "$dropped calls dropped after the switch (lag-f0.2.txt)"
+  fi
+  # 바꾼 때 옛 앞단에서 연 세션의 호출이 답을 받지 못했거나 5xx 를 받은 것도 막대가 보는 끊긴 호출이다(lag 의 cut).
+  # 옛 앞단 쪽의 실패라 vMCP 진단 대신 Traefik 의 로그 끝을 남긴다
+  cut="$(sed -n 's/^calls cut at the switch: \([0-9][0-9]*\).*/\1/p' "$F0_OUT/lag-f0.2.txt" | head -n 1)"
+  [ -n "$cut" ] || die F0.2 "lag-f0.2.txt has no 'calls cut at the switch' line"
+  if [ "$cut" != 0 ]; then
+    # 워크플로가 Traefik 의 접근 로그를 켠다(머리는 빼고). 바꾸기 5초 전부터 300줄로, 바꾼 때 앞뒤의 요청이 어느 백엔드로
+    # 갔고 어떻게 끝났는지 본다. 루프는 세션마다 요청을 몇 개씩 보내므로 로그 끝만 보면 바꾼 때가 빠진다
+    since="$(python3 -c 'import datetime, sys
+print(datetime.datetime.fromtimestamp(float(sys.argv[1]) - 5, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))' "$switch_at")"
+    "${K[@]}" -n "$TRAEFIK_NS" logs "deploy/$TRAEFIK_SVC" --since-time="$since" 2>&1 | head -n 300 | f0_redact \
+      >"$F0_OUT/diag-traefik.txt" || true
+    f0_block F0.2 "$F0_OUT/diag-traefik.txt"
+    record_fail F0.2 "$cut calls cut at the switch (lag-f0.2.txt, diag-traefik.txt)"
   fi
   cert_state "$k8s" "$S2_HOST" >"$F0_OUT/f0.2-cert-after.txt"
   f0_block "F0.2 before" "$F0_OUT/f0.2-cert-before.txt"
@@ -475,6 +511,11 @@ f0_3() {
     [ -n "$new" ] && break
     sleep 5
   done
+  # 새 세션의 호출은 vMCP 앞단이 백엔드를 라우팅할 때만 SDK 의 동작을 잰다. F0.2 처럼 바꾸기 전에 echo 를 기다린다
+  if ! front_lists_echo F0.3 "$S3_PROBE_HOST" "$F0_OUT/f0.3-front-before.json" "front-$k8s"; then
+    vmcp_diag F0.3 "$NS" "front-$k8s" "app.kubernetes.io/instance=$k8s"
+    die F0.3 "the vMCP front does not list echo in 12 tries before the switch, so the new session cannot be measured; see diag-front-$k8s.txt"
+  fi
   "${K[@]}" -n "$NS" delete ingress "f0-probe-$k8s" >/dev/null
   f0_note F0.3 "serverInfo.name: proxy front '$old', vMCP front '$new'"
   { [ -n "$new" ] && [ "$new" != "$old" ]; } \

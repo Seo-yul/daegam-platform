@@ -674,6 +674,24 @@ def loop(args: argparse.Namespace) -> int:
     return 0
 
 
+def _no_answer(code: int | None) -> bool:
+    """답을 받지 못했거나(0, 없음) 5xx 를 받았는가."""
+    return not code or code >= 500
+
+
+def _cut_at_switch(
+    r: dict[str, Any], in_flight: dict[str, Any] | None, switch: float, old: set[str]
+) -> bool:
+    """실패한 기록 r 이 넘김이 끊은 호출인가. 기준은 lag 의 주석에 있다."""
+    if r["init"] != 200:
+        return r is in_flight and _no_answer(r["init"])
+    if r.get("call") == 404:
+        return False
+    if r is in_flight:
+        return _no_answer(r.get("call"))
+    return r["t"] >= switch and r.get("server") in old and _no_answer(r.get("call"))
+
+
 def lag(args: argparse.Namespace) -> int:
     recs = sorted(
         (json.loads(line) for line in Path(args.loop).read_text().splitlines() if line.strip()),
@@ -717,6 +735,14 @@ def lag(args: argparse.Namespace) -> int:
     # 전의 실패와 바꾸기에 걸친 세션(F0.3 의 주제, 릴리스 노트)은 넘김이 끊은 호출이 아니다
     dropped = [r for r in failed if r["t"] >= switch and r not in straddled]
     print(f"dropped calls after the switch: {len(dropped)}")
+    # 넘김이 끊은 호출도 센다. 루프는 세션을 하나씩 열고 switch_at 은 고치기 전에
+    # 읽으므로, 바꾸던 때 돌던 세션은 switch_at 앞의 마지막 기록이다. 그 세션의
+    # initialize 나 호출이 답을 받지 못했거나(0) 5xx 를 받았으면 끊긴 것이다. 바꾼
+    # 뒤에 옛 앞단에서 열린 세션의 호출도 같다. 새 앞단이 그 세션을 모르는 404 는
+    # 설계대로라(F0.3) 세지 않는다
+    in_flight = before[-1] if before else None
+    cut = [r for r in failed if _cut_at_switch(r, in_flight, switch, old)]
+    print(f"calls cut at the switch: {len(cut)}")
     for r in failed:
         print(
             f"  {r['t'] - switch:+.2f}s init={r['init']} server={r.get('server')} "
