@@ -67,7 +67,10 @@ _HEADER_NAME = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,64}$")
 # 고를 수 없는 헤더 이름 (6.1절). ToolHive 의 headerForward 가 거절하는 이름
 # (`pkg/transport/middleware/header_forward.go` `RestrictedHeaders`)과 vMCP·MCP·추적 전파가 직접
 # 정하는 이름이다. 비교는 소문자로 한다. OTLP 내보내기의 `otlp_export.FIXED_HEADERS` 와 따로인 것은
-# 그쪽이 압축(content-encoding)을 정하고 MCP 의 세션·추적 헤더를 모르는 다른 요청이기 때문이다
+# 그쪽이 압축(content-encoding)을 정하고 MCP 의 세션·추적 헤더를 모르는 다른 요청이기 때문이다.
+# Modern MCP(2026-07-28)의 서버는 아래 셋을 본문과 견주어 다르거나 두 번 오면 -32020 으로 거절한다.
+# 고정 헤더로 두면 `mcp-method` 는 모든 요청을 막고(vMCP 의 `server/discover` 부터 막혀 Tool 을 읽지
+# 못한다), `mcp-name` 은 Tool 호출을, `mcp-param-*` 는 그 인자를 헤더로 표시한 Tool 의 호출을 막는다
 RESERVED_HEADERS: frozenset[str] = frozenset(
     {
         "host",
@@ -88,13 +91,15 @@ RESERVED_HEADERS: frozenset[str] = frozenset(
         "accept",
         "mcp-session-id",
         "mcp-protocol-version",
+        "mcp-method",
+        "mcp-name",
         "last-event-id",
         "traceparent",
         "tracestate",
         "baggage",
     }
 )
-RESERVED_PREFIXES: tuple[str, ...] = ("x-forwarded-",)
+RESERVED_PREFIXES: tuple[str, ...] = ("x-forwarded-", "mcp-param-")
 
 
 @dataclass(frozen=True)
