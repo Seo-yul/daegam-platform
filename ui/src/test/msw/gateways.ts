@@ -41,6 +41,7 @@ export function gatewayFixture(over: Partial<Gateway> = {}): Gateway {
     authz_policy: null,
     runtime: { replicas: 1, resources: null },
     surface: { resources: false, prompts: false },
+    code_mode: false,
     auth: "anonymous",
     revisions: [1, 2],
     cluster_id: "cl-home",
@@ -127,8 +128,8 @@ export function localGatewayFixture(over: Partial<Gateway> = {}): Gateway {
 }
 
 export const gatewayRevisions: GatewayRevision[] = [
-  { revision: 1, created_at: NOW, backends: [{ hub_item_id: "hub-calc", tools: [] }], conflict_resolution: "priority", failure_mode: "best_effort", authz_policy: null, runtime: { replicas: 1, resources: null }, surface: { resources: false, prompts: false } },
-  { revision: 2, created_at: NOW, backends: gatewayFixture().backends, conflict_resolution: "auto", failure_mode: "best_effort", authz_policy: null, runtime: { replicas: 1, resources: null }, surface: { resources: false, prompts: false } },
+  { revision: 1, created_at: NOW, backends: [{ hub_item_id: "hub-calc", tools: [] }], conflict_resolution: "priority", failure_mode: "best_effort", authz_policy: null, runtime: { replicas: 1, resources: null }, surface: { resources: false, prompts: false }, code_mode: false },
+  { revision: 2, created_at: NOW, backends: gatewayFixture().backends, conflict_resolution: "auto", failure_mode: "best_effort", authz_policy: null, runtime: { replicas: 1, resources: null }, surface: { resources: false, prompts: false }, code_mode: false },
 ];
 
 /** 삭제·배포가 반영되는 목록이다. */

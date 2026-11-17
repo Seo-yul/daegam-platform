@@ -55,6 +55,13 @@ STATUS: dict[str, int] = {
     # (P63 2절)
     "cluster_rights_missing": 422,
     "cluster_unreachable": 502,
+    # code mode 를 켠 Gateway 의 저장·미리보기·배포·재배포 (P56 6.2절)
+    "code_mode_exposed": 422,
+    "code_mode_not_read_only": 422,
+    "code_mode_owner_cedar": 422,
+    "code_mode_reserved_name": 422,
+    "code_mode_toolhive_old": 422,
+    "code_mode_unknown_names": 422,
     "compile_failed": 500,
     "consent_limit": 429,
     "conversion": 422,

@@ -270,6 +270,14 @@ class SvcTokens:
             sub=PLATFORM_SUB, tenant=tenant, groups=gateway_groups(tenant), ttl=PLATFORM_CALL_TTL
         )
 
+    async def vmcp_bearer(self, tenant: str) -> str | None:
+        """플랫폼이 제 이름으로 vMCP(게시된 Gateway 의 나열, code mode Gateway 의 상태, P56 6.3절)를
+        부를 때 싣는 토큰. vMCP 가 받는 토큰을 낼 수 없는 모드(IdP 를 믿는 oidc)면 None 이다. 서명
+        키가 붙었는지(`available`)는 부르는 쪽이 먼저 본다."""
+        if not self.mints_gateway_tokens:
+            return None
+        return await self.platform_gateway_token(tenant)
+
     async def ensure_bound(
         self,
         client: KubeClient,

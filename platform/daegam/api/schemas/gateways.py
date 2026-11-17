@@ -122,6 +122,8 @@ class GatewayOut(BaseModel):
     authz_policy: str | None
     runtime: GatewayRuntimeOut
     surface: GatewaySurfaceOut
+    # code mode (P56 6.2절). 켠 정의도 판정이 거절하면 렌더하지 않고 상태가 경고한다
+    code_mode: bool
     auth: str
     revisions: list[int]
     cluster_id: str | None

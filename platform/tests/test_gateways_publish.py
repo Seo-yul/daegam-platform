@@ -47,7 +47,9 @@ def test_publish_entry_mode_and_consume(client, fake_clusters, mongo):
     entry = fake.get(GV, "MCPServerEntry", "c-a", DEFAULT_NS)
     assert entry["spec"]["remoteUrl"] == pub["source"]["url"]
     assert entry["spec"]["groupRef"] == {"name": "gw-c"}
-    assert vmcp_of(fake, "gw-c")["spec"]["config"]["aggregation"]["tools"] == [{"workload": "c-a"}]
+    # 게시된 백엔드는 어느 인증 모드에서든 스냅샷의 이름을 고정한다 (P56 6.3절)
+    pinned = [{"workload": "c-a", "filter": list(pub["tool_names"])}]
+    assert vmcp_of(fake, "gw-c")["spec"]["config"]["aggregation"]["tools"] == pinned
     r = client.put(f"{GW}/{ia['id']}", json={"name": "a", "backends": [{"hub_item_id": pub["id"]}]})
     assert detail_code(r) == (422, "cycle")
     r = client.delete(f"{HUB}/{pub['id']}")

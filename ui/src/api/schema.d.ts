@@ -9323,6 +9323,8 @@ export interface components {
             authz_policy?: string | null;
             runtime?: components["schemas"]["GatewayRuntime"];
             surface?: components["schemas"]["GatewaySurface"] | null;
+            /** Code Mode */
+            code_mode?: boolean | null;
         };
         /**
          * GatewayCondition
@@ -9388,6 +9390,8 @@ export interface components {
             authz_policy: string | null;
             runtime: components["schemas"]["GatewayRuntimeOut"];
             surface: components["schemas"]["GatewaySurfaceOut"];
+            /** Code Mode */
+            code_mode: boolean;
             /** Auth */
             auth: string;
             /** Revisions */
@@ -9505,6 +9509,8 @@ export interface components {
             authz_policy: string | null;
             runtime: components["schemas"]["GatewayRuntimeOut"];
             surface: components["schemas"]["GatewaySurfaceOut"];
+            /** Code Mode */
+            code_mode: boolean;
             /** Auth */
             auth: string;
             /** Revisions */
@@ -9603,6 +9609,11 @@ export interface components {
             authz_policy: string | null;
             runtime: components["schemas"]["GatewayRuntimeOut"];
             surface: components["schemas"]["GatewaySurfaceOut"] | null;
+            /**
+             * Code Mode
+             * @default false
+             */
+            code_mode: boolean;
             /** Revision */
             revision: number;
             /**
@@ -9672,6 +9683,8 @@ export interface components {
             authz_policy: string | null;
             runtime: components["schemas"]["GatewayRuntimeOut"];
             surface: components["schemas"]["GatewaySurfaceOut"];
+            /** Code Mode */
+            code_mode: boolean;
             /** Auth */
             auth: string;
             /** Revisions */

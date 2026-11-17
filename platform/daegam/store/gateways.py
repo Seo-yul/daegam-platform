@@ -99,6 +99,10 @@ class GatewaySpec(BaseModel):
     runtime: GatewayRuntime = Field(default_factory=GatewayRuntime)
     # 새 Gateway 는 둘 다 끈 채로 시작한다(`api/gateways.py` `_spec`)
     surface: GatewaySurface = Field(default_factory=GatewaySurface)
+    # ToolHive 의 code mode (P56 6.2절). 광고하는 Tool 이 모두 읽기일 때만 켠다
+    # (`services/gateway_code_mode.py`). 이 칸을 모르는 앞 판은 읽을 때 버려 code mode 를 렌더하지
+    # 않는다
+    code_mode: bool = False
 
 
 class GatewayRevision(GatewaySpec):
@@ -220,6 +224,10 @@ class Gateway(Document, ConsumerAuthState):
     # 넣기 전에 원자적 최댓값으로 쓴다(`MongoGatewayStore.raise_bound_until`). 정의 쪽과 배포 쪽
     # 저장 밖이라 옛 사본의 저장이 되돌리지 못한다
     bound_until: UtcDatetime | None = None
+    # 마지막으로 성공한 vMCP 적용이 code mode 를 실었는가 (P56 6.3절). 정책 설정은 vMCP 보다 먼저
+    # 적용되므로, 참인 동안의 렌더는 code mode 를 빼더라도 힌트 forbid 를 둔다. 메트릭 보고가
+    # 스크립트 Tool 을 이름에 넣을지도 이것으로 정한다
+    code_mode_applied: bool = False
     created_at: UtcDatetime = Field(default_factory=utcnow)
     updated_at: UtcDatetime = Field(default_factory=utcnow)
     updated_by: str | None = None  # 마지막으로 만들거나 고친 주체의 sub (감사)
@@ -277,6 +285,7 @@ DEPLOYMENT_FIELDS: frozenset[str] = frozenset(
         "deploying_since",
         "deploy_render",
         "published_render",
+        "code_mode_applied",
         "updated_at",
         *AUTH_FIELDS,  # 인증 재적용의 칸 (P32 8절)
     }

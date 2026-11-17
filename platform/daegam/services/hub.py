@@ -1704,7 +1704,8 @@ class HubService:
         if ours:
             # 그 서버 하나의 audience 를 함께 싣는다 (P50 9절)
             return await tokens.platform_token(item.tenant, item.server_id)
-        return await tokens.platform_gateway_token(item.tenant)
+        # code mode Gateway 의 상태가 vMCP 를 나열할 때와 같은 토큰이다 (`SvcTokens.vmcp_bearer`)
+        return await tokens.vmcp_bearer(item.tenant)
 
     async def _headers_for(self, item: HubItem) -> dict[str, str]:
         """플랫폼이 그 항목을 부를 때 싣는 헤더. 외부 서버 항목은 그 고정 헤더이고(값이 없으면

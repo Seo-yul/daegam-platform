@@ -63,7 +63,7 @@ async def test_override_name_and_description(calculator_spec, mock_soap):
     async with Client(mcp) as c:
         tools = await c.list_tools()
         assert [t.name for t in tools] == ["add_numbers"]
-        assert tools[0].description == "두 정수를 더한다"
+        assert tools[0].description == "두 정수를 더한다\nReturns {result}."
         res = await c.call_tool("add_numbers", {"a": 3, "b": 4})
         assert res.structured_content == {"result": 7}
         with pytest.raises(ToolError):
@@ -76,8 +76,9 @@ async def test_override_description_only_keeps_name(calculator_spec):
     async with Client(mcp) as c:
         by_name = {t.name: t for t in await c.list_tools()}
     assert set(by_name) == {"Add", "Divide"}
-    assert by_name["Divide"].description == "나눗셈"
-    assert by_name["Add"].description == "Adds two integers and returns the sum."
+    # 주인이 바꾼 설명에도 결과 키 줄이 붙는다(P56 6.9절)
+    assert by_name["Divide"].description == "나눗셈\nReturns {result}."
+    assert by_name["Add"].description == "Adds two integers and returns the sum.\nReturns {result}."
 
 
 def test_invalid_override_name_fails_before_server(calculator_spec):
@@ -177,7 +178,7 @@ async def test_composite_overrides_per_backend(calculator_spec, petstore_spec):
     async with Client(mcp) as c:
         tools = {t.name: t for t in await c.list_tools()}
     assert set(tools) == {"add_numbers", "getPet"}
-    assert tools["add_numbers"].description == "더한다"
+    assert tools["add_numbers"].description == "더한다\nReturns {result}."
 
 
 async def test_composite_single_entry_matches_flat(calculator_spec):

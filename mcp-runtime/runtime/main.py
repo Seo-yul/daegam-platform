@@ -54,6 +54,7 @@ from runtime.profile import (
     ToolSelection,
     load_profile,
 )
+from runtime.result_keys import with_keys_line
 
 log = logging.getLogger("daegam.mcp-runtime")
 
@@ -372,6 +373,9 @@ def _build_backend_server(
         desc = descriptions.get(op)
         if desc:
             component.description = desc
+        # 결과 키 한 줄을 설명 뒤에 붙인다(P56 6.9절). 아래에서 outputSchema 를 걷으므로
+        # 모델이 결과의 꼴을 아는 곳은 설명뿐이다. 주인이 바꾼 설명에도 붙는다
+        component.description = with_keys_line(component.description, route)
         # outputSchema 광고를 걷는다. 스펙이 응답 스키마를 선언해도 REST 백엔드가 JSON 을 준다는
         # 보장이 없고, FastMCP OpenAPI 툴은 response.json() 이 실패하면(text/plain, 204 등)
         # structured_content 없이 텍스트만 돌려준다. outputSchema 를 광고한 툴이 structuredContent
