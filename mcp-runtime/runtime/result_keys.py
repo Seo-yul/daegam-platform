@@ -4,13 +4,16 @@
 Tool 설명뿐이다(`mcp-runtime` 은 outputSchema 를 걷고, 런타임은 설명과 입력 스키마만 모델에
 넘긴다). 그래서 작업의 JSON 성공 응답 스키마에서 키를 읽어
 `Returns {id, status (open or closed), items: [{sku, qty}]}.` 꼴의 한 줄을 만든다. F0.8 이 잰
-손글씨 줄과 같은 꼴이다. JSON 성공 응답 스키마가 없거나 키를 하나도 말하지 않으면 줄이 없다.
+손글씨 줄과 같은 꼴이다. 값의 배열이면 원소의 꼴과 응답의 설명을 `Returns a list of strings: Order
+ids.` 처럼 적는다. 그 줄이 없으면 스크립트가 무엇이 돌아오는지 보려고 목록 Tool 부터 부른다(F0.9).
+JSON 성공 응답 스키마가 없거나, 키를 하나도 말하지 않고 값의 배열도 아니면 줄이 없다.
 
 `runtime/conditions.py` 의 걷기를 쓰지 않는다. 그것은 입력 스키마의 인자 경로를 읽어 `allOf` 를
 합치지 않고 `type` 이 없는 노드의 꼴을 `properties`·`items` 로 미루지 않는데, 응답 스키마의 키는
 `allOf` 로 합쳐 짓는 일이 흔하기 때문이다. 스키마는 서버 주인이 올린 것이라 걷기는 노드 수
 (`MAX_NODES`)와 이미 합친 `allOf` 갈래로 끝을 정하고, 무엇이 잘못되어도 설명을 그대로 둔다
-(`with_keys_line`). 키 이름과 enum 값의 줄바꿈과 제어 문자는 공백으로 바꾼다.
+(`with_keys_line`). 키 이름과 enum 값, 응답의 설명의 줄바꿈과 제어 문자는 공백으로 바꾸고, 응답의
+설명은 줄이 `MAX_CHARS` 안에 들도록 줄이거나 뺀다.
 """
 
 from __future__ import annotations
@@ -23,8 +26,15 @@ log = logging.getLogger("daegam.mcp-runtime")
 
 # 펼쳐 보이는 깊이. 1 은 맨 위의 키만, 2 는 그 아래 객체와 배열 원소의 키까지다
 MAX_DEPTH = 2
-# 줄의 글자 수 상한. 넘으면 맨 위의 키만 보이고, 그래도 넘으면 키를 줄인다
+# 줄의 글자 수 상한. 넘으면 맨 위의 키만 보이고, 그래도 넘으면 키를 줄인다. 값의 배열은 원소의
+# enum·format 을 빼고, 응답의 설명을 줄이거나 뺀다
 MAX_CHARS = 400
+# 값의 배열의 줄에 응답의 설명을 줄여 넣을 때 남아야 하는 최소 글자 수. 모자라면 설명을 뺀다
+MIN_NOTE_CHARS = 10
+# 생성기가 모든 성공 응답에 넣는 설명. 모델에 알려 주는 것이 없어 줄에 싣지 않는다
+DEFAULT_DESCRIPTIONS = frozenset(
+    {"ok", "success", "successful response", "successful operation", "default response"}
+)
 # enum 값을 보이는 최대 개수. 넘으면 값을 보이지 않는다
 MAX_ENUM = 8
 # `$ref` 를 따라가는 최대 횟수
@@ -35,6 +45,13 @@ MAX_NODES = 500
 FORMATS = {"date": "YYYY-MM-DD"}
 # FastMCP 가 `#/$defs/<이름>` 으로 고쳐 쓴 안쪽 참조의 앞
 DEFS_PREFIX = "#/$defs/"
+# 값의 배열이 줄에서 부르는 원소의 이름
+SCALAR_NOUNS = {
+    "string": "strings",
+    "integer": "integers",
+    "number": "numbers",
+    "boolean": "booleans",
+}
 
 
 class _OverBudget(Exception):
@@ -46,10 +63,14 @@ def keys_line(route: Any) -> str | None:
 
     `route` 는 FastMCP 의 `HTTPRoute` 다. 응답 스키마의 맨 위 `$ref` 는 FastMCP 가 이미 풀었고,
     안쪽의 `#/$defs/<이름>` 은 `route.response_schemas` 에서 찾는다."""
-    schema = _success_schema(getattr(route, "responses", None) or {})
-    if schema is None:
+    success = _success_schema(getattr(route, "responses", None) or {})
+    if success is None:
         return None
+    schema, description = success
     defs = getattr(route, "response_schemas", None) or {}
+    scalars = _Walk(defs, 1).scalars(schema)
+    if scalars is not None:
+        return _scalars_line(*scalars, description)
     line = None
     for depth in (MAX_DEPTH, 1):
         try:
@@ -62,6 +83,23 @@ def keys_line(route: Any) -> str | None:
         if len(line) <= MAX_CHARS:
             return line
     return _clip(line) if line else None
+
+
+def _scalars_line(noun: str, note: str | None, description: str | None) -> str:
+    """값의 배열의 줄. 원소의 enum·format 은 괄호로 보이되 줄이 `MAX_CHARS` 를 넘으면 뺀다. 응답의
+    설명은 `: ` 뒤에 붙이고, 남는 자리에 맞게 줄이며, 자리가 `MIN_NOTE_CHARS` 보다 작거나 생성기의
+    기본 설명이면 뺀다."""
+    shape = f"a list of {noun} ({note})" if note else f"a list of {noun}"
+    if len(f"Returns {shape}.") > MAX_CHARS:
+        shape = f"a list of {noun}"
+    line = f"Returns {shape}."
+    text = _clean(description or "").rstrip(".:;, ").strip()
+    room = MAX_CHARS - len(line) - 2
+    if not text or text.lower() in DEFAULT_DESCRIPTIONS or room < MIN_NOTE_CHARS:
+        return line
+    if len(text) > room:
+        text = text[: room - 1].rstrip() + "…"
+    return f"Returns {shape}: {text}."
 
 
 def with_keys_line(description: str | None, route: Any) -> str | None:
@@ -79,15 +117,17 @@ def with_keys_line(description: str | None, route: Any) -> str | None:
     return f"{description}\n{line}" if description else line
 
 
-def _success_schema(responses: dict[str, Any]) -> dict[str, Any] | None:
-    """JSON 성공 응답의 스키마. FastMCP 는 성공 응답 가운데 하나만 `route.responses` 에 남기므로
-    (200 이 있으면 그것) 그 항목 하나를 읽는다. 2xx 가 아닌 항목은 보지 않는다."""
+def _success_schema(responses: dict[str, Any]) -> tuple[dict[str, Any], str | None] | None:
+    """JSON 성공 응답의 스키마와 그 응답의 설명. FastMCP 는 성공 응답 가운데 하나만
+    `route.responses` 에 남기므로(200 이 있으면 그것) 그 항목 하나를 읽는다. 2xx 가 아닌 항목은
+    보지 않는다."""
     for code, response in responses.items():
         if not str(code).startswith("2"):
             continue
         for media, schema in (getattr(response, "content_schema", None) or {}).items():
             if _is_json(media) and isinstance(schema, dict) and schema:
-                return schema
+                description = getattr(response, "description", None)
+                return schema, description if isinstance(description, str) else None
     return None
 
 
@@ -115,6 +155,16 @@ class _Walk:
         self.left -= 1
         if self.left < 0:
             raise _OverBudget
+
+    def scalars(self, schema: dict[str, Any]) -> tuple[str, str | None] | None:
+        """맨 위 스키마가 값의 배열이면 원소의 이름(`strings`)과 enum·format(`open or closed`)이다.
+        아니면 None 이다."""
+        schema = self._resolve(schema)
+        if self._kind(schema) != "array":
+            return None
+        items = self._resolve(schema.get("items"))
+        noun = SCALAR_NOUNS.get(self._kind(items) or "")
+        return (noun, _note(items)) if noun is not None else None
 
     def top(self, schema: dict[str, Any]) -> str | None:
         """맨 위 스키마의 꼴. 객체면 `{…}`, 객체 배열이면 `a list of {…}` 이다. 키가 없으면 None."""

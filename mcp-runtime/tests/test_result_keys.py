@@ -52,9 +52,12 @@ def _route(
 
 
 def _json(
-    schema: dict[str, Any], code: str = "200", media: str = "application/json"
+    schema: dict[str, Any],
+    code: str = "200",
+    media: str = "application/json",
+    description: str = "ok",
 ) -> dict[str, Any]:
-    return {code: {"description": "ok", "content": {media: {"schema": schema}}}}
+    return {code: {"description": description, "content": {media: {"schema": schema}}}}
 
 
 def test_an_object_names_its_keys_with_enum_values_and_formats():
@@ -73,14 +76,90 @@ def test_a_list_of_objects():
 
 
 @pytest.mark.parametrize(
+    ("items", "description", "line"),
+    [
+        ({"type": "string"}, "Order ids.", "Returns a list of strings: Order ids."),
+        ({"type": "integer"}, "", "Returns a list of integers."),
+        (
+            {"type": "string", "enum": ["open", "closed"]},
+            "States",
+            "Returns a list of strings (open or closed): States.",
+        ),
+        (
+            {"type": "string", "format": "date"},
+            "Days",
+            "Returns a list of strings (YYYY-MM-DD): Days.",
+        ),
+        ({"$ref": "#/components/schemas/Id"}, "Ids", "Returns a list of strings: Ids."),
+        ({"type": "string"}, "Ids\nwith a break", "Returns a list of strings: Ids with a break."),
+        ({"type": "string"}, "Ids:", "Returns a list of strings: Ids."),
+        ({"type": "string"}, "Successful Response", "Returns a list of strings."),
+        ({"type": "string"}, "OK", "Returns a list of strings."),
+    ],
+    ids=[
+        "strings",
+        "no description",
+        "enum",
+        "format",
+        "ref",
+        "line break",
+        "trailing colon",
+        "generator default",
+        "ok",
+    ],
+)
+def test_a_list_of_values_names_its_type_and_the_response_description(items, description, line):
+    """값의 배열은 원소의 꼴과 응답의 설명을 적는다. 그 줄이 없으면 F0.9 의 스크립트가 목록
+    Tool 이 무엇을 돌려주는지 보려고 먼저 불렀다."""
+    route = _route(
+        _json({"type": "array", "items": items}, description=description),
+        {"Id": {"type": "string"}},
+    )
+    assert keys_line(route) == line
+
+
+def test_a_long_response_description_is_cut_to_the_line_limit():
+    route = _route(_json({"type": "array", "items": {"type": "string"}}, description="word " * 200))
+    line = keys_line(route)
+    assert line is not None and len(line) <= 400
+    assert line.startswith("Returns a list of strings: word word") and line.endswith("….")
+
+
+@pytest.mark.parametrize(
+    "items",
+    [
+        {"type": "string", "enum": ["a" * 2000, "b" * 2000]},
+        {"type": "string", "format": "f" * 3000},
+    ],
+    ids=["long enum", "long format"],
+)
+def test_a_long_item_note_is_dropped_and_the_description_with_it_when_no_room_is_left(items):
+    """원소의 enum·format 이 줄을 넘기면 괄호를 빼고, 설명은 남은 자리에 맞게 줄인다."""
+    route = _route(_json({"type": "array", "items": items}, description="Ids"))
+    assert keys_line(route) == "Returns a list of strings: Ids."
+
+
+def test_a_description_with_no_room_left_is_left_out():
+    """설명을 넣을 자리가 `MIN_NOTE_CHARS` 보다 작으면 `…` 만 남기지 않고 뺀다."""
+    note = "x" * (400 - len("Returns a list of strings ().") - 5)
+    route = _route(
+        _json({"type": "array", "items": {"type": "string", "format": note}}, description="Ids")
+    )
+    line = keys_line(route)
+    assert line == f"Returns a list of strings ({note})."
+    assert len(line) <= 400
+
+
+@pytest.mark.parametrize(
     "schema",
     [
-        {"type": "array", "items": {"type": "string"}},
+        {"type": "array", "items": {"type": "array", "items": {"type": "string"}}},
+        {"type": "array", "items": {}},
         {"type": "string"},
         {"type": "object", "additionalProperties": {"type": "integer"}},
         {"anyOf": [ITEM, {"type": "object", "properties": {"other": {"type": "string"}}}]},
     ],
-    ids=["list of strings", "scalar", "map", "two branches"],
+    ids=["list of lists", "untyped items", "scalar", "map", "two branches"],
 )
 def test_a_schema_that_names_no_keys_gets_no_line(schema):
     assert keys_line(_route(_json(schema))) is None
