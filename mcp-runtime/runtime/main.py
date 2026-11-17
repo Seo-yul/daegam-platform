@@ -20,6 +20,7 @@ Tool 규칙 (P52 4절). profile.json 의 `rules` 가 Tool 마다 `readOnlyHint` 
 클라이언트의 HTTP 머리는 MCP 규약이 쓰는 것만 남기고 들어올 때 버린다(`ClientHeaderFilter`).
 FastMCP 의 OpenAPI Tool 은 들어온 요청의 머리를 백엔드 요청에 옮기므로(`get_http_headers`), 그대로
 두면 호출자가 정의에 없는 머리(`X-HTTP-Method-Override` 등)나 비어 있는 header 인자를 채울 수 있다.
+남긴 규약 머리도 백엔드로 나가는 요청에서는 지운다(`_drop_protocol_headers`).
 """
 
 from __future__ import annotations
@@ -77,7 +78,10 @@ def _operation_ids(spec: dict[str, Any]) -> list[str]:
     return ids
 
 
-# MCP 클라이언트가 보내는 머리 가운데 서버가 읽는 것이다. 나머지는 들어올 때 버린다(모듈 머리)
+# MCP 클라이언트가 보내는 머리 가운데 서버가 읽는 것이다. 나머지는 들어올 때 버린다(모듈 머리).
+# Modern 서버는 `mcp-method` 가 본문의 method 와, `mcp-name` 이 본문의 이름과 같은지 보고 다르면
+# -32020 으로 거절하므로 둘을 남긴다. `mcp-param-*` 는 버린다. 서버가 그 머리를 요구하게 하는
+# `x-mcp-header` 표시는 Tool 을 만들 때 걷는다(`_drop_header_marks`)
 CLIENT_HEADERS = frozenset(
     {
         b"host",
@@ -86,6 +90,8 @@ CLIENT_HEADERS = frozenset(
         b"accept",
         b"mcp-session-id",
         b"mcp-protocol-version",
+        b"mcp-method",
+        b"mcp-name",
         b"last-event-id",
     }
 )
@@ -102,6 +108,47 @@ class ClientHeaderFilter:
             headers = [(k, v) for k, v in scope.get("headers") or [] if k.lower() in CLIENT_HEADERS]
             scope = {**scope, "headers": headers}
         await self.app(scope, receive, send)
+
+
+# `CLIENT_HEADERS` 가운데 백엔드의 정의에 없는 MCP 규약 머리다. `get_http_headers` 는
+# mcp-session-id 만 빼고 옮기므로, 나머지는 백엔드로 나가는 요청에서 지운다
+PROTOCOL_HEADERS = ("mcp-protocol-version", "mcp-method", "mcp-name", "last-event-id")
+
+# 값이 이름 → 스키마 사전인 JSON Schema 키다. 그 사전의 키는 인자 이름이라 표시로 보지 않는다
+_SCHEMA_MAPS = frozenset(
+    {"properties", "patternProperties", "$defs", "definitions", "dependentSchemas"}
+)
+# 값이 스키마가 아니라 데이터인 키다. 그 안은 걷지 않는다
+_SCHEMA_DATA = frozenset({"enum", "const", "default", "examples", "example"})
+
+
+async def _drop_protocol_headers(request: Any) -> None:
+    """백엔드 HTTP 클라이언트의 첫 요청 훅이다. 옮겨진 규약 머리를 지운다.
+    조건 훅(`_ConditionHook`)은 이 훅 뒤에 돌아 실제로 나가는 머리를 본다."""
+    for name in PROTOCOL_HEADERS:
+        if name in request.headers:
+            del request.headers[name]
+
+
+def _drop_header_marks(schema: Any) -> None:
+    """입력 스키마에서 `x-mcp-header` 표시를 자리에서 걷는다. FastMCP 는 OpenAPI 의 `x-*` 키를
+    Tool 스키마로 옮기는데, 표시가 남으면 Modern 서버가 그 인자의 `Mcp-Param-*` 머리를 요구하고
+    `ClientHeaderFilter` 는 그 머리를 버리므로 호출이 -32020 으로 거절된다."""
+    if isinstance(schema, list):
+        for item in schema:
+            _drop_header_marks(item)
+        return
+    if not isinstance(schema, dict):
+        return
+    schema.pop("x-mcp-header", None)
+    for key, value in schema.items():
+        if key in _SCHEMA_DATA:
+            continue
+        if key in _SCHEMA_MAPS and isinstance(value, dict):
+            for sub in value.values():
+                _drop_header_marks(sub)
+        else:
+            _drop_header_marks(value)
 
 
 def http_middleware() -> list[Any]:
@@ -273,6 +320,8 @@ def _build_backend_server(
     guarded: dict[str, str] = {}
     hook = _ConditionHook()
     hooked: list[Any] = []
+    # 규약 머리를 지우는 훅을 단 클라이언트. Tool 마다가 아니라 클라이언트마다 한 번 단다
+    stripped: list[Any] = []
 
     def route_map_fn(route: Any, default: Any) -> Any:
         # FastMCP 가 라우트마다 부르는 콜백이다. default 는 쓰지 않지만 시그니처가 요구한다.
@@ -290,6 +339,13 @@ def _build_backend_server(
         # 걸고, 풀다 실패하면 닫힌 지킴이를 건다. 아래 `missing` 검사가 지킴이 없이 남은 Tool 을
         # 서버를 띄우기 전에 막는다
         op = route.operation_id or ""
+        _drop_header_marks(component.parameters)
+        # 규약 머리를 지우는 훅은 조건 훅보다 앞에 둔다.
+        # 조건 훅이 실제로 나가는 머리를 보게 하려는 것이다
+        backend_client = getattr(component, "_client", None)
+        if backend_client is not None and not any(c is backend_client for c in stripped):
+            backend_client.event_hooks["request"].insert(0, _drop_protocol_headers)
+            stripped.append(backend_client)
         rule = rules.get(op)
         if rule is not None and rule.conditions:
             paths = [c.path for c in rule.conditions]

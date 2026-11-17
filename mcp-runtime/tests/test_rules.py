@@ -22,10 +22,11 @@ import uvicorn
 from fastmcp import Client
 from fastmcp.client.transports import StreamableHttpTransport
 from fastmcp.exceptions import ToolError
+from mcp_types.version import MODERN_PROTOCOL_VERSIONS
 from spec2openapi.bridge import BridgeOptions
 
 from runtime.conditions import ARG_CONDITIONS, Place, _sent, compile_guard
-from runtime.main import build_composite_server, build_server, http_middleware
+from runtime.main import PROTOCOL_HEADERS, build_composite_server, build_server, http_middleware
 from runtime.profile import ArgCondition, ProfileError, parse_profile
 from tests.conftest import load_fixture, serve
 
@@ -697,17 +698,57 @@ HEADERS = {"X-Account": "acct-999", "X-HTTP-Method-Override": "DELETE"}
 ACCOUNT = _cond("X-Account", "equals", "acct-1", optional=True)
 
 
-async def _call_over_http(url: str, args: dict[str, Any]) -> Any:
-    async with Client(StreamableHttpTransport(url, headers=HEADERS)) as c:
+# 호출자가 지어낸 규약 머리다. legacy 서버는 이것을 보지 않으므로 거르기만으로는 백엔드에 닿는다
+FORGED = {"Mcp-Method": "smuggled", "Mcp-Name": "evil"}
+MODES = ("legacy", *MODERN_PROTOCOL_VERSIONS)
+
+
+async def _call_over_http(
+    url: str, args: dict[str, Any], mode: str = "auto", extra: dict[str, str] | None = None
+) -> Any:
+    headers = {**HEADERS, **(extra or {})}
+    async with Client(StreamableHttpTransport(url, headers=headers), mode=mode) as c:
+        assert [t.name for t in await c.list_tools()] == ["pay"]
         return await c.call_tool("pay", args)
 
 
-async def test_client_headers_are_dropped_before_they_reach_the_backend(backend):
+@pytest.mark.parametrize("mode", MODES)
+async def test_client_headers_are_dropped_before_they_reach_the_backend(backend, mode):
+    """legacy 와 Modern(vMCP 처럼 initialize 로 내려가지 않는다) 클라이언트 모두 머리를 거르는
+    서버에서 Tool 을 나열하고 부른다. 거른 머리도, 남긴 MCP 규약 머리도 백엔드에 닿지 않는다."""
     mcp = _guarded(backend, _header_spec(), "pay", ACCOUNT, _cond("amount", "max", 100))
     with _serve_asgi(mcp.http_app(path="/mcp", middleware=http_middleware())) as url:
-        await _call_over_http(url, {"amount": 5})
+        await _call_over_http(url, {"amount": 5}, mode, FORGED if mode == "legacy" else None)
     (sent,) = _Recorder.headers_seen
     assert "x-account" not in sent and "x-http-method-override" not in sent
+    assert not set(PROTOCOL_HEADERS) & set(sent)
+
+
+async def test_an_argument_marked_as_a_header_is_called_by_a_modern_client(backend):
+    """OpenAPI 의 `x-mcp-header` 는 Tool 스키마로 옮겨지지만 걷힌다. 남으면 Modern 서버가 거른
+    `Mcp-Param-*` 머리를 요구해 호출을 거절한다."""
+    spec = _spec_with(
+        "/pay",
+        "get",
+        {
+            "operationId": "pay",
+            "parameters": [
+                {
+                    "name": "region",
+                    "in": "query",
+                    "schema": {"type": "string", "x-mcp-header": "Region"},
+                },
+            ],
+        },
+    )
+    mcp = build_server(spec, parse_profile({}), BridgeOptions(endpoint=backend))
+    with _serve_asgi(mcp.http_app(path="/mcp", middleware=http_middleware())) as url:
+        async with Client(StreamableHttpTransport(url), mode=MODERN_PROTOCOL_VERSIONS[0]) as c:
+            (tool,) = await c.list_tools()
+            assert "x-mcp-header" not in json.dumps(tool.inputSchema)
+            await c.call_tool("pay", {"region": "kr"})
+    ((method, path, _),) = _Recorder.seen
+    assert (method, path) == ("GET", "/pay?region=kr")
 
 
 async def test_a_forwarded_client_header_is_checked_as_sent(backend):
