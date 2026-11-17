@@ -1,7 +1,7 @@
 # shellcheck shell=bash
 # shellcheck disable=SC2034  # 남기는 전역은 이 파일을 읽는 스크립트가 읽는다
-# P54·P54b F0 도구가 함께 쓰는 한 벌. `. "$HERE/lib.sh"` 로 읽는다. 이 폴더(scripts/f0)와 .github/workflows/p54-f0.yml
-# 은 F0 측정 동안만 둔다 (P54 12·13절, P54b 11·12절).
+# P54·P54b·P56 F0 도구가 함께 쓰는 한 벌. `. "$HERE/lib.sh"` 로 읽는다. 이 폴더(scripts/f0)와 .github/workflows 의
+# p54-f0.yml·p56-f0.yml 은 F0 측정 동안만 둔다 (P54 12·13절, P54b 11·12절, P56 8·9절).
 #
 # 부르는 쪽이 lib/e2e_exit.sh 와 lib/e2e_json.sh 를 먼저 읽고, HERE(이 폴더)·ROOT·CTX·WORK·API_PORT·OIDC_PORT·TENANT·
 # MCP_CLIENT_NAME 을 둔 뒤 읽는다. e2e 게이트의 한 벌(scripts/lib)을 그대로 읽어 쓰고, 종료 코드와 STEP 줄은

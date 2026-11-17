@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# 표준 입력에서 자격 증명처럼 보이는 값을 지워 내보낸다. lib.sh 의 f0_redact 와 p54-f0.yml 의 diagnostics 단계가 함께
-# 쓴다. 이 폴더(scripts/f0)와 함께 F0 측정 동안만 둔다.
+# 표준 입력에서 자격 증명처럼 보이는 값을 지워 내보낸다. lib.sh 의 f0_redact 와 p54-f0.yml·p56-f0.yml 의 diagnostics
+# 단계가 함께 쓴다. 이 폴더(scripts/f0)와 함께 F0 측정 동안만 둔다.
 #
 # 지우는 것: Bearer·Basic 뒤의 값, JWT, Authorization 값(따옴표 안의 값과 따옴표 없는 scheme·값), token=·password=·
 # client_secret= 쌍(access_token= 처럼 끝이 같은 이름 포함), JSON 의 ...token·password·client_secret 값.
