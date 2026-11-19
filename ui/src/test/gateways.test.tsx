@@ -272,6 +272,66 @@ describe("gateways (definition)", () => {
     expect((lastRequest("PUT", "/gateways/gw-support")?.body as { surface: unknown }).surface).toEqual({ resources: false, prompts: false });
   });
 
+  it("the Code mode switch sends code_mode, shows the audit note while on and loads the stored value (P56 6.2·6.6)", async () => {
+    const user = userEvent.setup();
+    const { unmount } = render(<TestApp initialPath="/gateways/new" />);
+    await user.type(screen.getByTestId("gp-name"), "reader");
+    await user.click(await screen.findByTestId("backend-calc"));
+    const toggle = screen.getByTestId("gp-code-mode");
+    expect(toggle).not.toBeChecked();
+    expect(toggle).toHaveAccessibleDescription(/execute_tool_script Tool 을 함께 제공합니다/);
+    expect(screen.queryByTestId("gp-code-mode-audit")).not.toBeInTheDocument();
+    await user.click(toggle);
+    expect(screen.getByTestId("gp-code-mode-audit")).toHaveTextContent("스크립트 하나는 이 Gateway 의 감사 기록과 메트릭에 execute_tool_script 호출 한 건으로 남습니다.");
+    await user.click(screen.getByTestId("save-button"));
+    await screen.findByTestId("gateway-detail-page");
+    expect(lastRequest("POST", "/gateways")?.body).toMatchObject({ name: "reader", code_mode: true });
+    unmount();
+
+    gatewayState.items = [gatewayFixture({ code_mode: true })];
+    render(<TestApp initialPath="/gateways/gw-support/edit" />);
+    await waitFor(() => expect(screen.getByTestId("gp-code-mode")).toBeChecked());
+    await user.click(screen.getByTestId("gp-code-mode"));
+    expect(screen.queryByTestId("gp-code-mode-audit")).not.toBeInTheDocument();
+    await user.click(screen.getByTestId("save-button"));
+    await screen.findByTestId("gateway-detail-page");
+    expect((lastRequest("PUT", "/gateways/gw-support")?.body as { code_mode: unknown }).code_mode).toBe(false);
+  });
+
+  it("a refused Code mode save names the Tools that are not read-only (P56 6.2)", async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.put("/gateways/:id", () =>
+        HttpResponse.json(
+          { detail: { code: "code_mode_not_read_only", detail: "code mode needs read-only tools", names: { create_order: "write", web_fetch: "web" } } },
+          { status: 422 },
+        ),
+      ),
+    );
+    render(<TestApp initialPath="/gateways/gw-support/edit" />);
+    await waitFor(() => expect(screen.getByTestId("backend-calc")).toBeChecked());
+    await user.click(screen.getByTestId("gp-code-mode"));
+    await user.click(screen.getByTestId("save-button"));
+    const alert = await screen.findByTestId("save-error");
+    expect(alert).toHaveTextContent("이 Gateway 가 제공하는 Tool 가운데 읽기 전용이 아닌 Tool 이 있어 Code mode 를 켤 수 없습니다.");
+    expect(within(alert).getAllByRole("listitem").map((li) => li.textContent)).toEqual(["create_order", "web_fetch"]);
+  });
+
+  it("the definition shows code mode, and the metrics tab of a code-mode Gateway explains how scripts are counted (P56 6.6)", async () => {
+    const user = userEvent.setup();
+    const { unmount } = render(<TestApp initialPath="/gateways/gw-support?tab=definition" />);
+    expect(await screen.findByTestId("gw-code-mode")).toHaveTextContent("no");
+    await user.click(screen.getByTestId("tab-metrics"));
+    expect(await screen.findByTestId("mcp-metrics-notes")).toBeInTheDocument();
+    expect(screen.queryByTestId("mcp-metrics-note")).not.toBeInTheDocument();
+    unmount();
+    gatewayState.items = [gatewayFixture({ code_mode: true })];
+    render(<TestApp initialPath="/gateways/gw-support?tab=definition" />);
+    expect(await screen.findByTestId("gw-code-mode")).toHaveTextContent("yes");
+    await user.click(screen.getByTestId("tab-metrics"));
+    expect(await screen.findByTestId("mcp-metrics-note")).toHaveTextContent("스크립트 안의 Tool 호출은 각 백엔드의 기록에 남고, 그 기록에는 부른 사람 대신 이 Gateway 가 남습니다.");
+  });
+
   it("a save that closes consumers names them on the detail page (consumer_notice, P57 6.2)", async () => {
     const user = userEvent.setup();
     server.use(

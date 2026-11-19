@@ -24,10 +24,16 @@ interface CountedWarningText {
 /** 규칙이 Agent 의 Tool 을 숨기는 원인 (P52 7절). 서버 문장의 `cause: <원인>` 이다(services/agent_status.py HIDDEN_CAUSES). */
 export type HiddenCause = "not_named" | "item" | "oidc" | "reissue";
 
-/** 코드 실행 게이트가 닫힌 경고 (P40 8절). 서버 문장의 `(reason: <까닭>)` 으로 까닭 문장을 고른다. 까닭을 읽지 못하면 화면이 서버 원문을 보인다. */
-interface ReasonedWarningText {
+/** Code mode 를 끈 까닭 (P56 6.3·6.7절). 서버 문장의 `cause: <까닭>` 이다(services/gateway_code_mode.py CLOSED_CAUSES, CAUSE_TOOLHIVE). */
+export type CodeModeCause = "tools" | "unknown_names" | "reserved_name" | "exposed" | "owner_cedar" | "toolhive";
+
+/**
+ * 서버 문장의 `(<이름>: <까닭>)` 으로 까닭 문장 하나를 고르는 경고. 코드 실행 게이트(P40 8절)는 `reason:` 을, Code mode(P56 6.3·6.7절)는
+ * `cause:` 를 읽는다(어느 이름을 읽는지는 lib/warningText.ts 의 CHOSEN_BY 다). 까닭을 읽지 못하면 화면이 서버 원문을 보인다.
+ */
+interface ChosenWarningText<K extends string> {
   label: string;
-  reasons: Record<GateReason, string>;
+  choices: Record<K, string>;
 }
 
 /** 서버 문장의 원인을 받아 한 문장을 더하는 경고. 원인을 읽지 못하면 text 만 보인다. */
@@ -156,7 +162,25 @@ export const warnings = {
       label: "규칙의 Tool 없음",
       text: "규칙을 둔 Tool 가운데 백엔드가 더 이상 제공하지 않는 것이 있습니다. 백엔드가 Tool 이름을 바꿨다면 규칙을 새 이름으로 고친 뒤 Gateway 를 다시 배포해 주세요.",
     },
-    // 원인은 서버 문장의 `cause: <원인>` 에서 읽는다(lib/warningText.ts CAUSE_OF)
+    // Code mode 를 켠 Gateway 의 렌더 (P56 6.3·6.7절, services/gateway_code_mode.py). 까닭은 서버 문장의 `cause: <까닭>` 이다
+    code_mode_closed: {
+      label: "Code mode 꺼짐",
+      choices: {
+        tools: "이 Gateway 가 제공하는 Tool 가운데 읽기 전용이 아닌 Tool 이 있어 Code mode 를 껐습니다. 그 Tool 을 백엔드의 Tool 선택에서 뺀 뒤 다시 배포하거나, 서버나 허브 항목에서 읽기 전용으로 표시해 주세요.",
+        toolhive: "이 클러스터의 ToolHive 가 Code mode 를 지원하지 않아 Code mode 를 껐습니다. 플랫폼 관리자에게 ToolHive 업그레이드를 요청해 주세요.",
+        unknown_names:
+          "Tool 이름을 알 수 없는 백엔드가 있어 Code mode 를 껐습니다. 그 허브 항목에서 Tool 새로고침을 실행하거나 그 백엔드의 Tool 을 직접 선택한 뒤 다시 배포해 주세요.",
+        reserved_name:
+          "이 Gateway 가 제공하는 Tool 가운데 이름이 execute_tool_script 인 Tool 이 있어 Code mode 를 껐습니다. 그 백엔드에서 이 Tool 을 뺀 나머지 Tool 을 선택하거나 Conflict resolution 을 prefix 로 바꾼 뒤 다시 배포해 주세요.",
+        exposed: "외부에 노출한 Gateway 라서 Code mode 를 껐습니다. 노출을 끄거나 Code mode 를 끈 뒤 다시 저장해 주세요.",
+        owner_cedar: "이 Gateway 는 Advanced 탭에 저장한 Cedar 정책을 그대로 사용하고 있어 Code mode 를 껐습니다. Advanced 탭에서 그 정책을 지운 뒤 다시 저장해 주세요.",
+      },
+    },
+    code_mode_tools_hidden: {
+      label: "Code mode 로 숨김",
+      text: "서버가 읽기 전용이라고 알려 주지 않는 Tool 이 있어, Code mode 를 켠 이 Gateway 에서는 그 Tool 이 보이지 않고 호출도 거절됩니다. MCP Server 의 Tool 이면 클러스터의 런타임 이미지를 새 판으로 올린 뒤 그 서버를 다시 배포하고, 허브 항목의 Tool 이면 그 Tool 을 백엔드의 Tool 선택에서 빼 주세요.",
+    },
+    // 원인은 서버 문장의 `cause: <원인>` 에서 읽는다(lib/warningText.ts causeIn)
     agent_tool_hidden: {
       label: "Tool 숨김",
       text: "이 Agent 가 선택한 Tool 가운데 규칙이 이 Agent 를 허용하지 않는 것이 있어 Agent 가 그 Tool 을 볼 수 없습니다.",
@@ -333,13 +357,13 @@ export const warnings = {
     // 코드 실행을 켠 Agent 의 클러스터 게이트가 닫혔다 (P40 8절). 문장은 그 까닭의 문장이다
     sandbox_gate_closed: {
       label: "코드 실행 불가",
-      reasons: clusters.sandbox.reason,
+      choices: clusters.sandbox.reason,
     },
     sandbox_override: {
       label: "점검 없이 허용",
       text: "개발용 설정으로 점검 없이 코드 실행을 허용하고 있습니다. 운영 환경에서는 이 설정을 쓰지 마세요.",
     },
-  } satisfies Record<string, WarningText | CountedWarningText | CausedWarningText | ReasonedWarningText>,
+  } satisfies Record<string, WarningText | CountedWarningText | CausedWarningText | ChosenWarningText<GateReason> | ChosenWarningText<CodeModeCause>>,
 
   /** 허브 항목 상세가 codes 대신 쓰는 문장. 같은 코드를 Gateway 도 내지만 고치는 법이 다르다 (P52 7절). */
   hubCodes: {

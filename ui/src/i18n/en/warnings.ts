@@ -94,6 +94,22 @@ export const warnings: Messages["warnings"] = {
       label: "Ruled Tool missing",
       text: "The backend no longer offers some Tools that have rules. If the backend renamed a Tool, change the rule to the new name and deploy the Gateway again.",
     },
+    code_mode_closed: {
+      label: "Code mode off",
+      choices: {
+        tools: "A Tool this Gateway offers is no longer read-only, so Code mode was turned off. Remove that Tool from the backend's Tool selection and deploy again, or mark it read-only on its server or hub item.",
+        toolhive: "This cluster's ToolHive does not support Code mode, so Code mode was turned off. Ask a platform admin to upgrade ToolHive.",
+        unknown_names: "A backend's Tool names are unknown, so Code mode was turned off. Refresh the Tools of that hub item, or select that backend's Tools, and deploy again.",
+        reserved_name:
+          "A Tool this Gateway offers is named execute_tool_script, so Code mode was turned off. Select that backend's other Tools, or set Conflict resolution to prefix, and deploy again.",
+        exposed: "This Gateway is exposed, so Code mode was turned off. Turn off exposure or Code mode and save again.",
+        owner_cedar: "This Gateway runs Cedar saved in the Advanced tab, so Code mode was turned off. Remove that policy in the Advanced tab and save again.",
+      },
+    },
+    code_mode_tools_hidden: {
+      label: "Tools hidden by Code mode",
+      text: "Some Tools are not reported read-only by their server, so this Gateway with Code mode on hides them and refuses their calls. For an MCP Server's Tool, upgrade the cluster's runtime image and deploy that server again; for a hub item's Tool, remove it from the backend's Tool selection.",
+    },
     agent_tool_hidden: {
       label: "Tool hidden",
       text: "A rule hides some Tools this Agent selected.",
@@ -106,7 +122,7 @@ export const warnings: Messages["warnings"] = {
     },
     sandbox_gate_closed: {
       label: "Code execution unavailable",
-      reasons: clusters.sandbox.reason,
+      choices: clusters.sandbox.reason,
     },
     sandbox_override: {
       label: "Allowed without check",

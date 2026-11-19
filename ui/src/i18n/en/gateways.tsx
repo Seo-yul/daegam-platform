@@ -67,6 +67,9 @@ export const gateways: Messages["gateways"] = {
     surfaceResources: "Expose resources",
     surfacePrompts: "Expose prompts",
     surfaceHint: "When on, this Gateway lists the backends' resources (or prompts) and lets clients read them. When off, they leave the lists and reads are refused.",
+    codeMode: "Code mode",
+    codeModeHint:
+      "When on, this Gateway also offers the execute_tool_script Tool. An Agent sends it one script that calls several of this Gateway's Tools in turn or at once and gets the results back together. Calls inside a script meet the caller's rights and the Tool rules like any other call. It can be turned on only when every Tool this Gateway offers is read-only, and not on an exposed Gateway.",
     title: "New Gateway",
     backendsTitle: "Backends (MCP Hub)",
     toolCount: (count: number): string => tools(count),
@@ -106,6 +109,7 @@ export const gateways: Messages["gateways"] = {
       backends: "backends",
       conflict: "conflict resolution",
       failure: "failure mode",
+      codeMode: "code mode",
       auth: "auth",
       authz: "authz policy",
       runtime: "runtime",
@@ -138,6 +142,8 @@ export const gateways: Messages["gateways"] = {
     toolsHint: "The advertised Tools, computed from the snapshot taken at deployment. To see the actual list, call tools/list on the endpoint.",
     renamedFrom: (original: string): string => `Renamed from ${original}`,
   },
+  codeModeAudit:
+    "A script is recorded in this Gateway's audit and metrics as one execute_tool_script call. The Tool calls inside it are recorded by each backend, under this Gateway rather than the person who called.",
   consumerNotice: {
     closed: (names: string): string =>
       `Once this Gateway is deployed again, calls from the Gateways that use it as a backend (${names}) are all refused, because its Authz policy (Cedar) holds a forbid statement.`,

@@ -228,7 +228,11 @@ describe("agent graph validation (same rules and codes as the server)", () => {
     const pins = readFileSync(resolve(process.cwd(), "../platform/daegam/services/tool_pins.py"), "utf8");
     const pinCodes = [...pins.matchAll(/^BUILTIN_TOOL_NAME = "([a-z_]+)"$/gm)].map((m) => m[1]);
     expect(pinCodes).toEqual(["builtin_tool_name"]);
-    const serverCodes = [...new Set([...[...src.matchAll(/\.(?:error|warn)\(\s*"([a-z_]+)"/g)].map((m) => m[1]), ...skillCodes, ...pinCodes])];
+    // code mode 스크립트의 선택과 중복 오류는 agent_code_mode.py 가 낸다(P56 6.5절). 상수의 값을 그 파일에서 읽는다
+    const codeMode = readFileSync(resolve(process.cwd(), "../platform/daegam/services/agent_code_mode.py"), "utf8");
+    const codeModeCodes = [...codeMode.matchAll(/^CODE_MODE_[A-Z_]+ = "([a-z_]+)"$/gm)].map((m) => m[1]);
+    expect(codeModeCodes.sort()).toEqual(["code_mode_duplicate_script", "code_mode_partial_selection"]);
+    const serverCodes = [...new Set([...[...src.matchAll(/\.(?:error|warn)\(\s*"([a-z_]+)"/g)].map((m) => m[1]), ...skillCodes, ...pinCodes, ...codeModeCodes])];
     expect(serverCodes.length).toBeGreaterThan(20);
     expect(skillCodes).toContain("skill_behind");
     // 서버가 내는데 표에 없는 code 는 없어야 한다. 있으면 그 이슈가 영어로 화면에 나온다

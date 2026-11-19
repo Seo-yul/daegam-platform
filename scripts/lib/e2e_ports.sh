@@ -9,7 +9,7 @@
 # | 포트   | 변수                  | 게이트          | 무엇 |
 # |--------|-----------------------|-----------------|------|
 # |  9300  | E2E_OKTA_PORT         | e2e-okta        | 로컬 uvicorn (플랫폼, oidc) |
-# | 14490~4| E2E_VMCP_PORT         | e2e-gateway     | vMCP port-forward 다섯 (base, +1, +2, +3, +4) |
+# | 14490~5| E2E_VMCP_PORT         | e2e-gateway     | vMCP port-forward 여섯 (base, +1, +2, +3, +4, +5) |
 # | 15000  | E2E_HUB_PORT          | e2e-gateway     | 허브 레지스트리 zot, TLS. 컨테이너와 러너가 같은 포트다 (STEP 9i, scripts/hub_e2e_registry.sh) |
 # | 15001  | E2E_HUB_UPSTREAM_PORT | e2e-gateway     | upstream 평문 registry (STEP 9i, scripts/hub_e2e_registry.sh) |
 # | 18082  | E2E_MCP_PORT          | e2e-instance    | MCP Server port-forward |
@@ -62,7 +62,7 @@
 # | 19044  | E2E_API_PORT          | e2e-evaluation  | 플랫폼 port-forward (P45) |
 #
 # 같은 변수 이름 E2E_VMCP_PORT 가 게이트마다 다른 뜻인 것도 여기에 적어 둔다
-# (e2e-gateway 는 다섯을 쓰는 base, e2e-mcp-auth·e2e-agent 는 하나). E2E_PROXY_PORT 도 게이트마다 다른 포트다.
+# (e2e-gateway 는 여섯을 쓰는 base, e2e-mcp-auth·e2e-agent 는 하나). E2E_PROXY_PORT 도 게이트마다 다른 포트다.
 # 허브 레지스트리는 macOS 의 AirPlay 수신기가 쓰는 5000 을 피한다.
 
 PORT_OKTA_API=9300

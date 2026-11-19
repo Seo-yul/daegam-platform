@@ -90,6 +90,10 @@ export const gateways = {
     surfaceResources: "resources 공개",
     surfacePrompts: "prompts 공개",
     surfaceHint: "켜면 백엔드의 resources(또는 prompts)를 이 Gateway 의 목록에 보이고 읽게 합니다. 끄면 목록에서 빠지고 읽기는 거절됩니다.",
+    /** Code mode 스위치 (P56 6.2절). 켜면 Gateway 가 execute_tool_script 를 함께 낸다. 감사 안내는 codeModeAudit 이다. */
+    codeMode: "Code mode",
+    codeModeHint:
+      "켜면 이 Gateway 가 execute_tool_script Tool 을 함께 제공합니다. Agent 는 이 Tool 에 스크립트 하나를 보내 이 Gateway 의 Tool 여러 개를 차례로 또는 동시에 부르고 결과를 한 번에 받습니다. 스크립트 안의 호출에도 부르는 사람의 권한과 Tool 규칙이 그대로 적용됩니다. 이 Gateway 가 제공하는 Tool 이 모두 읽기 전용일 때만 켤 수 있고, 외부에 노출한 Gateway 에서는 켤 수 없습니다.",
     title: "New Gateway",
     backendsTitle: "Backends (MCP Hub 에서 선택)",
     toolCount: (count: number): string => `Tool ${count}개`,
@@ -138,6 +142,7 @@ export const gateways = {
       backends: "backends",
       conflict: "conflict resolution",
       failure: "failure mode",
+      codeMode: "code mode",
       auth: "auth",
       authz: "authz policy",
       runtime: "runtime",
@@ -182,6 +187,9 @@ export const gateways = {
     /** 이름이 바뀐 광고 Tool 배지의 title. original 은 바뀌기 전 이름이다. */
     renamedFrom: (original: string): string => `${original}에서 이름을 바꿈`,
   },
+  /** code mode Gateway 의 감사와 메트릭이 스크립트를 세는 법 (P56 6.6절). 폼의 Code mode 스위치 아래와 메트릭 탭이 같이 쓴다. */
+  codeModeAudit:
+    "스크립트 하나는 이 Gateway 의 감사 기록과 메트릭에 execute_tool_script 호출 한 건으로 남습니다. 스크립트 안의 Tool 호출은 각 백엔드의 기록에 남고, 그 기록에는 부른 사람 대신 이 Gateway 가 남습니다.",
   /** 게시된 Gateway 의 저장이 forbid 문장을 더해 닫힐 소비자 Gateway (P57 6.2절, 저장 답의 consumer_notice). */
   consumerNotice: {
     closed: (names: string): string =>

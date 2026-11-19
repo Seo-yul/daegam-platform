@@ -17,8 +17,19 @@ export interface DescribedError {
   detail?: string;
   /** 서버 오류 코드. 디버깅용이고 문장의 일부가 아니다. */
   code?: string;
-  /** 409 참조 목록. "MCP Server 주문" 처럼 이름이고, 이름을 모르면 "MCP Server 2개" 다. */
+  /** 409 참조 목록. "MCP Server 주문" 처럼 이름이고, 이름을 모르면 "MCP Server 2개" 다. code mode 의 422 는 걸린 이름이다. */
   refs: string[];
+}
+
+/**
+ * code mode 검사의 422 가 싣는 이름 (P56 6.2절). `names` 는 걸린 광고 Tool 이름에서 그 까닭으로 가는 표이고, `backends` 는 Tool 이름을
+ * 모르는 허브 항목 이름이다. 이름은 데이터라 그대로 보인다. 다른 코드의 `backends` 는 모양이 달라 읽지 않는다.
+ */
+function codeModeNames(error: ApiError): string[] {
+  if (!error.code.startsWith("code_mode_")) return [];
+  const names = error.extra<Record<string, string>>("names");
+  const backends = error.extra<string[]>("backends");
+  return [...(names && typeof names === "object" ? Object.keys(names) : []), ...(Array.isArray(backends) ? backends : [])];
 }
 
 /**
@@ -41,6 +52,7 @@ export function describeError(t: Messages, error: unknown, names?: ReferenceName
       const n = error.extra<number>(key);
       if (typeof n === "number" && n > 0) refs.push(t.errors.refCount(label, n));
     }
+    refs.push(...codeModeNames(error));
     return {
       text: known ?? t.errors.fallback,
       detail: known ? undefined : error.detail,

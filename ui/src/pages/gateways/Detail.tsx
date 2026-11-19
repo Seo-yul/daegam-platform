@@ -135,6 +135,7 @@ function specOf(r: GatewayRevision) {
     failure_mode: r.failure_mode,
     authz_policy: r.authz_policy,
     runtime: r.runtime,
+    code_mode: r.code_mode,
   };
 }
 
@@ -387,7 +388,9 @@ export function GatewayDetailPage() {
           </div>
         </DeploymentTab>
       ) : null}
-      {tab === "metrics" ? <McpMetricsTab queryKey={["gateways", tenant, g.id]} load={(period, tz) => getGatewayMetrics(g.id, period, tz)} /> : null}
+      {tab === "metrics" ? (
+        <McpMetricsTab queryKey={["gateways", tenant, g.id]} load={(period, tz) => getGatewayMetrics(g.id, period, tz)} note={g.code_mode ? t.gateways.codeModeAudit : undefined} />
+      ) : null}
       {tab === "advanced" && live ? (
         <ManifestTab
           queryKey={["gateways", tenant, g.id]}
@@ -701,6 +704,8 @@ function DefinitionTab({
               <dd data-testid="gw-conflict">{gateway.conflict_resolution}</dd>
               <dt className="text-muted">{t.gateways.detail.labels.failure}</dt>
               <dd data-testid="gw-failure">{gateway.failure_mode}</dd>
+              <dt className="text-muted">{t.gateways.detail.labels.codeMode}</dt>
+              <dd data-testid="gw-code-mode">{gateway.code_mode ? t.detail.summaryFields.yes : t.detail.summaryFields.no}</dd>
               <dt className="text-muted">{t.gateways.detail.labels.auth}</dt>
               <dd>
                 <Badge variant={authVariant(gateway.auth)} data-testid="gw-auth">

@@ -24,8 +24,8 @@
 #   STEP 7  P 에 소유자 forbid 를 저장하면 답의 consumer_notice 가 C·P1·C2 를 이름 대고, P 를 다시 배포하면 C 를 거친 호출이
 #           거절되며 C 는 published_backend_closed, P 는 published_owner_forbid 를 경고한다. 그 P 를 백엔드로 저장하면 422
 #           published_owner_forbid 다. forbid 를 걷고 다시 배포하면 C 가 다시 부른다
-#   STEP 8  C 의 목록에 execute_tool_script 가 없고, 게시된 P 의 그 이름을 고른 저장은 422 published_script_tool 이다. code
-#           mode(P56)는 아직 없어 P 가 그 Tool 을 내지 않는다
+#   STEP 8  C 의 목록에 execute_tool_script 가 없고, 게시된 P 의 그 이름을 고른 저장은 422 published_script_tool 이다. P 는
+#           code mode 를 켜지 않아 그 Tool 을 내지 않는다
 #   STEP 9  C 의 Secret 에서 읽은 묶인 토큰은 P 에서 받히고 P1 의 vMCP 는 거절한다. C 가 P 를 빼고 다시 배포한 뒤 P 가 다시
 #           렌더되면 그 사본도 P 가 거절하고, C2·P1 을 지운 뒤 P 의 게시를 거두어도 거절한다
 #   정리    Gateway 다섯, 게시 항목, MCP Server 둘, 사람 셋을 지우고 ConfigMap 과 Secret 을 되돌린 뒤 제어면을 굴리고 재적용을
@@ -414,7 +414,7 @@ step_8() {
   code="$(api POST /gateways "$body")"
   [ "$code" = 422 ] && [ "$(error_code "$WORK/body")" = published_script_tool ] \
     || die 8 "selecting P's execute_tool_script -> $code $(error_code "$WORK/body") (want 422 published_script_tool)"
-  pass 8 "C does not list execute_tool_script and a selection naming it is 422 published_script_tool (P runs without code mode until P56)"
+  pass 8 "C does not list execute_tool_script and a selection naming it is 422 published_script_tool (P runs without code mode)"
 }
 
 step_9() {

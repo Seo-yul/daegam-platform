@@ -200,6 +200,14 @@ describe("describeError", () => {
     expect(d.code).toBe("brand_new_code");
   });
 
+  it("code mode 의 422 는 걸린 Tool 이름과 이름을 모르는 백엔드를 목록으로 보인다 (P56 6.2절)", () => {
+    const named = describeError(ko, serverError(422, "code_mode_not_read_only", "x", { names: { create_order: "write", web_fetch: "web" } }));
+    expect(named).toMatchObject({ text: ERROR_TEXT.code_mode_not_read_only, refs: ["create_order", "web_fetch"] });
+    expect(describeError(ko, serverError(422, "code_mode_unknown_names", "x", { backends: ["weather"] })).refs).toEqual(["weather"]);
+    // 다른 코드의 backends 는 모양이 달라 읽지 않는다(409 backends_not_ready 의 백엔드 보고)
+    expect(describeError(ko, serverError(409, "backends_not_ready", "x", { backends: [{ hub_item_id: "hub-calc", ready: false }] })).refs).toEqual([]);
+  });
+
   it("409 참조 목록은 받아 둔 references 의 이름을 쓴다", () => {
     const names = new Map([
       ["ms-1", "주문 MCP"],

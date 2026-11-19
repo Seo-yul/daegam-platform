@@ -52,8 +52,8 @@ function withoutTrailingList(text: string): string {
 
 function shownWarnings(t: Messages): ShownWarning[] {
   const byCode = Object.entries(t.warnings.codes).flatMap(([code, entry]) =>
-    "reasons" in entry
-      ? Object.entries(entry.reasons).map(([reason, text]) => ({ key: `${code}/${reason}`, label: entry.label, text }))
+    "choices" in entry
+      ? Object.entries(entry.choices).map(([choice, text]) => ({ key: `${code}/${choice}`, label: entry.label, text }))
       : [{ key: code, label: entry.label, text: typeof entry.text === "string" ? withoutTrailingList(entry.text) : entry.text({ schedules: 2, triggers: 1, broken: 3 }) }],
   );
   const caused = Object.entries(t.warnings.codes.agent_tool_hidden.causes).map(([cause]) => ({
@@ -232,6 +232,47 @@ describe("경고 코드", () => {
     const raw = "published_consumer_pending: a published Gateway used as a backend has not been rendered again (orders-pub, ops)";
     expect(describeWarning(ko, raw)).toMatchObject({ label: "백엔드 연결 대기", detail: "orders-pub, ops", known: true });
     expect(describeWarning(ko, "published_owner_forbid: this Gateway's Authz policy holds a forbid statement").detail).toBeNull();
+  });
+
+  it("Code mode 를 끈 경고는 서버가 적은 까닭의 문장을 고르고 걸린 이름을 아래에 둔다 (P56 6.3·6.7절)", () => {
+    const closed = ko.warnings.codes.code_mode_closed;
+    const head = "code_mode_closed: code mode is off: the definition turns it on, but this render leaves it out";
+    expect(describeWarning(ko, `${head} (cause: tools; tools: create_order, refund)`)).toMatchObject({
+      label: "Code mode 꺼짐",
+      text: closed.choices.tools,
+      detail: "create_order, refund",
+      known: true,
+    });
+    expect(describeWarning(ko, `${head} (cause: toolhive)`)).toMatchObject({ text: closed.choices.toolhive, detail: null });
+    expect(describeWarning(en, `${head} (cause: toolhive)`).text).toBe("This cluster's ToolHive does not support Code mode, so Code mode was turned off. Ask a platform admin to upgrade ToolHive.");
+    // 이름을 모르는 백엔드가 까닭이면 허브 항목 이름이 아래에 선다
+    expect(describeWarning(ko, `${head} (cause: unknown_names; backends: weather)`)).toMatchObject({ text: closed.choices.unknown_names, detail: "weather" });
+    // 저장 검사와 같은 까닭도 껐다고 말한다. 켤 수 없다는 오류 문장과 다르다
+    for (const cause of ["unknown_names", "reserved_name", "exposed", "owner_cedar"] as const) {
+      expect(closed.choices[cause]).toContain("Code mode 를 껐습니다.");
+      expect(en.warnings.codes.code_mode_closed.choices[cause]).toContain("so Code mode was turned off.");
+    }
+    // 모르는 까닭이면 서버 원문이다
+    const later = `${head} (cause: later)`;
+    expect(describeWarning(ko, later)).toMatchObject({ text: later, known: false });
+  });
+
+  it("Code mode 의 경고와 까닭은 서버 상수 그대로 표에 있다 (P56 6.3절)", () => {
+    // 정본은 platform/daegam/services/gateway_code_mode.py 의 CODE_MODE_CLOSED·CODE_MODE_TOOLS_HIDDEN 과 CLOSED_CAUSES·CAUSE_TOOLHIVE 다
+    const src = readFileSync(resolve(process.cwd(), "../platform/daegam/services/gateway_code_mode.py"), "utf8");
+    const codes = [...src.matchAll(/^CODE_MODE_(?:CLOSED|TOOLS_HIDDEN) = "([a-z_]+)"$/gm)].map((m) => m[1]);
+    expect(codes.sort()).toEqual(["code_mode_closed", "code_mode_tools_hidden"]);
+    for (const code of codes) expect(Object.hasOwn(ko.warnings.codes, code), code).toBe(true);
+    const constants = new Map([...src.matchAll(/^(CAUSE_[A-Z_]+) = "([a-z_]+)"$/gm)].map((m) => [m[1], m[2]]));
+    const table = /^CLOSED_CAUSES = \{\n([\s\S]*?)^\}/m.exec(src)?.[1] ?? "";
+    const closed = [...table.matchAll(/: (?:"([a-z_]+)"|([A-Z_]+)),$/gm)].map((m) => m[1] ?? constants.get(m[2]));
+    const causes = [...closed, constants.get("CAUSE_TOOLHIVE")];
+    expect(causes.sort()).toEqual(Object.keys(ko.warnings.codes.code_mode_closed.choices).sort());
+  });
+
+  it("Code mode 가 숨긴 Tool 경고는 사전 문장 아래에 숨은 Tool 이름을 보인다 (P56 6.3절)", () => {
+    const raw = "code_mode_tools_hidden: with code mode on, this Gateway hides and refuses Tools whose server does not report them read-only (list_orders, search)";
+    expect(describeWarning(ko, raw)).toMatchObject({ label: "Code mode 로 숨김", text: ko.warnings.codes.code_mode_tools_hidden.text, detail: "list_orders, search", known: true });
   });
 
   it("빠진 기능의 이름은 문장에 들어가지 않는다 (D65)", () => {

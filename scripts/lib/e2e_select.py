@@ -53,8 +53,10 @@ OPTIONAL = {
         ("e2e-mcp-auth", 11),
         ("e2e-agent-oidc", 13),
         ("e2e-assistant-oidc", 8),
-        # 1.1.0-rc6 에서 691 s 였고 P52 의 11r(규칙을 둔 서버를 세 번 굴린다)이 몇 분을 더한다
-        ("e2e-agent-local", 20),
+        # 1.1.0-rc6 에서 691 s 였고 P52 의 11r(규칙을 둔 서버를 세 번 굴린다)이 몇 분을 더한다. P56 의 11c(서버·Gateway·
+        # Agent 를 하나씩 배포하고 스크립트의 감사 기록을 기다린다)는 아직 재지 않았고 약 4분을 어림해 더했다. 24분이 auth
+        # 조각이 잡의 시간 안에 받는 끝이다
+        ("e2e-agent-local", 24),
         # 상한 35분은 P53b 8절이 정한 몫이다(auth 조각의 남은 시간 40분에서 KILL 유예를 뺀 것). 발급자를 세 번 바꾸고
         # 그때마다 제어면과 vMCP 를 굴린다. 아직 재지 않았다. NOT_BLOCKING_YET 에서 빼기 전에 k3d 에서 잰 값으로 고친다
         ("e2e-oidc-platform", 35),
@@ -79,8 +81,9 @@ COVERED_BY = {"e2e-assistant": "e2e-assistant-oidc"}
 # agent 704 s, auth 315 s, release-images run 41236728641)에 여유를 더했다
 # sandbox 는 아직 재지 않았다. auth 의 설치에 샌드박스 이미지 굽기를 더해 어림했다. provisioning 은
 # mock-oidc 가 없는 auth 의 설치와 같게 어림했다. exchange 도 그렇다. core 는
-# Agent 런타임 이미지 굽기(P85 B2 부터 모든 조각이 굽는다)를 어림해 더했다
-BEFORE_PICKED = {"core": 20, "agent": 15, "auth": 8, "sandbox": 10, "provisioning": 8, "exchange": 8}
+# Agent 런타임 이미지 굽기(P85 B2 부터 모든 조각이 굽는다)를 어림해 더했다. core 에는 e2e-gateway 의 8c(P56: 서버와
+# Gateway 의 배포, code mode 가 닫히는 재적용 두 번)의 약 6분도 어림해 더했다
+BEFORE_PICKED = {"core": 26, "agent": 15, "auth": 8, "sandbox": 10, "provisioning": 8, "exchange": 8}
 # 시간 상한이 지나 TERM 을 보낸 뒤 KILL 까지 기다리는 시간(분, timeout -k). auth 의 게이트는
 # EXIT trap 이 인증 모드를 되돌리고 플랫폼을 굴린 뒤 재적용을 기다리므로 더 길다. sandbox 의
 # EXIT trap 도 ConfigMap 과 벌 수를 되돌리고 플랫폼을 굴린다. provisioning 의 EXIT trap 은 Agent

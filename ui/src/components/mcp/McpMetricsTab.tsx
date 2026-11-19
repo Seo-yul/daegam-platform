@@ -37,16 +37,17 @@ const OUTCOME_COLORS: Readonly<Record<Outcome, string>> = {
 };
 const OUTCOMES = Object.keys(OUTCOME_COLORS) as Outcome[];
 
-export function McpMetricsTab({ queryKey, load }: { queryKey: readonly unknown[]; load: (period: McpMetricsWindow, tz: string) => Promise<Report> }) {
+/** note 는 상세가 더하는 안내 한 줄이다. 숫자가 보지 못하는 것이라 맨 아래 안내 목록 끝에 선다(code mode Gateway 의 스크립트, P56 6.6절). */
+export function McpMetricsTab({ queryKey, load, note }: { queryKey: readonly unknown[]; load: (period: McpMetricsWindow, tz: string) => Promise<Report>; note?: string }) {
   const t = useT();
   return (
     <WindowedMetrics windows={WINDOWS} initial="24h" names={t.mcpMetrics.window} queryKey={queryKey} load={load} testId="mcp-metrics" pollMs={MCP_METRICS_POLL_MS}>
-      {(data) => <MetricsBody m={data} />}
+      {(data) => <MetricsBody m={data} note={note} />}
     </WindowedMetrics>
   );
 }
 
-function MetricsBody({ m }: { m: Report }) {
+function MetricsBody({ m, note }: { m: Report; note?: string }) {
   const t = useT();
   const text = t.mcpMetrics;
   const { source, totals } = m;
@@ -94,6 +95,7 @@ function MetricsBody({ m }: { m: Report }) {
             <li>{text.notes.toolErrors}</li>
             <li>{text.notes.collector}</li>
             <li>{text.notes.hops}</li>
+            {note ? <li data-testid="mcp-metrics-note">{note}</li> : null}
           </ul>
         </CardContent>
       </Card>

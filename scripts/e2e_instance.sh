@@ -174,7 +174,7 @@ echo "$list_out" | python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdi
   || die 7 "tools/list is not exactly [Add]"
 call_out="$(mcp call "$MCP_URL" Add '{"a": 3, "b": 4}' 2>&1)" || { echo "$call_out"; die 7 "Add(3,4) failed"; }
 echo "  tools/call: $call_out"
-adds_to_7 "$call_out" || die 7 "Add(3,4) != 7"
+call_result_is 7 "$call_out" || die 7 "Add(3,4) != 7"
 div_out="$(mcp call "$MCP_URL" Divide '{"numerator": 1, "denominator": 2}' 2>&1)" && { echo "$div_out"; die 7 "Divide must be rejected"; }
 echo "  tools/call: $div_out"
 echo "$div_out" | python3 -c 'import json,sys; c=json.load(sys.stdin)["call"]; sys.exit(0 if (c["isError"] and "unknown tool" in " ".join(x or "" for x in c["content"]).lower()) else 1)' \
@@ -349,7 +349,7 @@ wait_port "$MCP_PORT" || die 13 "port-forward svc/$svc did not open :$MCP_PORT"
 SVC_TOKEN="$(svc_token "$TLS_MS_ID")"; [ -n "$SVC_TOKEN" ] || die 13 "could not sign a service token"
 call_out="$(mcp call "$MCP_URL" Add '{"a": 3, "b": 4}' 2>&1)" || { echo "$call_out"; die 13 "Add(3,4) over https failed"; }
 echo "  tools/call: $call_out"
-adds_to_7 "$call_out" || die 13 "Add(3,4) over https != 7"
+call_result_is 7 "$call_out" || die 13 "Add(3,4) over https != 7"
 stop_pf "$PF_MCP" "$MCP_PORT"; PF_MCP=""
 tls_cleanup
 pass 13 "https mock-soap behind a test CA: network.ca_bundle -> env DAEGAM_CA_B64 (sha256 ${TLS_SHA:0:16}), Add(3,4)=7 over $TLS_ENDPOINT; settings restored"
@@ -404,7 +404,7 @@ print(" ".join(r["name"] + "/" + r["key"] for r in refs))')"
 ok=""
 for ((i = 0; i < 12; i++)); do
   hdr_add
-  adds_to_7 "$hdr_out" 2>/dev/null && { ok=1; break; }
+  call_result_is 7 "$hdr_out" 2>/dev/null && { ok=1; break; }
   sleep 5
 done
 [ -n "$ok" ] || die 14 "Add(3,4) with the soap:header from $HDR_SECRET did not return 7: $hdr_out"

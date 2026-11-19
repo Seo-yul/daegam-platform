@@ -279,6 +279,8 @@ export const canvas: Messages["canvas"] = {
     blockDomainsHint: "Domains web_fetch never reaches, separated by commas.",
     webHint: "web_search and web_fetch are platform Tools. Add them to a Gateway to use them.",
     webHintLink: "Create a Gateway with the web Tools",
+    codeModeHint:
+      "execute_tool_script calls, inside a script, every Tool this Gateway allows this Agent. If any node of this Agent asks for approval on one of this Gateway's Tools, the script asks too, and its result is treated as outside content.",
     notInSource: "Not in source",
     listUnknown: "The Tool list of the source is unknown. Enter the names yourself.",
     pickSource: "Select a source to list its Tools.",
@@ -434,6 +436,10 @@ export const canvas: Messages["canvas"] = {
       skills_too_large: `The attached Skill files are too large. Distinct Skills can total up to ${MAX_SKILLS_DISTINCT_BYTES / MIB} MiB, and the files each agent uses up to ${MAX_SKILLS_EXPANDED_BYTES / MIB} MiB. Attach fewer Skills.`,
       skill_scripts_inert: skills.issues.skill_scripts_inert,
       skill_behind: 'A newer revision than the pinned one exists. To use it, select "Update to latest", save and deploy again.',
+      code_mode_partial_selection:
+        "execute_tool_script can call every Tool of this Gateway, so it cannot be used in a node that selects only some Tools. Clear the selection to use every Tool, or remove execute_tool_script from it.",
+      code_mode_duplicate_script:
+        "An agent can take execute_tool_script from one Gateway only, because approval settings and Tool names do not tell Gateways apart. In the other Gateway's node, select its Tools without execute_tool_script.",
     },
     providerRole,
     redisCheckpointerHint,

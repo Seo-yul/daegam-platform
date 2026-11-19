@@ -5,17 +5,18 @@
 # `traefik`, LoadBalancer Service traefik/traefik); the script reads its IP and pins hosts with
 # `curl --resolve`, so the gate never touches /etc/hosts (STEP 9i's registry helper does, scripts/hub_e2e_registry.sh).
 #
-# Gate (STEP 1~18 + 4b·8r·9h·9i·16b, 10 은 비어 있다): MCP Servers calculator[Add, Divide] + orders 저장·배포, published to the hub
+# Gate (STEP 1~18 + 4b·8c·8r·9h·9i·16b, 10 은 비어 있다): MCP Servers calculator[Add, Divide] + orders 저장·배포, published to the hub
 #   by hand (D23), hub remote (spike proxy) → Gateways A (calculator[Add] + orders all), B (calculator[Divide]) 저장·배포 →
 #   A tools/list == [Add, CreateOrder, GetOrder], B == [Divide], no remote tools, no prefixes,
 #   A Add(3,4)=7, B Add not found, A Subtract not found, CR names gw-<name> + daegam.devops.ai.kr/id labels,
 #   redeploy keeps the name, publish (entry) → C consumes, publish (proxy),
 #   exposure: A 의 복제본을 http 로, calculator 의 복제본을 https 로 (MCPRemoteProxy 뒤), 422 namespace_not_allowed,
-#   메트릭은 거친 곳마다 한 번 세고 노출 앞단은 세지 않는다, delete cleans up, cleanup.
+#   메트릭은 거친 곳마다 한 번 세고 노출 앞단은 세지 않는다, delete cleans up, code mode Gateway, cleanup.
 #   단계 번호는 다른 문서가 가리키므로 당기지 않는다. 순환 참조의 422 cycle 과 노출 host 중복의 409 host_conflict 는 API
 #   테스트가 지킨다(platform/tests/test_gateways.py 의 test_cycle_rejected, platform/tests/test_exposure.py).
 #
-#   STEP 0   platform port-forward; 중간에 멈춘 실행이 남긴 Gateway(a·b·c·a-exposed·probe-gw)와 그 게시 항목 정리
+#   STEP 0   platform port-forward; 중간에 멈춘 실행이 남긴 Gateway(a·b·c·code·a-exposed·probe-gw)와 그 게시 항목, MCP
+#            Server calc-read 정리
 #   STEP 1   backend apis calculator + orders
 #   STEP 2   mcp servers calculator + orders 저장 → 배포 → Ready
 #   STEP 3   배포해도 허브에 자동 등재되지 않는다; POST /mcp-servers/{id}/publish x2 (201, hub_item on the
@@ -49,6 +50,11 @@
 #            application_error +1, B 백엔드 없는 application_error +1, C Add +1 이상이다. 앞단을 거친 calc-exposed 의
 #            Add 는 감사 기록이 앞단과 MCP Server 에 하나씩 있어도 정확히 +1 이다
 #   STEP 17  delete the exposed documents → Ingress, NetworkPolicy, front proxy gone, Traefik answers 404
+#   STEP 8c  code mode(P56). STEP 17 뒤, 18 앞에 돈다: Tool 이 모두 읽기로 표시된 MCP Server calc-read 를 게시해 code mode
+#            를 켠 Gateway code 를 배포하면 tools/list 에 execute_tool_script 가 있고, 스크립트 하나가 Add·Divide 의 결과를
+#            함께 돌려준다. orders 의 CreateOrder(쓰기)를 더한 저장은 422 code_mode_not_read_only, 노출을 켜는 PATCH 는 422
+#            code_mode_exposed 다. 서버의 새 리비전이 Divide 를 쓰기로 표시하면 재적용이 code mode 를 빼고 code_mode_closed 를
+#            알리며, Divide 를 바로 부를 수 있다. Gateway 와 서버는 그 단계가 지운다
 #   STEP 18  cleanup: 게시된 MCP Server 를 Gateway 가 붙들고 있으면 삭제가 409 in_use 이고, Gateway 를 먼저
 #            지운 뒤 지우면 게시 항목이 함께 사라진다; CRs gone
 #   STEP 9i  허브 이미지의 허용(P55). STEP 18 뒤에 돈다: TLS zot 에 미러하고 시험 키로 서명한 stdio 이미지가 Env·Secret env 와
@@ -78,6 +84,9 @@ READY_TIMEOUT="${READY_TIMEOUT:-300}"
 # STEP 16b 가 메트릭이 늘기를 기다리는 한도(초)다. 수집기가 60초마다 로그를 읽고 롤업이 120초마다 다시 세므로 둘을
 # 합한 3분에 여유를 둔다
 METRICS_TIMEOUT="${METRICS_TIMEOUT:-300}"
+# STEP 8c 가 code mode 가 닫히기를 기다리는 한도(초)다. 재적용은 60초마다 돌고, 닫는 데 두 번 렌더한다(codeMode 를 뺀 렌더,
+# 그 vMCP 가 적용된 뒤 힌트 forbid 를 뺀 렌더). 서버가 다시 뜨는 시간과 여유를 더한다
+CODE_CLOSE_TIMEOUT="${CODE_CLOSE_TIMEOUT:-420}"
 BASE="http://127.0.0.1:${API_PORT}"
 # API 는 /api 아래에 있다. /healthz(probe)만 루트에 남아 $BASE 를 그대로 쓴다.
 API="$BASE/api"
@@ -99,6 +108,8 @@ INGRESS_CLASS="${INGRESS_CLASS:-traefik}"
 GW_HOST="${E2E_GW_HOST:-gw-a.e2e.local}"
 MCP_HOST="${E2E_MCP_HOST:-calc.e2e.local}"
 TLS_SECRET="${E2E_TLS_SECRET:-e2e-gw-tls}"
+# STEP 8c 의 code mode Gateway 와 그 백엔드 MCP Server, 노출을 켜 보는 host. STEP 0 이 이전 실행이 남긴 둘을 지운다
+CODE_GW_NAME="code"; CODE_MS_NAME="calc-read"; CODE_HOST="code.e2e.local"
 # STEP 15 가 Cluster ingress 를 PATCH 해 보기 전에 원본 JSON 을 두고 cleanup 이 되돌린다. 409 가 정상이지만
 # 만에 하나 바뀌었으면 되돌린다
 CLUSTER_ID=""; CLUSTER_INGRESS_ORIG=""
@@ -174,6 +185,8 @@ metrics_base() { metrics_to "$@" || die "$1" "GET $2/metrics: the platform did n
 # shellcheck disable=SC2034  # lib/mcp_rpc.sh 가 initialize 의 clientInfo.name 으로 읽는다
 MCP_CLIENT_NAME="e2e-gateway"
 . "$HERE/lib/mcp_rpc.sh"
+# STEP 8c 의 code_read_body·script_args·SCRIPT_TOOL 은 여기에 있다
+. "$HERE/lib/e2e_code_mode.sh"
 # A 가 광고하는 도구 셋 (sorted 의 repr). STEP 8·9·11 이 A·C·게시물·프록시의 목록을 이것과 견준다
 A_TOOLS="['Add', 'CreateOrder', 'GetOrder']"
 tools_sorted() { json_of - 'sorted(d["tools"])' <<<"$1"; }   # $MCP list 의 출력 -> 정렬한 도구 이름
@@ -182,15 +195,16 @@ rpc_tools() { rpc_ 'sorted(t["name"] for t in d["result"]["tools"])'; }
 # ---------- 0. platform ----------
 "${K[@]}" -n "$PLATFORM_NS" rollout status deploy/daegam-platform --timeout=60s >/dev/null
 # 죽은 실행(kill -9)은 정리를 못 하므로 그 port-forward 가 이 포트들에 남아 있을 수 있다
-kill_stale_pf "$API_PORT" "$PF_PORT_BASE" "$((PF_PORT_BASE + 1))" "$((PF_PORT_BASE + 2))" "$((PF_PORT_BASE + 3))" "$((PF_PORT_BASE + 4))"
+kill_stale_pf "$API_PORT" "$PF_PORT_BASE" "$((PF_PORT_BASE + 1))" "$((PF_PORT_BASE + 2))" "$((PF_PORT_BASE + 3))" "$((PF_PORT_BASE + 4))" \
+  "$((PF_PORT_BASE + 5))"
 start_pf "$PLATFORM_NS" svc/daegam-platform "${API_PORT}:9000"
 PF_API=$PF_PID
 wait_port "$API_PORT" || die 0 "port-forward :$API_PORT did not open"
 echo ">> context=$CTX tenant=$TENANT api=$API"
-# 중간에 멈춘 실행은 Gateway(a·b·c, 복제본 a-exposed·probe-gw)와 A 를 게시한 허브 항목을 남긴다. 그것들이
+# 중간에 멈춘 실행은 Gateway(a·b·c·code, 복제본 a-exposed·probe-gw)와 A 를 게시한 허브 항목을 남긴다. 그것들이
 # calculator 게시 항목을 붙들고 있으면 STEP 3 이 실패하므로 여기서 지운다. 각 Gateway 는 그것이 게시한 허브 항목을
 # 지운 뒤에 지우고, C 는 A 의 게시 항목을 소비하므로 A 보다 먼저 지운다
-for name in c a-exposed probe-gw b a; do
+for name in "$CODE_GW_NAME" c a-exposed probe-gw b a; do
   code="$(api GET /gateways)"; [ "$code" = 200 ] || die 0 "GET /gateways -> $code"
   id="$(find_id "$name")"; [ -n "$id" ] || continue
   code="$(api GET /hub)"; [ "$code" = 200 ] || die 0 "GET /hub -> $code"
@@ -207,6 +221,15 @@ for name in c a-exposed probe-gw b a; do
   [ "$i" -lt 24 ] || die 0 "CRs of gateway $name ($id) left by a previous run are still there"
   echo ">> removed gateway $name ($id) left by a previous run"
 done
+# STEP 8c 의 서버 calc-read 도 남는다. 게시된 채 남으면 STEP 3 의 허브 항목 목록이 어긋난다. 그 서버를 붙든 Gateway code 를
+# 위에서 지웠으므로 지울 수 있고, 삭제가 게시 항목을 함께 지운다
+code="$(api GET /mcp-servers)"; [ "$code" = 200 ] || die 0 "GET /mcp-servers -> $code"
+id="$(find_id "$CODE_MS_NAME")"
+if [ -n "$id" ]; then
+  api_delete "/mcp-servers/$id"
+  wait_gone "/mcp-servers/$id" || die 0 "mcp server $CODE_MS_NAME ($id) left by a previous run is still there"
+  echo ">> removed mcp server $CODE_MS_NAME ($id) left by a previous run"
+fi
 
 # ---------- 1. backends: calculator + orders ----------
 code="$(api POST /backend-apis "" -F "name=calc-gw" -F "endpoint=$SOAP_ENDPOINT" -F "file=@$FIX/calculator.wsdl")"
@@ -394,7 +417,7 @@ metrics_base 7 "/mcp-servers/$I1" "$WORK/m0-calc"
 metrics_base 7 "/gateways/$A" "$WORK/m0-a"
 metrics_base 7 "/gateways/$B" "$WORK/m0-b"
 CA="$($MCP call "$UA" Add '{"a": 3, "b": 4}')" || die 7 "A Add failed: $CA"
-adds_to_7 "$CA" || die 7 "A Add != 7: $CA"
+call_result_is 7 "$CA" || die 7 "A Add != 7: $CA"
 if CB="$($MCP call "$UB" Add '{"a": 3, "b": 4}' 2>&1)"; then die 7 "B Add must fail: $CB"; fi
 echo "$CB" | grep -qi "not found" || die 7 "B Add error is not 'not found': $CB"
 if CS="$($MCP call "$UA" Subtract '{"a": 3, "b": 4}' 2>&1)"; then die 7 "A Subtract must fail: $CS"; fi
@@ -470,7 +493,7 @@ echo "  C: $LC"
 # priority 모드: 중첩 접두사 없이 A 의 광고 이름 그대로다
 [ "$(tools_sorted "$LC")" = "$A_TOOLS" ] || die 9 "C tools wrong: $LC"
 CC="$($MCP call "$UC" Add '{"a": 3, "b": 4}')" || die 9 "C Add failed: $CC"
-adds_to_7 "$CC" || die 9 "C Add != 7: $CC"
+call_result_is 7 "$CC" || die 9 "C Add != 7: $CC"
 LA2="$($MCP list "$UA")" || die 9 "A tools/list after publish failed"
 [ "$(tools_sorted "$LA2")" = "$A_TOOLS" ] || die 9 "A affected by publish: $LA2"
 pass 9 "published A as 'a' (default name = 문서 name, display_name=$A_DISPLAY) consumed by C; C tools == A advertised; C Add(3,4)=7; A unaffected"
@@ -577,7 +600,7 @@ wait_ready "/gateways/$H" 9h
 [ "$(copies "$H" "$NS")" = "0" ] || die 9h "header copies left after h dropped the item"
 seen=""
 for ((i = 0; i < 12; i++)); do
-  CH="$($MCP call "$UH" Add '{"a": 3, "b": 4}' 2>/dev/null || true)"; adds_to_7 "$CH" && { seen=1; break; }; sleep 5
+  CH="$($MCP call "$UH" Add '{"a": 3, "b": 4}' 2>/dev/null || true)"; call_result_is 7 "$CH" && { seen=1; break; }; sleep 5
 done
 [ -n "$seen" ] || die 9h "h stopped answering Add after it dropped the item: $CH"
 api_delete "/gateways/$H" >/dev/null || die 9h "delete gateway h failed"
@@ -888,6 +911,101 @@ traefik_gone "http://$GW_HOST/mcp" "$GW_HOST:80:$LB_IP"
 "${K[@]}" -n "$NS" get networkpolicy daegam-tenant-ingress -o name >/dev/null || die 17 "tenant policy daegam-tenant-ingress was removed"
 "${K[@]}" -n "$NS" delete secret "$TLS_SECRET" --ignore-not-found >/dev/null
 pass 17 "deleting calc-exposed and a-exposed removed Ingress, NetworkPolicy daegam-expose-*, MCPRemoteProxy expose-$NX; Traefik answers 404; tenant policy intact"
+
+# ---------- 8c. code mode (P56 6.2·6.3절). STEP 17 뒤, 18 앞에 돈다 ----------
+# 새 단계가 실패해도 앞 STEP 의 결과를 가리지 않게 노출 STEP 뒤에 돈다. 쓰기 Tool 로 쓰는 orders 게시 항목은 STEP 18 이
+# 지우므로 그 앞이다. calculator WSDL 의 오퍼레이션은 표시가 없으면 쓰기라, 서버 주인이 Add·Divide 를 읽기로 표시한 MCP
+# Server calc-read 를 따로 띄워 게시한다. calculator 는 A·B 가 쓰는 그대로 두고, 표시를 바꿔 굴리는 것은 이 서버다.
+# code mode 를 켠 Gateway code 의 vMCP 는 execute_tool_script 를 함께 내놓는다(header 모드라 토큰 없이 부른다). 정의 검사는
+# 저장 때 쓰기 Tool 을, 재배포(노출을 켜는 PATCH)에서 노출을 거절한다. 서버의 새 리비전이 Divide 를 쓰기로 표시하면 다음
+# 재적용이 판정을 다시 해 code mode 를 빼고 code_mode_closed 를 알린다. 그 vMCP 가 적용된 뒤의 렌더가 힌트 forbid 를 빼면
+# 읽기 표시가 없는 Divide 도 바로 불린다
+save_doc 8c /mcp-servers "$CODE_MS_NAME" "$(code_read_body "$CODE_MS_NAME" "$BP1" 1)"
+CODE_MS="$SAVED_ID"
+deploy_doc 8c /mcp-servers "$CODE_MS"
+wait_ready "/mcp-servers/$CODE_MS" 8c
+code="$(api POST "/mcp-servers/$CODE_MS/publish" '{}')"
+case "$code" in 200 | 201) ;; *) die 8c "publish $CODE_MS_NAME -> $code: $(cat "$WORK/body")" ;; esac
+HCODE="$(jq_ 'd["id"]')"
+save_doc 8c /gateways "$CODE_GW_NAME" "{\"name\": \"$CODE_GW_NAME\", \"backends\": [{\"hub_item_id\": \"$HCODE\"}], \"code_mode\": true}"
+CODE_GW="$SAVED_ID"
+deploy_doc 8c /gateways "$CODE_GW"
+wait_ready "/gateways/$CODE_GW" 8c
+api GET "/gateways/$CODE_GW" >/dev/null; NCODE="$(jq_ 'd["k8s"]["name"]')"
+PCODE=$((PF_PORT_BASE + 5)); pf "vmcp-$NCODE" "$PCODE" 8c
+UCODE="http://127.0.0.1:$PCODE/mcp"
+# 폴링이 부르는 MCP 호출은 하나에 10초까지만 기다린다. 기본 30초를 기다리면 마감을 지난 폴링이 그만큼 더 끈다
+code_mcp() { $MCP --timeout 10 "$@"; }
+# 새 vMCP 가 백엔드를 아직 못 보았을 수 있어 60초까지 본다
+want="['Add', 'Divide', '$SCRIPT_TOOL']"; listed=""; deadline=$((SECONDS + 60))
+while :; do
+  listed="$(tools_sorted "$(code_mcp list "$UCODE" 2>/dev/null || true)" 2>/dev/null || true)"
+  [ "$listed" != "$want" ] && [ "$SECONDS" -lt "$deadline" ] || break
+  sleep 5
+done
+[ "$listed" = "$want" ] || die 8c "Gateway $CODE_GW_NAME with code mode lists $listed (want $want)"
+# 스크립트는 Tool 을 키워드 인자로 부른다. 두 결과(Add 11, Divide 4)가 답 어딘가에 있어야 한다. 결과를 감싸는 꼴(구조화된
+# 내용인지 글인지)은 ToolHive 가 정하므로 숫자만 찾는다
+CS="$($MCP call "$UCODE" "$SCRIPT_TOOL" "$(script_args 'return {"sum": Add(a=5, b=6), "quotient": Divide(numerator=8, denominator=2)}')")" \
+  || die 8c "the script through $CODE_GW_NAME failed: $CS"
+python3 - "$CS" <<'PY' || die 8c "the script did not return both results (Add 11, Divide 4): $CS"
+import json, sys
+
+def numbers(v):
+    if isinstance(v, dict):
+        for x in v.values():
+            yield from numbers(x)
+    elif isinstance(v, list):
+        for x in v:
+            yield from numbers(x)
+    elif isinstance(v, str):
+        try:
+            yield from numbers(json.loads(v))
+        except ValueError:
+            pass
+    elif isinstance(v, (int, float)) and not isinstance(v, bool):
+        yield v
+
+call = json.loads(sys.argv[1])["call"]
+found = list(numbers([call.get("structuredContent"), call.get("content")]))
+sys.exit(0 if not call["isError"] and 11 in found and 4 in found else 1)
+PY
+# 쓰기 Tool 을 더한 저장은 리비전을 쌓지 않는다. code_mode 를 보내지 않으면 저장된 값(켬)을 둔다
+code="$(api PUT "/gateways/$CODE_GW" "{\"name\": \"$CODE_GW_NAME\", \"backends\": [{\"hub_item_id\": \"$HCODE\"}, {\"hub_item_id\": \"$HORD\", \"tools\": [\"CreateOrder\"]}]}")"
+[ "$code" = 422 ] && [ "$(error_code "$WORK/body")" = code_mode_not_read_only ] \
+  || die 8c "adding orders' CreateOrder to $CODE_GW_NAME -> $code $(error_code "$WORK/body") (want 422 code_mode_not_read_only)"
+[ "$(jq_ "d['detail'].get('names')")" = "{'CreateOrder': 'write'}" ] \
+  || die 8c "the refusal names $(jq_ "d['detail'].get('names')") (want {'CreateOrder': 'write'})"
+code="$(api PATCH "/gateways/$CODE_GW" "{\"exposure\": $(exp_gw "$CODE_HOST")}")"
+[ "$code" = 422 ] && [ "$(error_code "$WORK/body")" = code_mode_exposed ] \
+  || die 8c "exposing $CODE_GW_NAME -> $code $(error_code "$WORK/body") (want 422 code_mode_exposed)"
+# 서버의 새 리비전이 Divide 를 쓰기로 표시한다. 재배포하면 서버가 Divide 에 readOnlyHint 를 false 로 알린다
+code="$(api PUT "/mcp-servers/$CODE_MS" "$(code_read_body "$CODE_MS_NAME" "$BP1" 1 false)")"
+[ "$code" = 200 ] || die 8c "PUT /mcp-servers/$CODE_MS marking Divide write -> $code: $(cat "$WORK/body")"
+code="$(api POST "/mcp-servers/$CODE_MS/redeploy")"; [ "$code" = 200 ] || die 8c "redeploy $CODE_MS_NAME -> $code"
+closed=""; state=""; deadline=$((SECONDS + CODE_CLOSE_TIMEOUT))
+while [ "$SECONDS" -lt "$deadline" ]; do
+  warned=""; rendered=""; listed=""; divided=""
+  [ "$(api GET "/gateways/$CODE_GW")" != 200 ] \
+    || warned="$(jq_ 'json.dumps([w for w in (d.get("status") or {}).get("warnings", []) if w.startswith("code_mode")])' || true)"
+  rendered="$("${K[@]}" -n "$NS" get virtualmcpserver "$NCODE" -o jsonpath='{.spec.config.codeMode.enabled}' 2>/dev/null || true)"
+  listed="$(tools_sorted "$(code_mcp list "$UCODE" 2>/dev/null || true)" 2>/dev/null || true)"
+  divided="$(code_mcp call "$UCODE" Divide '{"numerator": 8, "denominator": 2}' 2>/dev/null || true)"
+  state="warnings=$warned codeMode=${rendered:-absent} tools=$listed Divide=$divided"
+  case "$warned" in *"code_mode_closed:"*"(cause: tools; tools: Divide)"*) ;; *) sleep 10; continue ;; esac
+  [ -z "$rendered" ] && [ "$listed" = "['Add', 'Divide']" ] && call_result_is 4 "$divided" 2>/dev/null \
+    && { closed=1; break; }
+  sleep 10
+done
+[ -n "$closed" ] || die 8c "code mode did not close within ${CODE_CLOSE_TIMEOUT}s after Divide was marked write: $state"
+stop_pf "$PF_PID" "$PCODE"
+# api_delete 는 끝내 못 지워도 멈추지 않으므로 사라졌는지 본다. 서버는 Gateway 가 사라진 뒤에 지울 수 있고, 그 삭제가
+# 게시 항목을 함께 지운다
+api_delete "/gateways/$CODE_GW"
+wait_gone "/gateways/$CODE_GW" || die 8c "gateway $CODE_GW_NAME ($CODE_GW) is still there after its delete"
+api_delete "/mcp-servers/$CODE_MS"
+wait_gone "/mcp-servers/$CODE_MS" || die 8c "mcp server $CODE_MS_NAME ($CODE_MS) is still there after its delete"
+pass 8c "Gateway $CODE_GW_NAME over $CODE_MS_NAME (Add, Divide marked read) with code mode lists $SCRIPT_TOOL, and one script returned Add 11 and Divide 4; adding orders' CreateOrder -> 422 code_mode_not_read_only {CreateOrder: write}; exposing it -> 422 code_mode_exposed; after a server revision marked Divide write the reapply turned code mode off with code_mode_closed (cause tools, Divide), and Divide answered a direct call; gateway and server removed"
 
 # ---------- 18. cleanup ----------
 for i in "${!PFS[@]}"; do stop_pf "${PFS[$i]}" "${PFS_PORTS[$i]}"; done; PFS=(); PFS_PORTS=()

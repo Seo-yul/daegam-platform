@@ -4,6 +4,8 @@
 
 - Tool 노드: `--ms-id ID` 는 MCP Server 의 Add 하나로 채운다(`--approve` 면 승인 뒤에만 부른다). `--source KIND:ID` 는
   소스만 바꾸고 템플릿의 Tool 목록을 두며, `--allow A,B` 를 주면 그 이름만 남긴다(타임아웃과 승인도 그 이름만).
+  `--every-tool` 이면 Tool 을 고르지 않아 배포 때의 핀이 소스의 이름 전부가 되고, 승인과 타임아웃도 비운다(e2e_agent 11c
+  의 code mode Gateway 노드는 이렇게 스크립트를 든다).
   `--tools KIND:ID:TOOL` 은 거듭 주는 만큼 Tool 노드를 템플릿의 것 대신 두고, 노드마다 그 소스의 Tool 하나를 승인 없이
   허용한다(e2e_evaluation 의 쓰기 Tool 과 읽기 Tool 소스 둘). 셋 다 없으면 Tool 노드를 뺀다. `--outside A,B` 는 그 Tool 의 결과를 바깥 내용으로 표시하고, `--rememberable A,B` 는
   그 Tool 의 승인을 사람이 기억할 수 있게 한다(P43 2·5절). `--approval-for A,B` 는 그 Tool 의 승인 규칙을 승인과 거절로
@@ -16,7 +18,8 @@
   TTL(초)을 둔다.
 - `--kb-id ID --kb-tool T` 는 knowledge 노드를 더한다. `--sub-name S` 는 메인이 위임으로 부르는 서브에이전트를 더한다.
   메인과 같은 모델 노드를 쓰고, `--sub-provider P` 면 그 provider 를 쓰는 제 모델 노드를 둔다. `--sub-tools` 는
-  서브에이전트에도 Tool 노드를 잇는다.
+  서브에이전트에도 Tool 노드를 잇는다. `--sub-approval KIND:ID:TOOL` 은 서브에이전트에만 따로 Tool 노드 하나를 잇고, 그
+  노드는 그 소스의 Tool 하나를 승인과 거절로 묻는다. 승인은 체크포인터가 있어야 하므로 `--ds-id` 와 함께 쓴다.
 - `--judge` 는 메인과 같은 provider 의 판정용 모델 노드와 그것을 가리키는 Tool 가드레일(injection_check, block)을 더해
   메인에 붙인다(P43 7절, e2e_agent 8j).
 - `--second` 는 e2e_chat 4g 의 둘째 리비전(파일 도구를 끄고 출력 가드레일을 더한다), `--record-bodies` 는 관측의 본문
@@ -37,6 +40,16 @@ import argparse
 import json
 
 ALLOWED_WITH_EDIT = ["approve", "edit", "reject"]
+
+
+def tool_node(kind: str, source_id: str, tool: str, approval: list) -> dict:
+    """KIND·ID 소스의 Tool 하나만 허용하는 Tool 노드의 data 다. approval 이 비지 않으면 그 Tool 을 그 결정으로 묻는다."""
+    return {
+        "source": {"kind": kind, "id": source_id},
+        "allow_tools": [tool],
+        "approval": {tool: approval} if approval else {},
+        "timeouts": {},
+    }
 
 
 def build(template: dict, args: argparse.Namespace) -> dict:
@@ -60,6 +73,10 @@ def build(template: dict, args: argparse.Namespace) -> dict:
         edge = {"id": f"e-{source}-{target}", "source": source, "target": target, "kind": kind}
         graph["edges"].append(edge)
 
+    if args.every_tool and not args.source:
+        raise SystemExit("--every-tool needs --source")
+    if args.sub_approval and not (args.sub_name and args.ds_id):
+        raise SystemExit("--sub-approval needs --sub-name and --ds-id (an approval needs the checkpointer)")
     main = next(n for n in nodes("agent") if n["data"]["role"] == "main")
     model = node("model")
     model["data"]["provider"] = args.provider
@@ -70,9 +87,8 @@ def build(template: dict, args: argparse.Namespace) -> dict:
     elif args.tools:
         drop("tools")
         for i, spec in enumerate(args.tools, start=1):
-            kind, source_id, tool = spec.split(":", 2)
             node_id = f"tools-{i}"
-            data = {"source": {"kind": kind, "id": source_id}, "allow_tools": [tool], "approval": {}, "timeouts": {}}
+            data = tool_node(*spec.split(":", 2), approval=[])
             graph["nodes"].append({"id": node_id, "type": "tools", "data": data})
             attach(main["id"], node_id, "tools")
             layout[node_id] = {"x": 620 + 140 * i, "y": 80}
@@ -85,6 +101,8 @@ def build(template: dict, args: argparse.Namespace) -> dict:
             tools["allow_tools"] = allow
             tools["timeouts"] = {k: v for k, v in tools["timeouts"].items() if k in allow}
             tools["approval"] = {k: v for k, v in tools["approval"].items() if k in allow}
+        if args.every_tool:
+            tools.update(allow_tools=[], approval={}, timeouts={})
     else:
         drop("tools")
     if args.outside or args.rememberable or args.approval_for:
@@ -132,6 +150,11 @@ def build(template: dict, args: argparse.Namespace) -> dict:
         attach("agent-sub", sub_model, "model")
         if args.sub_tools and nodes("tools"):
             attach("agent-sub", node("tools")["id"], "tools")
+        if args.sub_approval:
+            data = tool_node(*args.sub_approval.split(":", 2), approval=["approve", "reject"])
+            graph["nodes"].append({"id": "tools-sub", "type": "tools", "data": data})
+            attach("agent-sub", "tools-sub", "tools")
+            layout["tools-sub"] = {"x": 940, "y": 420}
         layout["agent-sub"] = {"x": 780, "y": 420}
     if args.kb_id:
         knowledge = {
@@ -197,6 +220,11 @@ def parser() -> argparse.ArgumentParser:
         help="KIND:ID:TOOL. 거듭 주는 만큼 그 소스의 Tool 하나를 허용하는 Tool 노드를 둔다",
     )
     ap.add_argument("--allow", default="", help="--source 의 Tool 목록을 이 이름들(쉼표로 가른다)만 남긴다")
+    ap.add_argument(
+        "--every-tool",
+        action="store_true",
+        help="--source 의 노드가 Tool 을 고르지 않는다(배포 때 핀이 소스의 이름 전부다). 승인과 타임아웃도 비운다",
+    )
     ap.add_argument("--ds-id", default="", help="없으면 memory 노드를 뺀다")
     ap.add_argument("--long-term-days", type=int, default=0, help="0 이면 장기 기억을 끈다")
     ap.add_argument("--files", action="store_true", help="파일 도구를 켠다")
@@ -214,6 +242,11 @@ def parser() -> argparse.ArgumentParser:
     ap.add_argument("--sub-description", default="계산을 맡는 서브에이전트다.")
     ap.add_argument("--sub-provider", default="", help="서브에이전트가 이 provider 의 제 모델 노드를 쓴다")
     ap.add_argument("--sub-tools", action="store_true", help="서브에이전트에도 Tool 노드를 잇는다")
+    ap.add_argument(
+        "--sub-approval",
+        default="",
+        help="KIND:ID:TOOL. 서브에이전트에만 그 소스의 Tool 하나를 승인과 거절로 묻는 Tool 노드를 잇는다",
+    )
     ap.add_argument("--judge", action="store_true", help="판정 모델(injection_check)의 Tool 가드레일을 더한다")
     ap.add_argument("--second", action="store_true", help="e2e_chat 4g 의 둘째 리비전")
     ap.add_argument("--record-bodies", action="store_true")
