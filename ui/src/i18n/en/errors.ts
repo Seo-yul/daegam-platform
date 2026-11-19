@@ -187,6 +187,7 @@ export const errors: Messages["errors"] = {
     outside_auth_not_https:
       "A hub item that carries auth needs an https URL; only a Service address in this tenant's namespaces is exempt. Enter an https address.",
     outside_oauth_unavailable: "Auth that connects each person's account is not available yet. Select none or header.",
+    outside_sse_unsupported: "Outside MCP servers that speak only SSE cannot be registered. Register the server's streamable-http address instead.",
     not_session_owner: "This session belongs to another user. Try again in your own session.",
     tenant_mismatch: "This session belongs to another tenant. Switch tenants, then open it again.",
     agent_oauth_missing: "agent_oauth is not set in Tenant Settings, so a Gateway cannot be used as a Tool. Set it in Tenant Settings first.",

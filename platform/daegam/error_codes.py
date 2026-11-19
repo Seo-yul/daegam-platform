@@ -264,6 +264,8 @@ STATUS: dict[str, int] = {
     "outside_header_value_invalid": 422,
     # 사람마다의 OAuth 계정 인증은 P86b 가 만든다
     "outside_oauth_unavailable": 422,
+    # SSE 로만 말하는 외부 MCP 서버다. 허브는 streamable HTTP 서버만 받는다 (P54b 15절 3)
+    "outside_sse_unsupported": 422,
     "overrides_invalid": 409,
     "password_change_required": 403,
     "payload_too_large": 413,

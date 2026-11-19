@@ -180,6 +180,11 @@ export const warnings = {
       label: "헤더 값 거절됨",
       text: "외부 서버가 플랫폼의 마지막 호출에서 이 허브 항목의 헤더 값을 거절했습니다. 값을 확인한 뒤 헤더 값 바꾸기로 다시 저장해 주세요.",
     },
+    // SSE 로만 말하는 외부 서버로 그 전에 만든 허브 항목 (services/hub.py OUTSIDE_SSE_UNSUPPORTED)
+    outside_sse_unsupported: {
+      label: "SSE 서버 미지원",
+      text: "이 허브 항목의 서버는 SSE 방식으로만 동작해 플랫폼이 Tool 을 읽지 못하고, 이 항목을 사용하는 Gateway 를 배포할 수 없습니다. 서버의 streamable-http 주소로 새 항목을 만들어 주세요.",
+    },
     outside_header_missing: {
       label: "헤더 값 없음",
       text: "백엔드로 사용하는 허브 항목의 헤더 값을 찾지 못해 헤더 없이 부릅니다. 허브 항목을 관리하는 사람에게 헤더 값을 다시 저장해 달라고 요청해 주세요.",

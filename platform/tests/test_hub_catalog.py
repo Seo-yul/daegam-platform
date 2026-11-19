@@ -210,7 +210,10 @@ def test_catalog_remote_checks_the_snapshot_server() -> None:
     plain = next(
         s
         for s in cat.servers
-        if s.kind == "remote" and not s.needs_login and not s.needs_credentials
+        if s.kind == "remote"
+        and s.transport != "sse"
+        and not s.needs_login
+        and not s.needs_credentials
     )
     got = catalog_remote(
         cat, plain.name, url=plain.url, transport=plain.transport, error_cls=HubError
@@ -233,6 +236,11 @@ def test_catalog_remote_checks_the_snapshot_server() -> None:
     image = next(s for s in cat.servers if s.kind == "image")
     with pytest.raises(HubError, match="no remote server"):
         catalog_remote(cat, image.name, url=None, transport=None, error_cls=HubError)
+    # SSE 로만 말하는 원격은 주소와 전송이 맞아도 가져오지 못한다 (P54b 15절 3)
+    sse = next(s for s in cat.servers if s.kind == "remote" and s.transport == "sse")
+    with pytest.raises(HubError) as e:
+        catalog_remote(cat, sse.name, url=sse.url, transport=sse.transport, error_cls=HubError)
+    assert (e.value.status, e.value.code) == (422, "outside_sse_unsupported")
 
 
 KEY_URL = "https://key.example.com/mcp"

@@ -90,7 +90,7 @@ def test_reading_tools_needs_consume_and_shared_items_need_manage_or_share(oidc,
     assert r.status_code == 403 and r.json()["detail"]["action"] == "manage"
     # 테넌트 admin 도 열린 항목을 만들지 못한다. 경계 확장은 platform-admin 의 hub:share 다
     admin = bearer(token("u-admin", "daegam-a-admin"))
-    shared = {"name": "x", "kind": "entry", "url": EXT_URL, "transport": "sse"}
+    shared = {"name": "x", "kind": "entry", "url": EXT_URL, "transport": "streamable-http"}
     r = oidc.post(HUB, json={**shared, "access": SHARED_ACCESS}, headers=admin)
     assert r.status_code == 403, r.text
     assert r.json()["detail"]["scope"] == "hub:share"

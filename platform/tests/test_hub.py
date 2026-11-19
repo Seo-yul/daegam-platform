@@ -33,6 +33,40 @@ def test_is_private_endpoint_and_url_paths():
     assert proxy_mcp_url("http://x.svc:8080", "sse") == "http://x.svc:8080/sse"
 
 
+def test_sse_outside_servers_are_refused_and_existing_ones_warn(client, fake_clusters, mongo):
+    """SSE 로만 말하는 외부 서버는 remote 로도 entry 로도 만들지 못한다. 그 전에 만든 SSE 항목은
+    그대로 두고 상태가 경고한다. 다시 적용해도 프록시는 sse 로 렌더된다 (P54b 15절 3)."""
+    _bootstrap(client)
+    url = "https://mcp.example.com/sse"
+    for kind in ("remote", "entry"):
+        body = {"name": f"sse-{kind}", "kind": kind, "url": url, "transport": "sse"}
+        r = client.post(HUB, json=body)
+        assert detail_code(r) == (422, "outside_sse_unsupported"), r.text
+    r = client.post(HUB, json={"name": "old", "kind": "remote", "url": url})
+    assert r.status_code == 201, r.text
+    item_id = r.json()["id"]
+
+    def sse_warnings() -> list[str]:
+        st = client.get(f"{HUB}/{item_id}").json()["status"]
+        return [w for w in st["warnings"] if w.startswith("outside_sse_unsupported:")]
+
+    assert sse_warnings() == []
+    # 이 판 전에 SSE 로 만든 항목이다. 다시 적용하면 그 전송 그대로 MCPRemoteProxy 를 렌더한다
+    mongo["hub_items"].update_one({"_id": item_id}, {"$set": {"source.transport": "sse"}})
+    assert len(sse_warnings()) == 1
+    svc = client.app.state.hub_service
+    client.portal.call(svc.apply, client.portal.call(svc.store.get_unscoped, item_id))
+    fake: FakeClusterClient = fake_clusters.by_name["edge"]
+    cr = fake.get(GV, "MCPRemoteProxy", "hub-old", "daegam-default")
+    assert cr["spec"]["remoteUrl"] == url and cr["spec"]["transport"] == "sse"
+    base = "http://mcp-hub-old-remote-proxy.daegam-default.svc.cluster.local:8080"
+    fake.set_status(
+        GV, "MCPRemoteProxy", "hub-old", "daegam-default", {"phase": "Ready", "url": base}
+    )
+    st = client.get(f"{HUB}/{item_id}").json()["status"]
+    assert st["ready"] is True and st["url"] == f"{base}/sse"
+
+
 def test_remote_renders_mcpremoteproxy(client, fake_clusters):
     _bootstrap(client)
     r = client.post(HUB, json={"name": "calc-remote", "kind": "remote", "url": SPIKE_URL})
@@ -73,11 +107,13 @@ def test_remote_renders_mcpremoteproxy(client, fake_clusters):
             "name": "ext",
             "kind": "remote",
             "url": "https://mcp.example.com/mcp",
-            "transport": "sse",
+            "transport": "streamable-http",
         },
     )
     cr = fake.get(GV, "MCPRemoteProxy", "hub-ext", "daegam-default")
-    assert cr["spec"]["allowPrivateEndpoint"] is False and cr["spec"]["transport"] == "sse"
+    assert (
+        cr["spec"]["allowPrivateEndpoint"] is False and cr["spec"]["transport"] == "streamable-http"
+    )
     # status: CR 에 status 가 없으면 phase None, ready False
     st = client.get(f"{HUB}/{item['id']}").json()["status"]
     assert st["ready"] is False and st["phase"] is None

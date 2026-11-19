@@ -5,7 +5,7 @@ import { TestApp } from "@/App";
 import { setLanguage } from "@/lib/language";
 import { leftKorean } from "./leftKorean";
 import { HttpResponse, catalogServerFixture, http, hubItemFixture, hubState, lastRequest, meDeveloper, server } from "./msw";
-import { selectValue } from "./select";
+import { openSelect, selectValue } from "./select";
 
 /** 카탈로그 대화상자를 연다. */
 async function openCatalog(user: ReturnType<typeof userEvent.setup>) {
@@ -206,6 +206,53 @@ describe("hub catalog import (P55 8절)", () => {
     const body = lastRequest("POST", "/hub")?.body as Record<string, unknown>;
     expect(body.secret_env).toEqual([{ name: "OSV_TOKEN" }]);
     expect(body).not.toHaveProperty("env");
+  });
+
+  it("greys out a remote that speaks only SSE with the reason", async () => {
+    const user = userEvent.setup();
+    hubState.catalog = {
+      ...hubState.catalog,
+      servers: [...hubState.catalog.servers, catalogServerFixture({ name: "sse-remote", title: "SSE remote", url: "https://sse.example.com/sse", transport: "sse" })],
+    };
+    await openCatalog(user);
+    expect(screen.getByTestId("hub-catalog-sse-remote")).toHaveAttribute("data-blocked", "sseOnly");
+    expect(screen.getByTestId("hub-catalog-sse-remote-reason")).toHaveTextContent("SSE 방식으로만 동작하는 서버라 허브에 등록할 수 없습니다.");
+    expect(screen.queryByTestId("hub-catalog-sse-remote-pick")).not.toBeInTheDocument();
+  });
+
+  it("offers no SSE transport for outside servers on the registration form", async () => {
+    const user = userEvent.setup();
+    render(<TestApp initialPath="/hub/new" />);
+    const listbox = await openSelect(user, await screen.findByTestId("hub-transport"));
+    expect(within(listbox).getAllByRole("option").map((o) => o.getAttribute("data-value"))).toEqual(["", "streamable-http"]);
+  });
+
+  it("offers SSE for image items, keeps a catalog image's SSE and clears it when the kind turns to an outside server", async () => {
+    const user = userEvent.setup();
+    hubState.catalog = {
+      ...hubState.catalog,
+      servers: [
+        ...hubState.catalog.servers,
+        catalogServerFixture({
+          name: "sse-image",
+          title: "SSE image",
+          kind: "image",
+          transport: "sse",
+          image: { repository: "ghcr.io/example/sse", tag: "1.0.0" },
+          port: 8080,
+          mirrored_image: "registry.example.com/hub/ghcr.io/example/sse:1.0.0",
+        }),
+      ],
+    };
+    render(<TestApp initialPath="/hub/new?catalog=sse-image" />);
+    await waitFor(() => expect(screen.getByTestId("hub-kind")).toHaveValue("image"));
+    expect(screen.getByTestId("hub-transport")).toHaveValue("sse");
+    const offered = async () => within(await openSelect(user, "hub-transport")).getAllByRole("option").map((o) => o.getAttribute("data-value"));
+    expect(await offered()).toEqual(["", "streamable-http", "sse"]);
+    await user.keyboard("{Escape}");
+    await selectValue(user, "hub-kind", "remote");
+    expect(screen.getByTestId("hub-transport")).toHaveValue("");
+    expect(await offered()).toEqual(["", "streamable-http"]);
   });
 
   it("does not send a catalog name for a remote with a URL template", async () => {

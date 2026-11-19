@@ -174,6 +174,7 @@ export const hub: Messages["hub"] = {
     tier: { Official: "Official", Community: "Community" },
     provenance: { available: "Provenance available", none: "No provenance" },
     platforms: "Architectures",
+    sseOnlyHint: "This server speaks only SSE, so it cannot be registered in the hub.",
     needsLogin: "Sign-in needed",
     needsLoginHint: "Each person must sign in to use this server, so it cannot be registered in the hub yet.",
     needsCredentials: "Credentials needed",

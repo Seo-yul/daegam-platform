@@ -169,6 +169,8 @@ describe("경고 코드", () => {
     "runtime_features_invalid",
     // 컴파일이 뒤 판의 소스를 뺀 경고(P46 A0, services/agent_status.py TOOLS_SOURCE_NEWER)
     "tools_source_newer",
+    // SSE 로만 말하는 외부 서버로 그 전에 만든 허브 항목(services/hub.py OUTSIDE_SSE_UNSUPPORTED)
+    "outside_sse_unsupported",
   ])("%s 경고가 표에 있다", (code) => {
     expect(Object.hasOwn(ko.warnings.codes, code)).toBe(true);
   });

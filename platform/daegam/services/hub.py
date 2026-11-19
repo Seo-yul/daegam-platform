@@ -451,6 +451,19 @@ async def _default_schema_lister(
         return await list_tools(f"{base_url}{path}", timeout=TOOLS_LIST_TIMEOUT, http_client=hc)
 
 
+# SSE 로만 말하는 외부 MCP 서버는 받지 않는다 (P54b 15절 3). 플랫폼의 MCP 클라이언트는
+# streamable HTTP 만 쓰므로 Tool 목록과 Gateway 배포 전 확인이 실패하고, 원격 프록시는 서버가
+# 알린 메시지 경로로 보내지 않는다. 만들기와 카탈로그 가져오기가 거절하고, 이미 있는 SSE 항목은
+# 지우거나 바꾸지 않고 상태에 같은 코드의 경고를 보인다. 코드는 hub_catalog 의 것이다
+OUTSIDE_SSE_UNSUPPORTED = hub_catalog.OUTSIDE_SSE_UNSUPPORTED
+OUTSIDE_SSE_UNSUPPORTED_TEXT = (
+    "outside MCP servers that speak only SSE are not supported; register the server's streamable "
+    "HTTP address instead"
+)
+OUTSIDE_SSE_WARNING_TEXT = (
+    "this hub item's server speaks only SSE, which the platform does not support: its Tools "
+    "cannot be refreshed and Gateways that use it cannot be deployed"
+)
 # 허브 항목 상태 경고 (P86 6.4절). 플랫폼의 마지막 호출에서 외부 서버가 헤더 값을 거절했다
 OUTSIDE_HEADER_REFUSED = "outside_header_refused"
 OUTSIDE_HEADER_REFUSED_TEXT = (
@@ -463,6 +476,14 @@ def check_outcome(e: BaseException) -> str:
     header_refused, 그 밖은 unreachable 이다. anyio TaskGroup 이 감쌀 수 있어 가장 안쪽 예외까지
     본다."""
     return CHECK_REFUSED if isinstance(_leaf_exception(e), AuthRefused) else CHECK_UNREACHABLE
+
+
+def sse_warnings(item: HubItem) -> list[str]:
+    """SSE 로 등록된 remote·entry 항목이면 `outside_sse_unsupported` 다 (P54b 15절 3). 그 전에 만든
+    항목만 해당한다."""
+    if item.kind in ("remote", "entry") and item.source.transport == "sse":
+        return [coded_warning(OUTSIDE_SSE_UNSUPPORTED, OUTSIDE_SSE_WARNING_TEXT)]
+    return []
 
 
 def header_warnings(item: HubItem) -> list[str]:
@@ -964,6 +985,8 @@ class HubService:
                 raise HubError(422, "invalid_value", "source.url must be an http(s) URL")
             if kind == "entry" and not source.transport:
                 raise HubError(422, "invalid_value", "entry needs source.transport")
+            if source.transport == "sse":
+                raise HubError(422, OUTSIDE_SSE_UNSUPPORTED, OUTSIDE_SSE_UNSUPPORTED_TEXT)
         elif not source.image:
             raise HubError(422, "invalid_value", "image needs source.image")
         source.transport = source.transport or DEFAULT_TRANSPORT
@@ -1456,13 +1479,15 @@ class HubService:
         server: MCPServer | None = None,
         settings: PlatformSettings | None = None,
     ) -> dict[str, Any]:
-        """항목 상태와 그 항목의 경고. Tool 규칙(P52 7절), 고정 헤더(P86 6.4절), image 의 허용과
-        거부(P55 6절)다. Platform Settings 는 플랫폼 항목의 상태와 image 의 경고가 읽는다. 목록은
-        한 번 읽어 settings 로 넘기고, 없으면 필요할 때 읽는다."""
+        """항목 상태와 그 항목의 경고. Tool 규칙(P52 7절), 고정 헤더(P86 6.4절), SSE 서버(P54b
+        15절 3), image 의 허용과 거부(P55 6절)다. Platform Settings 는 플랫폼 항목의 상태와 image
+        의 경고가 읽는다. 목록은 한 번 읽어 settings 로 넘기고, 없으면 필요할 때 읽는다."""
         if settings is None and item.kind in (PLATFORM_KIND, "image"):
             settings = await self.platform_settings()
         out = await self._status(item, server=server, settings=settings)
-        out["warnings"] = await self._rule_warnings(item) + header_warnings(item)
+        out["warnings"] = (
+            await self._rule_warnings(item) + header_warnings(item) + sse_warnings(item)
+        )
         if item.kind == "image" and settings is not None:
             out["warnings"] += image_warnings(item, settings.hub_images)
         return out

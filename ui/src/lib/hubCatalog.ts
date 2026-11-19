@@ -11,12 +11,14 @@ export type CatalogKind = (typeof CATALOG_KINDS)[number];
 
 /**
  * 서버를 고를 수 없는 까닭. null 이면 고를 수 있다. 이미지는 허브 이미지 설정이 켜져 허브 사본의 참조가 있어야 하고,
- * 원격은 로그인이 필요 없고, 자격 증명이 필요하면 비밀 헤더 하나(`import_header`)로 가져올 수 있어야 한다(7절, P86 A3).
+ * 원격은 SSE 로만 말하지 않고, 로그인이 필요 없고, 자격 증명이 필요하면 비밀 헤더 하나(`import_header`)로 가져올 수 있어야
+ * 한다(7절, P86 A3). SSE 원격은 서버가 outside_sse_unsupported 로 거절한다.
  */
-export type CatalogBlock = "needsLogin" | "needsCredentials" | "admissionOff";
+export type CatalogBlock = "sseOnly" | "needsLogin" | "needsCredentials" | "admissionOff";
 
 export function catalogBlock(server: HubCatalogServer, admission: boolean): CatalogBlock | null {
   if (server.kind === "image") return admission && server.mirrored_image ? null : "admissionOff";
+  if (server.transport === "sse") return "sseOnly";
   if (server.needs_login) return "needsLogin";
   if (server.needs_credentials && !server.import_header) return "needsCredentials";
   return null;

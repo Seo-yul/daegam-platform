@@ -7,14 +7,14 @@
 # 조각(잡마다 자기 실행기와 클러스터)
 #   p54      F0.1·F0.2·F0.3 가운데 items 가 고른 것 (scripts/f0/p54.sh f0)
 #   p54b     F0.4 (scripts/f0/p54b.sh f0)
-#   p54-f1   P54 의 F1. 이 브랜치(B1 의 check/<PR>)의 트리와 earlier 의 트리를 함께 굽고, 앞 트리 설치, prepare, B1 설치,
+#   p54-f1   P54 의 F1. 이 브랜치(B1 의 PR 브랜치)의 트리와 earlier 의 트리를 함께 굽고, 앞 트리 설치, prepare, B1 설치,
 #            check-new, 앞 트리로 되돌린 설치, check-old, B1 다시 설치, check-new 를 차례로 돈다. 설치마다 앞에서 watch 가
 #            노출마다의 호출 루프를 돌린다. 두 번째 설치부터 차트를 local 모드로 렌더한다(auth.mode=local)
 #   p54b-f1  P54b 의 F1. 같은 차례를 header 모드로 돈다
 # F1 은 B1 이 있어야 뜻이 있다. B1 이 없는 트리에서 돌리면 check-new 는 앞단이 넘어가기를 상한까지 기다린 뒤 그대로 적는다.
 #
 #   gh workflow run p54-f0.yml -R <저장소> --ref develop -f mode=f0 -f items="f0.1 f0.2 f0.3 f0.4"
-#   gh workflow run p54-f0.yml -R <저장소> --ref check/<PR> -f mode=f1 -f earlier=<앞 develop 의 sha> -f rehearse="p54 p54b"
+#   gh workflow run p54-f0.yml -R <저장소> --ref <B1 의 PR 브랜치> -f mode=f1 -f earlier=<앞 develop 의 sha> -f rehearse="p54 p54b"
 
 name: p54-f0
 
