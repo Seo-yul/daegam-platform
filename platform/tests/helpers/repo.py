@@ -7,16 +7,33 @@ from collections.abc import Iterable, Iterator
 
 from tests.helpers.consts import REPO
 
+# 개발 폴더를 작업 트리로 함께 쓰는 다른 저장소의 git 디렉터리를 적는 설정 키. 문서와 운영자의
+# 파일은 그 저장소가 추적하고, 이 저장소는 그 경로를 info/exclude 로 뺀다. 설정이 없으면(CI,
+# 이 저장소만 받은 클론) 이 저장소의 파일만 본다
+SHARED_GIT_DIR_KEY = "daegam.sharedGitDir"
 
-def repo_files() -> list[str]:
-    """git 이 추적하거나 곧 추적할 파일의 저장소 기준 경로. 커밋 전의 새 파일도 센다."""
+
+def _ls_files(*git: str) -> set[str]:
     out = subprocess.run(
-        ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+        ["git", *git, "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
         cwd=REPO,
         capture_output=True,
         check=True,
     ).stdout.decode()
-    return sorted({p for p in out.split("\0") if p and (REPO / p).is_file()})
+    return {p for p in out.split("\0") if p}
+
+
+def repo_files() -> list[str]:
+    """git 이 추적하거나 곧 추적할 파일의 저장소 기준 경로. 커밋 전의 새 파일도 센다. 개발
+    폴더를 함께 쓰는 저장소가 있으면(`daegam.sharedGitDir`) 그 저장소의 파일 가운데 이 트리에
+    있는 것도 센다. worktree 에는 그 파일이 없으므로 CI 와 같다."""
+    paths = _ls_files()
+    shared = subprocess.run(
+        ["git", "config", "--get", SHARED_GIT_DIR_KEY], cwd=REPO, capture_output=True, text=True
+    ).stdout.strip()
+    if shared:
+        paths |= _ls_files(f"--git-dir={shared}", f"--work-tree={REPO}")
+    return sorted(p for p in paths if (REPO / p).is_file())
 
 
 def repo_lines(paths: Iterable[str]) -> Iterator[tuple[str, int, str]]:

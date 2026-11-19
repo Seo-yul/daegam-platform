@@ -279,6 +279,15 @@ def _assert_clean(what: str, checked: int, minimum: int, problems: list[str]) ->
     assert not problems, f"가리키는 곳이 없는 {what}:\n  " + "\n  ".join(problems)
 
 
+def test_docs_are_listed() -> None:
+    """docs/ 가 있으면 문서가 파일 목록에 있다. 문서를 다른 저장소가 추적하는 개발 폴더에서 그
+    저장소를 알리지 않으면(`daegam.sharedGitDir`) 목록이 비어 아래 검사가 문서 없이 지나간다."""
+    assert _docs(PLANS), (
+        "docs/ 가 있는데 파일 목록에 docs/plan 의 문서가 없다. 문서를 추적하는 저장소의 "
+        "git 디렉터리를 git config daegam.sharedGitDir 로 알린다"
+    )
+
+
 @pytest.mark.parametrize(
     ("text", "rejected"),
     [

@@ -1,0 +1,36 @@
+# 이 저장소에 두지 않는 경로가 트리에 들어왔는지 본다. 문서, 에이전트 설정, 운영자의 설치 스크립트와 측정 도구는
+# 개발 폴더에 함께 있지만 다른 저장소가 추적한다. 커밋과 푸시 전의 검사가 먼저 막고, 이 잡은 그 검사를 거치지 않은
+# 커밋을 잡는다. pr-check 와 달리 경로 필터를 두지 않는다. 그 필터가 거르는 docs/ 와 루트 *.md 가 바로 볼 대상이다
+# 아래 목록은 개발 폴더에서 이 저장소의 git 이 info/exclude 로 빼는 경로와 같게 둔다. 한쪽만 바꾸면 그 경로를 놓친다
+name: tree-check
+
+on:
+  pull_request:
+  push:
+    branches: [develop, main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tree-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  paths:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: no kept-out paths
+        shell: bash
+        run: |
+          found=0
+          for p in docs CLAUDE.md .claude ops deploy/dev/lab/f0 deploy/dev/lab/tool-selection ui/e2e/tour \
+            ui/playwright.tour.config.ts .ignore; do
+            if git ls-files --error-unmatch -- "$p" >/dev/null 2>&1; then
+              echo "::error::$p is tracked here, but it belongs to the files kept outside this repository"
+              found=1
+            fi
+          done
+          exit "$found"
