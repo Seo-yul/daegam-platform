@@ -1,7 +1,7 @@
 """P8 F5: 인스턴스 외부 노출 (docs/guide/exposure.md, resource-model.md 11절, D22).
 
-fake 렌더 스냅샷: MCP Instance http / secret / cert-manager (앞단 MCPRemoteProxy
-expose-<k8s.name> + Ingress + NetworkPolicy), Gateway secret (Ingress 대상 vmcp +
+fake 렌더 스냅샷: MCP Instance http / secret / cert-manager (vMCP 앞단 front-<k8s.name> +
+Ingress + NetworkPolicy, P54), Gateway secret (Ingress 대상 vmcp +
 incomingAuth.oidcConfigRef.resourceUrl), header 모드 경고, allow_unauthenticated false 422,
 검증 오류 코드, 삭제·재배포 정리, 상태 필드. host 유일성은 모든 클러스터를 넘고, 기동이 그 전에 생긴
 중복을 알린다 (P33 6절).
@@ -86,9 +86,7 @@ def test_reserved_hosts_match_in_normal_form_without_validation():
 # -- MCP Instance: http (header 모드, 무인증 경고) -----------------------------------------------
 
 
-def test_mcp_instance_http_exposure_renders_front_proxy_ingress_policy(
-    client, fake_clusters, mongo
-):
+def test_mcp_instance_http_exposure_renders_vmcp_front_ingress_policy(client, fake_clusters, mongo):
     cid, bp, ds, mp = cluster_with_ingress(client)
     fake: FakeClusterClient = fake_clusters.by_name["edge"]
     prep_ingress(fake)
@@ -113,46 +111,80 @@ def test_mcp_instance_http_exposure_renders_front_proxy_ingress_policy(
         "blockOwnerDeletion": False,
         "controller": False,
     }
-    # 앞단 프록시 (header 모드: oidcConfigRef 없음). 안쪽 MCPServer 에는 모든 모드에서 서비스 토큰을
-    # 낸다 (D41). 토큰 판 어노테이션은 토큰의 jti 앞 8자다
-    front = fake.get(GV, "MCPRemoteProxy", "expose-mcp-calc-1", DEFAULT_NS)
+    # 새 노출의 앞단은 vMCP 다 (P54 5절). 옛 앞단 MCPRemoteProxy 는 만들지 않는다
+    assert fake.get(GV, "MCPRemoteProxy", "expose-mcp-calc-1", DEFAULT_NS) is None
+    front = fake.get(GV, "VirtualMCPServer", "front-mcp-calc-1", DEFAULT_NS)
     rev = front["spec"]["podTemplateSpec"]["metadata"]["annotations"][
         "daegam.devops.ai.kr/svc-token-rev"
     ]
     assert len(rev) == 8 and rev == inst_doc(client, inst["id"])["svc_token_rev"]
-    assert front["spec"] == {
+    # header 모드: anonymous 와 permit-all 을 든 설정의 참조. Entry 하나를 거르지 않고 접두사 없이
+    # 내고, 서버의 backend 타임아웃(30초)에 5초를 더한다
+    assert front["spec"]["incomingAuth"] == {
+        "type": "anonymous",
+        "authzConfigRef": {"name": "front-mcp-calc-1-authz"},
+    }
+    assert cedar_policies(front, fake=fake) == ["permit(principal, action, resource);"]
+    assert front["spec"]["outgoingAuth"] == {
+        "source": "inline",
+        "backends": {
+            "front-mcp-calc-1": {
+                "type": "externalAuthConfigRef",
+                "externalAuthConfigRef": {"name": "front-mcp-calc-1"},
+            }
+        },
+    }
+    config = front["spec"]["config"]
+    assert config["aggregation"] == {
+        "conflictResolution": "priority",
+        "conflictResolutionConfig": {"priorityOrder": ["front-mcp-calc-1"]},
+        "defaultToolVisibility": "deny",
+        "tools": [{"workload": "front-mcp-calc-1"}],
+    }
+    assert config["operational"]["timeouts"] == {"perWorkload": {"front-mcp-calc-1": "35s"}}
+    assert config["audit"]["enabled"] is True
+    assert front["spec"]["groupRef"] == {"name": "front-mcp-calc-1"}
+    assert front["spec"]["podTemplateSpec"]["spec"]["containers"] == [
+        {"name": "vmcp", "resources": proxy_resources()}
+    ]
+    labels = front["metadata"]["labels"]
+    assert labels["daegam.devops.ai.kr/resource"] == "mcp-instance-front"
+    assert labels["daegam.devops.ai.kr/id"] == inst["id"]
+    assert labels["daegam.devops.ai.kr/profile-revision"] == "1"
+    assert "daegam.devops.ai.kr/gateway-profile" not in labels
+    assert front["metadata"]["ownerReferences"] == [owner]
+    # Entry 는 서버의 프록시 Service 를 감싸고 헤더 주입 설정을 단다
+    entry = fake.get(GV, "MCPServerEntry", "front-mcp-calc-1", DEFAULT_NS)
+    assert entry["spec"] == {
         "remoteUrl": "http://mcp-mcp-calc-1-proxy.daegam-default.svc.cluster.local:8080/mcp",
         "transport": "streamable-http",
         "allowPrivateEndpoint": True,
-        "proxyPort": 8080,
-        # 비면 ToolHive 가 프록시에 자원을 넣지 않으므로 고정값을 적는다 (D54)
-        "resources": proxy_resources(),
-        "trustProxyHeaders": True,
-        "audit": {"enabled": True},
-        "externalAuthConfigRef": {"name": "svc-expose-mcp-calc-1"},
-        "podTemplateSpec": {
-            "metadata": {"annotations": {"daegam.devops.ai.kr/svc-token-rev": rev}}
-        },
-        # 오퍼레이터가 프록시마다 만드는 Role 없이 역할 없는 계정으로 돈다 (P50 10절)
-        "serviceAccount": "daegam-remote-proxy",
+        "groupRef": {"name": "front-mcp-calc-1"},
+        "externalAuthConfigRef": {"name": "front-mcp-calc-1"},
     }
-    # 토큰 Secret 과 bearerToken MCPExternalAuthConfig 는 MCPServer 가 소유한다
+    assert "daegam.devops.ai.kr/hub-item" not in entry["metadata"]["labels"]
+    group = fake.get(GV, "MCPGroup", "front-mcp-calc-1", DEFAULT_NS)
+    assert group["metadata"]["labels"]["daegam.devops.ai.kr/resource"] == "mcp-instance-front"
+    # 토큰 Secret 은 옛 앞단의 것 그대로이고, vMCP 앞단은 그 authorization 키를 헤더로 싣는다
     secret = fake.get("v1", "Secret", "svc-expose-mcp-calc-1", DEFAULT_NS)
     assert secret["metadata"]["ownerReferences"] == [owner]
     assert secret["stringData"]["authorization"] == "Bearer " + secret["stringData"]["token"]
     assert secret["metadata"]["labels"]["daegam.devops.ai.kr/resource"] == "mcp-expose-svc-token"
-    ext = fake.get(GV, "MCPExternalAuthConfig", "svc-expose-mcp-calc-1", DEFAULT_NS)
+    ext = fake.get(GV, "MCPExternalAuthConfig", "front-mcp-calc-1", DEFAULT_NS)
     assert ext["spec"] == {
-        "type": "bearerToken",
-        "bearerToken": {"tokenSecretRef": {"name": "svc-expose-mcp-calc-1", "key": "token"}},
+        "type": "headerInjection",
+        "headerInjection": {
+            "headerName": "Authorization",
+            "valueSecretRef": {"name": "svc-expose-mcp-calc-1", "key": "authorization"},
+        },
     }
     assert ext["metadata"]["ownerReferences"] == [owner]
-    assert front["metadata"]["labels"]["daegam.devops.ai.kr/resource"] == "mcp-instance-expose"
-    assert front["metadata"]["labels"]["daegam.devops.ai.kr/id"] == inst["id"]
-    assert front["metadata"]["ownerReferences"] == [owner]
+    assert fake.get(GV, "MCPExternalAuthConfig", "svc-expose-mcp-calc-1", DEFAULT_NS) is None
+    # Entry 이름은 이 서버가 선점한다 (D82)
+    assert [d["resource_id"] for d in mongo["gateway_entry_names"].find()] == [inst["id"]]
     # Ingress
     ing = fake.get(NP_API, "Ingress", "mcp-calc-1", DEFAULT_NS)
-    backend = {"service": {"name": "mcp-expose-mcp-calc-1-remote-proxy", "port": {"number": 8080}}}
+    backend = {"service": {"name": "vmcp-front-mcp-calc-1", "port": {"number": 4483}}}
     # MCP 엔드포인트와 RFC 9728 메타데이터만 연다. 앞단의 /health 같은 경로는 밖에 없다 (P50 5절)
     assert ing["spec"] == {
         "ingressClassName": "traefik",
@@ -176,13 +208,22 @@ def test_mcp_instance_http_exposure_renders_front_proxy_ingress_policy(
     assert ing["metadata"]["labels"]["daegam.devops.ai.kr/resource"] == "mcp-instance-ingress"
     assert ing["metadata"]["ownerReferences"] == [owner]
     # NetworkPolicy
+    # NetworkPolicy 는 두 종류의 앞단 파드를 함께 고른다 (P54 5절)
     np = fake.get(NP_API, "NetworkPolicy", "daegam-expose-mcp-calc-1", DEFAULT_NS)
     assert np["spec"] == {
         "podSelector": {
-            "matchLabels": {
-                "app.kubernetes.io/instance": "expose-mcp-calc-1",
-                "app.kubernetes.io/name": "mcpremoteproxy",
-            }
+            "matchExpressions": [
+                {
+                    "key": "app.kubernetes.io/instance",
+                    "operator": "In",
+                    "values": ["expose-mcp-calc-1", "front-mcp-calc-1"],
+                },
+                {
+                    "key": "app.kubernetes.io/name",
+                    "operator": "In",
+                    "values": ["mcpremoteproxy", "virtualmcpserver"],
+                },
+            ]
         },
         "policyTypes": ["Ingress"],
         "ingress": [
@@ -198,17 +239,21 @@ def test_mcp_instance_http_exposure_renders_front_proxy_ingress_policy(
         ],
     }
     assert np["metadata"]["ownerReferences"] == [owner]
-    # 적용 순서: MCPServer → 토큰 Secret → MCPExternalAuthConfig → 앞단 → Ingress → NetworkPolicy
+    # 적용 순서: MCPServer → 토큰 Secret → 그룹 → 헤더 설정 → Entry → Cedar 설정 → vMCP →
+    # Ingress → NetworkPolicy
     kinds = [o["kind"] for o in fake.applied]
-    assert kinds[-6:] == [
+    assert kinds[-9:] == [
         "MCPServer",
         "Secret",
+        "MCPGroup",
         "MCPExternalAuthConfig",
-        "MCPRemoteProxy",
+        "MCPServerEntry",
+        "MCPAuthzConfig",
+        "VirtualMCPServer",
         "Ingress",
         "NetworkPolicy",
     ]
-    # 상태
+    # 상태. 앞단의 phase 는 Ingress 가 가리키는 vMCP 앞단의 것이다
     st = client.get(f"{MS}/{inst['id']}").json()["status"]
     assert st["external_url"] == "http://calc.e2e.local/mcp"
     assert st["exposure"] == {
@@ -217,7 +262,7 @@ def test_mcp_instance_http_exposure_renders_front_proxy_ingress_policy(
         "tls_secret_present": None,
         "certificate_ready": None,
     }
-    fake.set_status(GV, "MCPRemoteProxy", "expose-mcp-calc-1", DEFAULT_NS, {"phase": "Ready"})
+    fake.set_status(GV, "VirtualMCPServer", "front-mcp-calc-1", DEFAULT_NS, {"phase": "Ready"})
     fake.set_status(
         NP_API,
         "Ingress",
@@ -227,26 +272,30 @@ def test_mcp_instance_http_exposure_renders_front_proxy_ingress_policy(
     )
     st = client.get(f"{MS}/{inst['id']}").json()["status"]
     assert st["exposure"]["front_phase"] == "Ready" and st["exposure"]["address_assigned"] is True
-    # 문서 묶음: MCPServer + 테넌트 울타리 + 노출 4종(토큰 Secret 은 미리보기에 없다). 앞단은 인증
-    # 경로가 잠기고 나머지는 전부 잠긴다
+    # 문서 묶음: MCPServer + 테넌트 울타리 + vMCP 앞단 다섯과 Ingress·NetworkPolicy(토큰 Secret 은
+    # 미리보기에 없다). vMCP 앞단은 노출한 vMCP 의 잠금이고 나머지는 전부 잠긴다 (P54 11절)
     docs = client.get(f"{MS}/{inst['id']}/manifest").json()["documents"]
     assert docs.pop(1)["kind"] == "MCPAuthzConfig"
     assert [d["kind"] for d in docs] == [
         "MCPServer",
+        "MCPGroup",
         "MCPExternalAuthConfig",
-        "MCPRemoteProxy",
+        "MCPServerEntry",
+        "MCPAuthzConfig",
+        "VirtualMCPServer",
         "Ingress",
         "NetworkPolicy",
     ]
-    assert docs[2]["live"] is not None and docs[2]["overrides"] == {}
+    vmcp = docs[5]
+    assert vmcp["live"] is not None and vmcp["overrides"] == {}
     assert {
-        "spec.oidcConfigRef",
-        "spec.trustProxyHeaders",
-        "spec.authzConfig",
-        "spec.externalAuthConfigRef",
-        "spec.headerForward",
-    } <= set(docs[2]["locked"])
-    assert docs[1]["locked"] == ["*"] and docs[3]["locked"] == ["*"] and docs[4]["locked"] == ["*"]
+        "spec.incomingAuth.oidcConfigRef",
+        "spec.incomingAuth.authzConfigRef",
+        "spec.outgoingAuth",
+        "spec.config.audit",
+        "spec.config.operational.timeouts",
+    } <= set(vmcp["locked"])
+    assert all(d["locked"] == ["*"] for i, d in enumerate(docs) if i not in (0, 5))
     assert (
         mongo["mcp_servers"].find_one({"_id": inst["id"]})["exposure"]["host"] == "calc.e2e.local"
     )
@@ -257,11 +306,14 @@ def test_mcp_instance_http_exposure_renders_front_proxy_ingress_policy(
     assert detail_code(r) == (409, "host_conflict")
     r = clone_and_deploy(client, mp, name="plat", exposure={"enabled": True, "host": "daegam.com"})
     assert detail_code(r) == (422, "host_reserved")
-    # 삭제하면 세 객체가 사라진다
+    # 삭제하면 앞단과 Ingress·NetworkPolicy 가 사라지고 Entry 이름을 놓는다
     assert client.delete(f"{MS}/{inst['id']}").status_code == 200
-    assert fake.get(GV, "MCPRemoteProxy", "expose-mcp-calc-1", DEFAULT_NS) is None
+    for kind in ("VirtualMCPServer", "MCPServerEntry", "MCPGroup", "MCPExternalAuthConfig"):
+        assert fake.get(GV, kind, "front-mcp-calc-1", DEFAULT_NS) is None, kind
+    assert fake.get(GV, "MCPAuthzConfig", "front-mcp-calc-1-authz", DEFAULT_NS) is None
     assert fake.get(NP_API, "Ingress", "mcp-calc-1", DEFAULT_NS) is None
     assert fake.get(NP_API, "NetworkPolicy", "daegam-expose-mcp-calc-1", DEFAULT_NS) is None
+    assert mongo["gateway_entry_names"].count_documents({}) == 0
     # host 가 풀렸다
     r = clone_and_deploy(
         client, mp, name="again", exposure={"enabled": True, "host": "calc.e2e.local"}
@@ -456,15 +508,16 @@ def test_mcp_instance_namespace_and_basic_patch_exposure(client, fake_clusters):
     assert r.json()["deployed_revision"] == 1
     assert r.json()["status"]["external_url"] == "http://ns.local/mcp"
     assert fake.get(NP_API, "Ingress", "mcp-ns", "team-a")["spec"]["rules"][0]["host"] == "ns.local"
-    assert fake.get(GV, "MCPRemoteProxy", "expose-mcp-ns", "team-a") is not None
+    assert fake.get(GV, "VirtualMCPServer", "front-mcp-ns", "team-a") is not None
     # 같은 host 로 자기 자신을 다시 저장하는 것은 된다 (자기 host 는 제외)
     r = client.patch(f"{MS}/{inst['id']}", json={"exposure": {"enabled": True, "host": "ns.local"}})
     assert r.status_code == 200, r.text
-    # 끄면 세 객체가 사라진다
+    # 끄면 앞단과 Ingress·NetworkPolicy 가 사라진다
     r = client.patch(f"{MS}/{inst['id']}", json={"exposure": {"enabled": False}})
     assert r.status_code == 200 and r.json()["status"]["external_url"] is None
     assert fake.get(NP_API, "Ingress", "mcp-ns", "team-a") is None
-    assert fake.get(GV, "MCPRemoteProxy", "expose-mcp-ns", "team-a") is None
+    assert fake.get(GV, "VirtualMCPServer", "front-mcp-ns", "team-a") is None
+    assert fake.get(GV, "MCPServerEntry", "front-mcp-ns", "team-a") is None
     assert fake.get(NP_API, "NetworkPolicy", "daegam-expose-mcp-ns", "team-a") is None
     # 재배포는 노출 스냅샷을 유지한다
     r = client.patch(f"{MS}/{inst['id']}", json={"exposure": {"enabled": True, "host": "ns.local"}})
@@ -473,7 +526,7 @@ def test_mcp_instance_namespace_and_basic_patch_exposure(client, fake_clusters):
     assert fake.get(NP_API, "Ingress", "mcp-ns", "team-a") is not None
 
 
-def test_mcp_instance_oidc_front_proxy(oidc_client, oidc_headers, fake_clusters):
+def test_mcp_instance_oidc_vmcp_front(oidc_client, oidc_headers, fake_clusters):
     h = oidc_headers
     fake_clusters.by_name["edge"] = FakeClusterClient()
     fake = fake_clusters.by_name["edge"]
@@ -502,17 +555,18 @@ def test_mcp_instance_oidc_front_proxy(oidc_client, oidc_headers, fake_clusters)
     inst = r.json()
     assert inst["status"]["external_url"] == "https://calc-1.acme.mcp.example.com/mcp"
     assert UNAUTHENTICATED_WARNING not in inst["warnings"]
-    front = fake.get(GV, "MCPRemoteProxy", "expose-mcp-calc-1", "daegam-acme")
-    assert front["spec"]["oidcConfigRef"] == {
-        "name": "daegam-oidc",
-        "audience": "daegam-mcp",
-        "resourceUrl": "https://calc-1.acme.mcp.example.com/mcp",
+    front = fake.get(GV, "VirtualMCPServer", "front-mcp-calc-1", "daegam-acme")
+    assert front["spec"]["incomingAuth"] == {
+        "type": "oidc",
+        "oidcConfigRef": {
+            "name": "daegam-oidc",
+            "audience": "daegam-mcp",
+            "resourceUrl": "https://calc-1.acme.mcp.example.com/mcp",
+        },
+        # 앞단의 Cedar 는 앞단이 참조하는 MCPAuthzConfig 에 있다 (P50 8절)
+        "authzConfigRef": {"name": "front-mcp-calc-1-authz"},
     }
-    assert front["spec"]["trustProxyHeaders"] is True and front["spec"]["audit"] == {
-        "enabled": True
-    }
-    # 앞단의 Cedar 는 앞단이 참조하는 MCPAuthzConfig 에 있다 (P50 8절)
-    assert front["spec"]["authzConfigRef"] == {"name": "expose-mcp-calc-1-authz"}
+    assert front["spec"]["config"]["audit"]["enabled"] is True
     policies = cedar_policies(front, fake=fake)
     assert any('THVGroup::"okta-acme"' in p for p in policies)
     assert any('claim_cid == "agent-1"' in p for p in policies)

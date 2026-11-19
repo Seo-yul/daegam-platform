@@ -39,8 +39,9 @@
 #            플랫폼 네임스페이스의 임시 파드가 양성 대조이고, 테넌트 파드는 플랫폼 Service 와 이름으로 찾은 프록시에 그대로 닿는다.
 #            스위치가 꺼졌거나 컨트롤러가 확인된 것이 아니어서 egress 정책이 없으면 건너뛴다
 #   STEP 6   그 허브 항목을 백엔드로 Gateway 배포 Ready → 게시 → vMCP 경유 tools/list 가 같다
-#   STEP 7   노출(edge). DAEGAM_HOME_INGRESS_ENABLED=true 인 배치에서만 돈다(꺼져 있으면 SKIP conditional). 앞단
-#            MCPRemoteProxy Ready, external_url 이 https, 끈다
+#   STEP 7   노출(edge). DAEGAM_HOME_INGRESS_ENABLED=true 인 배치에서만 돈다(꺼져 있으면 SKIP conditional). 앞단은 그 서버
+#            하나를 백엔드로 둔 vMCP front-<k8s.name> 이고 Ready 다. Ingress 가 vmcp-front-<k8s.name>:4483 을 가리키고 옛
+#            앞단(MCPRemoteProxy expose-<k8s.name>)은 없다. external_url 이 https, 끈다
 #   STEP 8   provider(kind openai, 가짜 키 Secret) 등록 → petstore MCP Server 를 도구로 쓰는 Agent 배포 Ready. memory 는
 #            STEP 4 의 Redis 이고, 그 Redis 가 없으면 memory 없이 배포한다. 파드 env 에 provider 이름에서 나온
 #            DAEGAM_LLM_<SLUG>_API_KEY 가 있고 OPENAI_API_KEY·OPENAI_BASE_URL 이 없으며, 파드 템플릿에 설정 지문
@@ -641,13 +642,20 @@ else
     [ "$front" = Ready ] && break
     sleep 5
   done
-  [ "$front" = Ready ] || die 7 "front proxy phase=$front after ${READY_TIMEOUT}s"
+  [ "$front" = Ready ] || die 7 "front phase=$front after ${READY_TIMEOUT}s"
   EXT="$(jq_ 'd["status"]["external_url"]')"
   case "$EXT" in https://*) ;; *) die 7 "external_url=$EXT (edge 는 https 다)" ;; esac
+  # 새로 켠 노출에는 옛 앞단이 없으므로 넘겨받기 없이 처음부터 vMCP 앞단이 Ingress 뒤에 선다 (P54 6절)
+  "${K[@]}" -n "$TENANT_NS" get virtualmcpserver "front-$MS_K8S" -o name >/dev/null || die 7 "VirtualMCPServer front-$MS_K8S missing"
+  backend="$("${K[@]}" -n "$TENANT_NS" get ingress "$MS_K8S" -o jsonpath='{.spec.rules[0].http.paths[0].backend.service.name}:{.spec.rules[0].http.paths[0].backend.service.port.number}')" \
+    || die 7 "Ingress $MS_K8S missing"
+  [ "$backend" = "vmcp-front-$MS_K8S:4483" ] || die 7 "Ingress $MS_K8S backend $backend (want vmcp-front-$MS_K8S:4483)"
+  old="$("${K[@]}" -n "$TENANT_NS" get mcpremoteproxy "expose-$MS_K8S" -o name --ignore-not-found)" || die 7 "listing MCPRemoteProxy expose-$MS_K8S failed"
+  [ -z "$old" ] || die 7 "a new exposure rendered the old front $old"
   out="$(check_resources "$TENANT_NS")" || { echo "$out"; die 7 "$TENANT_NS 에 자원이 빠진 컨테이너가 있다"; }
   code="$(api PATCH "/mcp-servers/$MS_ID" '{"exposure": {"enabled": false}}')"
   [ "$code" = "200" ] || die 7 "PATCH exposure off -> $code"
-  pass 7 "edge 노출: 앞단 Ready, external_url=$EXT; 끔; $out"
+  pass 7 "edge 노출: vMCP 앞단 front-$MS_K8S Ready, Ingress -> $backend, 옛 앞단 없음, external_url=$EXT; 끔; $out"
 fi
 
 # ---------- 8. provider + Agent ----------

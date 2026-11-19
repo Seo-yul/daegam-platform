@@ -10,7 +10,7 @@
 #   A tools/list == [Add, CreateOrder, GetOrder], B == [Divide], no remote tools, no prefixes,
 #   A Add(3,4)=7, B Add not found, A Subtract not found, CR names gw-<name> + daegam.devops.ai.kr/id labels,
 #   redeploy keeps the name, publish (entry) → C consumes, publish (proxy),
-#   exposure: A 의 복제본을 http 로, calculator 의 복제본을 https 로 (MCPRemoteProxy 뒤), 422 namespace_not_allowed,
+#   exposure: A 의 복제본을 http 로, calculator 의 복제본을 https 로 (vMCP 앞단 뒤), 422 namespace_not_allowed,
 #   메트릭은 거친 곳마다 한 번 세고 노출 앞단은 세지 않는다, delete cleans up, code mode Gateway, cleanup.
 #   단계 번호는 다른 문서가 가리키므로 당기지 않는다. 순환 참조의 422 cycle 과 노출 host 중복의 409 host_conflict 는 API
 #   테스트가 지킨다(platform/tests/test_gateways.py 의 test_cycle_rejected, platform/tests/test_exposure.py).
@@ -40,16 +40,21 @@
 #   STEP 13  A 를 복제한 a-exposed 를 http://gw-a.e2e.local/mcp 로 노출 배포 → warnings[] unauthenticated_exposure,
 #            Ingress address assigned, tools/list through Traefik == A subset, Ingress 는 /mcp 와
 #            /.well-known/oauth-protected-resource 만 열어 vMCP 의 /status·/api/backends/health·/health 는 404
-#   STEP 14  calculator 를 복제한 calc-exposed 를 TLS Secret 으로 노출 배포 → MCPRemoteProxy expose-<k8s.name> Ready,
-#            external_url https://calc.e2e.local/mcp, tools/list + Add(3,4)=7 through Traefik (-k)
+#   STEP 14  calculator 를 복제한 calc-exposed 를 TLS Secret 으로 노출 배포 → 앞단은 그 서버 하나를 백엔드로 둔 vMCP
+#            front-<k8s.name> 이고(P54 5절) Ready, 옛 앞단 MCPRemoteProxy 와 넘겨받기 경고는 없다. 그 MCPGroup·MCPServerEntry·
+#            MCPExternalAuthConfig·MCPAuthzConfig 가 리소스 값 mcp-instance-front 를 달고, Ingress 는 vmcp-front-<k8s.name>:4483,
+#            노출 정책은 두 종류의 앞단 파드를 고른다. external_url https://calc.e2e.local/mcp, tools/list + Add(3,4)=7
+#            through Traefik (-k)
 #   STEP 15  422 namespace_not_allowed (MCP Server, Gateway). 네임스페이스는 배포 본문이 받으므로 draft 문서의
 #            deploy 다. home 의 allow_unauthenticated 는 플랫폼 설정이 정하므로 PATCH 로 바꾸면 409 env_managed 다(D54).
 #            무인증 노출 금지의 422 는 API 테스트가 지킨다
 #   STEP 16  cert-manager path when a ClusterIssuer exists, otherwise SKIP + 422 cert_manager_unavailable
 #   STEP 16b 24시간 메트릭(P51): STEP 7·9·14 가 부르기 전에 읽은 값보다 calculator 호출 +2, A Add +2 와 백엔드 없는
 #            application_error +1, B 백엔드 없는 application_error +1, C Add +1 이상이다. 앞단을 거친 calc-exposed 의
-#            Add 는 감사 기록이 앞단과 MCP Server 에 하나씩 있어도 정확히 +1 이다
-#   STEP 17  delete the exposed documents → Ingress, NetworkPolicy, front proxy gone, Traefik answers 404
+#            Add 는 감사 기록이 vMCP 앞단(backend front-<k8s.name>)과 MCP Server 에 하나씩 있고 둘 다 그 서버의 것으로
+#            매겨져도 정확히 +1 이다
+#   STEP 17  delete the exposed documents → Ingress, NetworkPolicy, the vMCP front and its group·Entry·auth configs gone,
+#            Traefik answers 404
 #   STEP 8c  code mode(P56). STEP 17 뒤, 18 앞에 돈다: Tool 이 모두 읽기로 표시된 MCP Server calc-read 를 게시해 code mode
 #            를 켠 Gateway code 를 배포하면 tools/list 에 execute_tool_script 가 있고, 스크립트 하나가 Add·Divide 의 결과를
 #            함께 돌려준다. orders 의 CreateOrder(쓰기)를 더한 저장은 422 code_mode_not_read_only, 노출을 켜는 PATCH 는 422
@@ -153,7 +158,7 @@ on_exit cleanup
 . "$HERE/lib/e2e_api.sh"
 # wait_ready 가 남긴 본문($WORK/body)의 status.url
 status_url() { jq_ '(d.get("status") or {}).get("url")'; }
-wait_exposed() { # PATH LABEL front(0|1) -> 노출 상태가 준비될 때까지. front=1 이면 앞단 프록시 phase 도 Ready
+wait_exposed() { # PATH LABEL front(0|1) -> 노출 상태가 준비될 때까지. front=1 이면 앞단 phase 도 Ready
   local path="$1" label="$2" front="$3" st="" i
   for ((i = 0; i < READY_TIMEOUT / 5; i++)); do
     api GET "$path" >/dev/null
@@ -703,7 +708,7 @@ for p in /status /api/backends/health /health; do
 done
 pass 13 "gateway a-exposed ($NAX) external_url=http://$GW_HOST/mcp, warnings unauthenticated_exposure, Ingress→vmcp-$NAX:4483 address assigned, tools/list via Traefik == A subset, /status /api/backends/health /health -> 404"
 
-# ---------- 14. calculator 의 복제본을 TLS Secret 으로 노출 배포 (front MCPRemoteProxy) ----------
+# ---------- 14. calculator 의 복제본을 TLS Secret 으로 노출 배포 (vMCP 앞단 front-<k8s.name>) ----------
 clone_fresh 14 /mcp-servers "$I1" calc-exposed
 IX="$(jq_ 'd["id"]')"
 # STEP 16b 의 기준값과 감사 기록을 읽기 시작할 시각이다. 복제본은 실행마다 새 id 라 이전 실행의 호출이 없다
@@ -718,18 +723,53 @@ wait_ready "/mcp-servers/$IX" 14
 wait_exposed "/mcp-servers/$IX" 14 1
 echo "  status.exposure: $EXPOSURE"
 python3 -c "import json,sys; e=json.loads(sys.argv[1]); assert e['front_phase']=='Ready' and e['tls_secret_present'] is True and e['address_assigned'] is True, e" "$EXPOSURE" || die 14 "exposure status: $EXPOSURE"
-"${K[@]}" -n "$NS" get mcpremoteproxy "expose-$NX" -o jsonpath='{.status.phase} {.spec.remoteUrl} {.spec.trustProxyHeaders} {.metadata.ownerReferences[0].kind}/{.metadata.ownerReferences[0].name}' >"$WORK/body" || die 14 "MCPRemoteProxy expose-$NX missing"
-[ "$(cat "$WORK/body")" = "Ready http://mcp-$NX-proxy.$NS.svc.cluster.local:8080/mcp true MCPServer/$NX" ] || die 14 "front proxy: $(cat "$WORK/body")"
+# 새로 노출한 서버에는 옛 앞단(MCPRemoteProxy expose-<k8s.name>)이 없으므로 넘겨받기 없이 처음부터 vMCP 앞단이 Ingress
+# 뒤에 서고, 넘겨받기를 기다린다는 경고도 없다 (P54 6절). wait_exposed 가 마지막으로 읽은 문서를 본다
+[ "$(jq_ '[w for w in (d.get("status") or {}).get("warnings", []) if w.startswith("front_handover_pending")]')" = "[]" ] \
+  || die 14 "a new exposure waits for a handover: $(jq_ 'd["status"]["warnings"]')"
+# 앞단은 calc-exposed 하나를 백엔드로 둔 vMCP front-<k8s.name> 이다 (P54 5절). Entry 는 서버의 프록시 Service 를 가리킨다
+FX="front-$NX"
+"${K[@]}" -n "$NS" get virtualmcpserver "$FX" -o jsonpath='{.status.phase} {.spec.groupRef.name} {.metadata.ownerReferences[0].kind}/{.metadata.ownerReferences[0].name}' >"$WORK/body" || die 14 "VirtualMCPServer $FX missing"
+[ "$(cat "$WORK/body")" = "Ready $FX MCPServer/$NX" ] || die 14 "vMCP front: $(cat "$WORK/body")"
+"${K[@]}" -n "$NS" get mcpserverentry "$FX" -o jsonpath='{.spec.remoteUrl} {.spec.groupRef.name}' >"$WORK/body" || die 14 "MCPServerEntry $FX missing"
+[ "$(cat "$WORK/body")" = "http://mcp-$NX-proxy.$NS.svc.cluster.local:8080/mcp $FX" ] || die 14 "front Entry: $(cat "$WORK/body")"
+left="$("${K[@]}" -n "$NS" get mcpremoteproxy "expose-$NX" -o name --ignore-not-found)" || die 14 "listing MCPRemoteProxy expose-$NX failed"
+[ -z "$left" ] || die 14 "a new exposure rendered the old front $left"
+# 앞단의 다섯 객체는 리소스 값 mcp-instance-front 와 서버의 id 로 고른다. 되돌림 안내가 이 라벨로 지운다 (P54 10절). header
+# 모드의 MCPAuthzConfig 는 permit-all 을 싣는다
+"${K[@]}" -n "$NS" get virtualmcpservers,mcpgroups,mcpserverentries,mcpexternalauthconfigs,mcpauthzconfigs \
+  -l "daegam.devops.ai.kr/resource=mcp-instance-front,daegam.devops.ai.kr/id=$IX" -o json >"$WORK/front-objs.json" \
+  || die 14 "listing the front objects of $FX failed"
+python3 - "$WORK/front-objs.json" "$FX" <<'PY' || die 14 "objects labelled mcp-instance-front for $IX: $(json_of "$WORK/front-objs.json" 'sorted(o["kind"] + "/" + o["metadata"]["name"] for o in d["items"])')"
+import json, sys
+fx = sys.argv[2]
+got = {f'{o["kind"]}/{o["metadata"]["name"]}' for o in json.load(open(sys.argv[1]))["items"]}
+need = {f"{k}/{fx}" for k in ("VirtualMCPServer", "MCPGroup", "MCPServerEntry", "MCPExternalAuthConfig")}
+assert got == need | {f"MCPAuthzConfig/{fx}-authz"}, sorted(got)
+PY
 "${K[@]}" -n "$NS" get ingress "$NX" -o jsonpath='{.spec.tls[0].secretName} {.spec.tls[0].hosts[0]} {.spec.rules[0].http.paths[0].backend.service.name}:{.spec.rules[0].http.paths[0].backend.service.port.number}' >"$WORK/body" || die 14 "Ingress $NX missing"
-[ "$(cat "$WORK/body")" = "$TLS_SECRET $MCP_HOST mcp-expose-$NX-remote-proxy:8080" ] || die 14 "Ingress $NX spec: $(cat "$WORK/body")"
-"${K[@]}" -n "$NS" get networkpolicy "daegam-expose-$NX" -o jsonpath='{.spec.podSelector.matchLabels.app\.kubernetes\.io/instance} {.spec.ingress[0].from[0].namespaceSelector.matchLabels.kubernetes\.io/metadata\.name}' >"$WORK/body" || die 14 "NetworkPolicy daegam-expose-$NX missing"
-[ "$(cat "$WORK/body")" = "expose-$NX $TRAEFIK_NS" ] || die 14 "expose policy: $(cat "$WORK/body")"
-code=""
-for ((i = 0; i < 12; i++)); do
-  code="$(mcp_ingress "https://$MCP_HOST/mcp" "$MCP_HOST:443:$LB_IP" tools/list)"; [ "$code" = "200" ] && break; sleep 5
-done
+[ "$(cat "$WORK/body")" = "$TLS_SECRET $MCP_HOST vmcp-$FX:4483" ] || die 14 "Ingress $NX spec: $(cat "$WORK/body")"
+# 노출 정책은 두 종류의 앞단 파드를 고른다(P54 5절). 넘겨받는 동안 두 앞단이 모두 Traefik 에서 닿아야 하기 때문이다
+"${K[@]}" -n "$NS" get networkpolicy "daegam-expose-$NX" -o json >"$WORK/np.json" || die 14 "NetworkPolicy daegam-expose-$NX missing"
+python3 - "$WORK/np.json" "$NX" "$TRAEFIK_NS" <<'PY' || die 14 "expose policy: $(json_of "$WORK/np.json" 'json.dumps(d["spec"])')"
+import json, sys
+spec = json.load(open(sys.argv[1]))["spec"]
+nx, traefik = sys.argv[2:4]
+sel = {e["key"]: (e["operator"], set(e["values"])) for e in spec["podSelector"].get("matchExpressions", [])}
+assert not spec["podSelector"].get("matchLabels"), spec["podSelector"]
+assert sel == {
+    "app.kubernetes.io/name": ("In", {"mcpremoteproxy", "virtualmcpserver"}),
+    "app.kubernetes.io/instance": ("In", {f"expose-{nx}", f"front-{nx}"}),
+}, sel
+assert spec["ingress"][0]["from"][0]["namespaceSelector"]["matchLabels"]["kubernetes.io/metadata.name"] == traefik, spec["ingress"]
+PY
+# Traefik 이 라우트를 집어 들고(404 → 200), 막 뜬 vMCP 앞단이 서버를 라우팅할 때까지 ROUTE_WAIT 안에서 본다
+# (lib/mcp_rpc.sh, P54 6절)
+code="$(ingress_until 'sorted(t["name"] for t in ((d or {}).get("result") or {}).get("tools", [])) == ["Add", "Divide"]' \
+  "https://$MCP_HOST/mcp" "$MCP_HOST:443:$LB_IP" tools/list)"
 [ "$code" = "200" ] || die 14 "tools/list via https://$MCP_HOST/mcp -> $code: $(cat "$WORK/rpc.raw")"
-XT="$(rpc_tools)"; echo "  https://$MCP_HOST/mcp tools: $XT"
+XT="$(rpc_tools)"
+echo "  https://$MCP_HOST/mcp tools: $XT"
 [ "$XT" = "['Add', 'Divide']" ] || die 14 "tools via https ingress != [Add, Divide]: $XT"
 # 서빙된 인증서가 우리 Secret 의 것인지 (Traefik 기본 인증서가 아니다)
 SERVED_CN="$(echo | openssl s_client -connect "$LB_IP:443" -servername "$MCP_HOST" 2>/dev/null | openssl x509 -noout -subject 2>/dev/null || true)"
@@ -737,7 +777,7 @@ echo "$SERVED_CN" | grep -q "CN *= *$MCP_HOST" || die 14 "served certificate is 
 code="$(mcp_ingress "https://$MCP_HOST/mcp" "$MCP_HOST:443:$LB_IP" tools/call '{"name": "Add", "arguments": {"a": 3, "b": 4}}')"
 [ "$code" = "200" ] || die 14 "tools/call Add via https -> $code"
 [ "$(rpc_ 'd["result"]["structuredContent"]')" = "{'result': 7}" ] || die 14 "Add via https != 7: $(cat "$WORK/rpc.json")"
-pass 14 "mcp server calc-exposed ($NX, calculator 의 복제본) external_url=https://$MCP_HOST/mcp, MCPRemoteProxy expose-$NX Ready, Ingress tls=$TLS_SECRET, served cert CN=$MCP_HOST, tools/list [Add, Divide], Add(3,4)=7"
+pass 14 "mcp server calc-exposed ($NX, calculator 의 복제본) external_url=https://$MCP_HOST/mcp, vMCP front $FX Ready (Entry -> mcp-$NX-proxy, objects labelled mcp-instance-front, no MCPRemoteProxy), Ingress tls=$TLS_SECRET -> vmcp-$FX:4483, expose policy selects both front kinds, served cert CN=$MCP_HOST, tools/list [Add, Divide], Add(3,4)=7"
 
 # ---------- 15. 422 namespace_not_allowed; home 의 env 필드 PATCH 는 409 ----------
 # 네임스페이스는 배포 본문이 받는다. 검증은 상태를 바꾸기 전에 터지므로 실패한 배포는 문서를 draft 그대로
@@ -808,9 +848,10 @@ fi
 # 호출은 감사 기록을 남긴 곳마다 센다. calculator 는 STEP 7 의 A Add 와 STEP 9 의 C Add(A 를 거친다)를 받았다. A 는 그
 # 둘과 STEP 7 의 Subtract 를, B 는 STEP 7 의 Add 를 받았다. 없는 Tool 이라 백엔드를 정하지 못한 application_error 다. C 는
 # STEP 9 의 Add 를 받았다. 이 넷은 다른 실행이나 화면이 함께 부를 수 있어 적어도 그만큼 늘었는지 본다.
-# calc-exposed 는 STEP 14 에서 앞단(MCPRemoteProxy)을 거친 Add 를 한 번 받았다. 앞단과 MCP Server 프록시가 감사 기록을
-# 하나씩 남기지만 앞단 파드는 수집기의 맵에 없어 instance_id 가 비므로 메트릭은 정확히 한 번이어야 한다. 감사 기록에서
-# 앞단의 것도 찾는다. 앞단이 아예 기록하지 않아 한 번인 경우와 가리기 위해서다.
+# calc-exposed 는 STEP 14 에서 vMCP 앞단 front-<k8s.name> 을 거친 Add 를 한 번 받았다. 앞단과 MCP Server 프록시가 감사
+# 기록을 하나씩 남긴다. 수집기는 앞단 파드를 id 라벨로 그 서버에 매기고(P54 11절) 앞단의 기록은 vMCP 의 것이라 부른
+# 백엔드(Entry front-<k8s.name>)를 싣는다. 그래도 메트릭은 정확히 한 번이어야 한다. 감사 기록에서 앞단의 것도 찾는다.
+# 앞단이 아예 기록하지 않아 한 번인 경우와 가리기 위해서다.
 # 수집기가 60초마다 로그를 읽고 롤업이 120초마다 시간 묶음을 다시 세므로 METRICS_TIMEOUT 초까지 10초마다 본다
 read_16b() { # 다섯 문서의 메트릭과 STEP 14 뒤의 Add 감사 기록을 다시 읽는다. 플랫폼이 다시 뜨는 중이면 1 이다
   metrics_to 16b "/mcp-servers/$I1" "$WORK/m1-calc" || return 1
@@ -853,17 +894,19 @@ for n in ("calc", "a", "b", "c", "x"):
     g[n] = {"calls": calls_grown(old, new), "add": add_calls(new) - add_calls(old),
             "nob": no_backend(new) - no_backend(old)}
 adds = [e for e in json.load(open(f"{work}/audit-x")) if e.get("tool") == "Add"]
-front = [e for e in adds if e.get("proxy_kind") == "mcpremoteproxy" and (e.get("pod") or "").startswith(f"expose-{nx}-")]
-server = [e for e in adds if e.get("instance_id") == ix]
+front = [e for e in adds if e.get("proxy_kind") == "virtualmcpserver" and (e.get("pod") or "").startswith(f"front-{nx}-")]
+server = [e for e in adds if e.get("instance_id") == ix and e.get("proxy_kind") == "mcpserver"]
 print(f"  calculator +calls {g['calc']['calls']}; A +Add {g['a']['add']} +no-backend {g['a']['nob']}; "
       f"B +no-backend {g['b']['nob']}; C +Add {g['c']['add']}; calc-exposed +calls {g['x']['calls']} +Add {g['x']['add']}; "
-      f"audit Add front {len(front)} (instance_id {[e.get('instance_id') for e in front]}) server {len(server)}")
+      f"audit Add front {len(front)} (instance_id {[e.get('instance_id') for e in front]}, backend {[e.get('backend') for e in front]}) "
+      f"server {len(server)}")
 if g["x"]["calls"] > 1 or g["x"]["add"] > 1:
     sys.exit(2)
 # calculator 는 이 실행에서 Add 만 받으므로 Tool 호출 수로 본다
 ok = (g["calc"]["calls"] >= 2 and g["a"]["add"] >= 2 and g["a"]["nob"] >= 1 and g["b"]["nob"] >= 1
       and g["c"]["add"] >= 1 and g["x"]["calls"] == 1 and g["x"]["add"] == 1
-      and len(front) == 1 and front[0].get("instance_id") is None and len(server) == 1)
+      and len(front) == 1 and front[0].get("instance_id") == ix and front[0].get("backend") == f"front-{nx}"
+      and len(server) == 1)
 sys.exit(0 if ok else 3)
 PY
 }
@@ -886,17 +929,19 @@ case "$GROWN" in
   4) die 16b "the platform did not answer the metrics reads within ${METRICS_TIMEOUT}s" ;;
   *) die 16b "reading the metrics failed (exit $GROWN)" "$(cat "$WORK/m1-x")" ;;
 esac
-pass 16b "calculator·A·B·C 가 STEP 7·9 의 호출만큼 늘었다(A·B 의 없는 Tool 은 백엔드 없는 application_error); calc-exposed 는 앞단과 MCP Server 에 감사 기록이 하나씩 있어도 Add 를 한 번 셌다"
+pass 16b "calculator·A·B·C 가 STEP 7·9 의 호출만큼 늘었다(A·B 의 없는 Tool 은 백엔드 없는 application_error); calc-exposed 는 vMCP 앞단(backend front-$NX)과 MCP Server 에 감사 기록이 하나씩 있어도 Add 를 한 번 셌다"
 
-# ---------- 17. delete the exposed documents -> Ingress, NetworkPolicy, front proxy gone ----------
+# ---------- 17. delete the exposed documents -> Ingress, NetworkPolicy, vMCP front gone ----------
 code="$(api DELETE "/mcp-servers/$IX")"; [ "$code" = "200" ] || die 17 "DELETE mcp server calc-exposed $IX -> $code"
 code="$(api DELETE "/gateways/$IAX")"; [ "$code" = "200" ] || die 17 "DELETE gateway a-exposed $IAX -> $code"
 gone=""
 for ((i = 0; i < 24; i++)); do
-  left="$("${K[@]}" -n "$NS" get "ingress/$NX" "ingress/$NAX" "networkpolicy/daegam-expose-$NX" "networkpolicy/daegam-expose-$NAX" "mcpremoteproxy/expose-$NX" "mcpserver/$NX" "virtualmcpserver/$NAX" -o name --ignore-not-found 2>/dev/null | wc -l | tr -d ' ')"
+  left="$("${K[@]}" -n "$NS" get "ingress/$NX" "ingress/$NAX" "networkpolicy/daegam-expose-$NX" "networkpolicy/daegam-expose-$NAX" \
+    "virtualmcpserver/$FX" "mcpgroup/$FX" "mcpserverentry/$FX" "mcpexternalauthconfig/$FX" "mcpauthzconfig/$FX-authz" \
+    "mcpserver/$NX" "virtualmcpserver/$NAX" -o name --ignore-not-found 2>/dev/null | wc -l | tr -d ' ')"
   [ "$left" = "0" ] && { gone=1; break; }; sleep 5
 done
-[ -n "$gone" ] || die 17 "exposure objects still present: $("${K[@]}" -n "$NS" get ingress,networkpolicy,mcpremoteproxies -o name)"
+[ -n "$gone" ] || die 17 "exposure objects still present: $("${K[@]}" -n "$NS" get ingress,networkpolicy,virtualmcpservers,mcpserverentries -o name)"
 # Ingress 가 지워진 뒤 Traefik 이 라우트를 내리기까지 몇 초 걸린다 (실측: 직후 406, 곧 404)
 traefik_gone() { # URL RESOLVE -> 404 가 될 때까지 60초 폴링
   local code="" i
@@ -910,7 +955,7 @@ traefik_gone "https://$MCP_HOST/mcp" "$MCP_HOST:443:$LB_IP"
 traefik_gone "http://$GW_HOST/mcp" "$GW_HOST:80:$LB_IP"
 "${K[@]}" -n "$NS" get networkpolicy daegam-tenant-ingress -o name >/dev/null || die 17 "tenant policy daegam-tenant-ingress was removed"
 "${K[@]}" -n "$NS" delete secret "$TLS_SECRET" --ignore-not-found >/dev/null
-pass 17 "deleting calc-exposed and a-exposed removed Ingress, NetworkPolicy daegam-expose-*, MCPRemoteProxy expose-$NX; Traefik answers 404; tenant policy intact"
+pass 17 "deleting calc-exposed and a-exposed removed Ingress, NetworkPolicy daegam-expose-*, the vMCP front $FX with its MCPGroup, MCPServerEntry and auth configs; Traefik answers 404; tenant policy intact"
 
 # ---------- 8c. code mode (P56 6.2·6.3절). STEP 17 뒤, 18 앞에 돈다 ----------
 # 새 단계가 실패해도 앞 STEP 의 결과를 가리지 않게 노출 STEP 뒤에 돈다. 쓰기 Tool 로 쓰는 orders 게시 항목은 STEP 18 이

@@ -11,7 +11,8 @@
 # traefik/traefik)와 mock-oidc(F0.1 의 oidc 행). f0 은 header 모드에서 시작하고 F0.1 의 local·oidc 행만 모드를 바꿨다가
 # 되돌린다. 환경: KUBE_CONTEXT(k3d-daegam) F0_OUT F1_STATE(f1 만, 단계 사이의 상태) F0_SLOW(30초 넘는 호출의 초, 35)
 # F0_DRAIN(F0.2 가 옛 앞단을 지우기 전에 기다리는 초, 60) F1_HANDOVER_TIMEOUT(check-new 가 앞단이 넘어가기를 기다리는 초,
-# 1200) F1_READY_TIMEOUT(check-old 가 프록시 앞단을 기다리는 초, 600)
+# 1200) F1_READY_TIMEOUT(check-old 가 프록시 앞단을 기다리는 초, 600) F1_WARMUP(watch 가 루프를 띄우고 설치 시각을 적기
+# 전에 기다리는 초, 20)
 #
 # F0.1  32자 이름의 MCP Server S1 을 f0-s1.e2e.local 로 노출하고(프록시 앞단), 그 앞단의 산 객체로 5절의 vMCP 앞단을 손으로
 #       만들어 f0-s1-front.e2e.local 의 Ingress 뒤에 둔다(f0_tool front, 플랫폼의 렌더 함수). header 모드에서 ToolHive 가 만든
@@ -685,13 +686,15 @@ f1_watch() {
   f1_mark_install
 }
 
-# f1_wait_front PHASE INDEX -> new 는 6절의 handover 가 끝나기(Ingress 가 vMCP 앞단에 서고 프록시가 없다)를, old 는 Ingress 가
-# 프록시 앞단에 서고 그 프록시가 Ready 이기를 기다린다. 걸린 초를 찍는다. 상한을 넘기면 그때의 상태를 찍고 1 이다
+# f1_wait_front PHASE INDEX STARTED -> new 는 6절의 handover 가 끝나기(Ingress 가 vMCP 앞단에 서고 프록시가 없다)를, old 는
+# Ingress 가 프록시 앞단에 서고 그 프록시가 Ready 이기를 기다린다. 노출들은 함께 넘어가므로 상한은 check 가 시작한 때
+# (STARTED, $SECONDS)부터 센다. 걸린 초를 찍는다. 상한을 넘기면 그때의 상태를 찍고 1 이다
 f1_wait_front() {
-  local phase="$1" k8s started=$SECONDS limit svc proxy
+  local phase="$1" k8s started="$3" limit svc proxy
   k8s="$(f1_get "k8s-${F1_NAMES[$2]}")"
   if [ "$phase" = new ]; then limit="${F1_HANDOVER_TIMEOUT:-1200}"; else limit="${F1_READY_TIMEOUT:-600}"; fi
-  while [ $((SECONDS - started)) -lt "$limit" ]; do
+  # 앞 노출이 상한을 다 썼어도 한 번은 읽는다
+  while :; do
     svc="$(ingress_backend "$k8s")"
     proxy="$("${K[@]}" -n "$NS" get mcpremoteproxy "expose-$k8s" -o jsonpath='{.status.phase}' 2>/dev/null || echo absent)"
     if [ "$phase" = new ] && [ "$svc" = "vmcp-front-$k8s" ] && [ "$proxy" = absent ]; then
@@ -700,6 +703,7 @@ f1_wait_front() {
     if [ "$phase" = old ] && [ "$svc" = "mcp-expose-$k8s-remote-proxy" ] && [ "$proxy" = Ready ]; then
       echo "$((SECONDS - started))"; return 0
     fi
+    [ $((SECONDS - started)) -lt "$limit" ] || break
     sleep 5
   done
   echo "ingress=$svc proxy=$proxy after ${limit}s"
@@ -709,11 +713,11 @@ f1_wait_front() {
 # f1_check PHASE -> prepare 면 기준값을 적는다. new·old 면 앞단이 자리 잡기를 기다리고 루프를 멈춘 뒤(플랫폼 API 없이
 # 한다) 관리자로 붙어 기준값과 견준다. check 의 실패는 세고(f1_fail) 다음 확인으로 간다
 f1_check() {
-  local phase="$1" i name k8s url pin_v tools waited grants pat refresh oauth
+  local phase="$1" i name k8s url pin_v tools waited grants pat refresh oauth started=$SECONDS
   NS="$(f1_get ns)"
   if [ "$phase" != prepare ]; then
     for i in "${!F1_NAMES[@]}"; do
-      if waited="$(f1_wait_front "$phase" "$i")"; then
+      if waited="$(f1_wait_front "$phase" "$i" "$started")"; then
         f0_note F1 "$phase: ${F1_NAMES[$i]} front settled after ${waited}s of this check"
       else
         f0_note F1 "$phase: ${F1_NAMES[$i]} front DID NOT SETTLE: $waited"

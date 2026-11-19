@@ -20,7 +20,7 @@ from collections.abc import Iterable
 
 from daegam.store.base import TIMEOUT_MAX_SECONDS
 from daegam.store.gateways import GatewayBackendSnapshot
-from daegam.store.mcp_servers import MCP_DEFAULT_TIMEOUT_SECONDS, MCPServer
+from daegam.store.mcp_servers import MCP_DEFAULT_TIMEOUT_SECONDS, MCPServer, MCPServerSpec
 
 # Agent 런타임이 도구 호출에 거는 기본 타임아웃(초). agent-runtime/runtime/mcp.py 의
 # DEFAULT_TOOL_TIMEOUT_SECONDS 와 같다
@@ -39,9 +39,16 @@ def default_timeout(kind: str, server: MCPServer | None = None) -> int:
         return AGENT_TOOL_TIMEOUT_SECONDS
     seconds = MCP_DEFAULT_TIMEOUT_SECONDS
     if server is not None:
-        rev = server.get_revision(server.deployed_revision or 0) or server.spec
-        seconds = max(b.timeout_seconds for b in rev.backends)
+        seconds = longest_backend_timeout(
+            server.get_revision(server.deployed_revision or 0) or server.spec
+        )
     return min(seconds + INTERNAL_MARGIN_SECONDS, TIMEOUT_MAX_SECONDS)
+
+
+def longest_backend_timeout(rev: MCPServerSpec) -> int:
+    """MCP Server 리비전의 backend 타임아웃 가운데 가장 긴 것(초). 노출한 서버의 vMCP 앞단은 여기에
+    틈만 더해 상한 없이 쓰고, 앞단을 넘겨받는 drain 시간도 이것이다 (P54 5·6절)."""
+    return max(b.timeout_seconds for b in rev.backends)
 
 
 def snapshot_timeout(backend: GatewayBackendSnapshot) -> int:

@@ -230,8 +230,9 @@ def _exposure_cluster(client, h, fake_clusters) -> tuple[FakeClusterClient, str]
 def test_the_exposed_server_front_reads_groups_from_the_configured_claim(
     oidc_client, h, mongo, fake_clusters
 ):
-    """MCPAuthzConfig 를 참조하는 앞단은 그 설정에, 권한이 없어 인라인인 앞단은 authzConfig 에
-    이름을 싣는다. 권한이 바뀐 것만으로 재적용이 앞단을 다시 렌더한다."""
+    """MCPAuthzConfig 를 참조하는 vMCP 앞단은 그 설정에, 권한이 없어 옛 앞단으로 도는 서버는 그
+    인라인 authzConfig 에 이름을 싣는다. 권한이 바뀐 것만으로 재적용이 앞단을 다시 렌더한다 (P54
+    5절)."""
     fake, cid = _exposure_cluster(oidc_client, h, fake_clusters)
     _tenant(oidc_client, h)
     bp = uploaded_backend(oidc_client, endpoint=CALC_ENDPOINT, headers=h)
@@ -248,8 +249,8 @@ def test_the_exposed_server_front_reads_groups_from_the_configured_claim(
         exposure={"enabled": True, "tls": {"mode": "secret", "secret_name": "site-tls"}},
     )
     assert r.status_code == 201, r.text
-    front = fake.get(GV, "MCPRemoteProxy", "expose-mcp-calc-1", ACME_NS)
-    name = front["spec"]["authzConfigRef"]["name"]
+    front = fake.get(GV, "VirtualMCPServer", "front-mcp-calc-1", ACME_NS)
+    name = front["spec"]["incomingAuth"]["authzConfigRef"]["name"]
     config = fake.get(GV, "MCPAuthzConfig", name, ACME_NS)
     assert config["spec"]["config"].get("group_claim_name") == CLAIM
     revoke_tenant_rights(mongo, cid)

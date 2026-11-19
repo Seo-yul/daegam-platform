@@ -62,8 +62,16 @@ const DETAIL_OF: Record<string, (raw: string) => string | null> = {
 };
 
 /** 서버 문장의 `<key>: <값>` 가운데 values 에 있는 것. 모르는 값이면 null 이다. */
+/**
+ * 원문 괄호의 `<이름>: <값>` 의 값. 값은 `)` 나 `;` 로 끝나야 하고 영문자와 밑줄만 받으므로, 서버 원문의 다른 글이 화면 문장에
+ * 들지 않는다(platform/daegam/services/tool_rules.py `coded_warning`).
+ */
+function rawValue(raw: string, key: string): string | null {
+  return new RegExp(`${key}: ([A-Za-z_]+)(?=[);])`).exec(raw)?.[1] ?? null;
+}
+
 function valueIn<C extends string>(raw: string, key: string, values: readonly C[]): C | null {
-  const value = new RegExp(`${key}: ([a-z_]+)`).exec(raw)?.[1];
+  const value = rawValue(raw, key);
   return values.find((c) => c === value) ?? null;
 }
 
@@ -94,21 +102,30 @@ const COUNTS_OF: Record<string, (raw: string) => PausedSources | null> = {
   },
 };
 
-/** 표의 한 줄. 까닭을 받는 줄(코드 실행 게이트, Code mode)은 text 대신 까닭마다의 문장을 든다. */
+/**
+ * 표의 한 줄. 까닭으로 문장을 고르는 줄(코드 실행 게이트, Code mode)은 text 대신 까닭마다의 문장을 들고, 까닭을 문장 안에 넣는
+ * 줄(노출 앞단의 넘겨받기)은 그 문장을 만드는 함수를 든다.
+ */
 type WarningEntry =
   | { text: string | ((counts: PausedSources) => string); causes?: Record<HiddenCause, string> }
-  | { choices: Record<string, string> };
+  | { choices: Record<string, string> }
+  | { withReason: (reason: string) => string };
 
 /**
  * 표의 한 줄을 문장으로. 수를 받는 문장은 원문에서 수를 읽고, 읽지 못하면 null 이라 부르는 쪽이 원문을 보인다. 원인을 받는
  * 문장은 원문의 원인 문장을 잇고, 원인을 읽지 못하면 앞 문장만이다. 까닭을 받는 줄은 CHOSEN_BY 가 그 코드에 정한 이름
- * (`reason:`·`cause:`)으로 원문의 까닭을 읽어 그 문장을 고르고, 까닭을 읽지 못하면 null 이다.
+ * (`reason:`·`cause:`)으로 원문의 까닭을 읽어 그 문장을 고르고, 까닭을 읽지 못하면 null 이다. 까닭을 문장 안에 넣는 줄은 원문의
+ * `(reason: <까닭>)` 을 그대로 넣고(platform/daegam/services/exposure_front.py `handover_warning`), 까닭이 없으면 null 이다.
  */
 function entryText(entry: WarningEntry, code: string, raw: string | null): string | null {
   if ("choices" in entry) {
     const by = ownValue(CHOSEN_BY, code);
     const chosen = raw === null || by === undefined ? null : valueIn(raw, by.key, by.values);
     return chosen ? (ownValue(entry.choices, chosen) ?? null) : null;
+  }
+  if ("withReason" in entry) {
+    const reason = raw === null ? null : rawValue(raw, "reason");
+    return reason ? entry.withReason(reason) : null;
   }
   if (typeof entry.text === "string") {
     const cause = entry.causes && raw !== null ? valueIn(raw, "cause", HIDDEN_CAUSES) : null;

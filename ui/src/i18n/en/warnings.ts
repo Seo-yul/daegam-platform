@@ -50,6 +50,11 @@ export const warnings: Messages["warnings"] = {
       label: "Front updating",
       text: "The exposure front is still rolling out, so calls through it meet the previous Tool rules. The new rules apply once every pod has rolled.",
     },
+    front_handover_pending: {
+      label: "Front switch pending",
+      withReason: (reason: string): string =>
+        `This MCP Server's external address still goes through the previous front proxy. The new front is ${reason}, so the platform has not switched yet. If this lasts, check the new front's cluster resources in the Advanced tab.`,
+    },
     conditions_unresolved: {
       label: "Conditions unresolved",
       text: "The server cannot find an argument that a condition names in its Tool, so that Tool refuses every call. Check the argument names in the Tool rules.",

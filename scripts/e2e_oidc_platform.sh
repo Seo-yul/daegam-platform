@@ -329,7 +329,7 @@ RULES_ID="$CREATED_ID"
 calc_gateway 2 "$GW_NAME" "$(exposure "$GW_HOST")"
 GW_URL="$(jq_ 'd["status"]["external_url"]')"; GW_PIN="$(pin "$GW_URL" "$LB_IP")"
 VMCP_SEL="app.kubernetes.io/name=virtualmcpserver,app.kubernetes.io/instance=$CALC_GW_K8S_NAME"
-FRONT_SEL="app.kubernetes.io/name=mcpremoteproxy,app.kubernetes.io/instance=expose-$CALC_MS_K8S_NAME"
+FRONT_SEL="$(front_sel "$CALC_MS_K8S_NAME")"
 "${K[@]}" -n "$NS" get mcpoidcconfig daegam-oidc -o json >"$WORK/oidc.json" || die 2 "MCPOIDCConfig daegam-oidc missing in $NS"
 OIDC_NOTE="$(json_of "$WORK/oidc.json" 'd["spec"]["inline"].get("issuer"), d["spec"]["inline"].get("jwksUrl", "").endswith("/.well-known/jwks.json"), "clientId" in d["spec"]["inline"]')"
 [ "$OIDC_NOTE" = "$PUBLIC_URL True False" ] || die 2 "daegam-oidc in $NS: $(json_of "$WORK/oidc.json" 'json.dumps(d["spec"]["inline"])') (want issuer $PUBLIC_URL, the in-cluster JWKS and no clientId)"
@@ -384,7 +384,7 @@ deploy_ready 5 /gateways "$RULES_ID" '{}'
 RESTARTED_AT="$(cluster_now)"
 restart_pods "$VMCP_SEL" "$FRONT_SEL" || die 5 "restarting the vMCP and front pods failed"
 wait_switched 5
-wait_verified 5 "$RESTARTED_AT" "VirtualMCPServer/$CALC_GW_K8S_NAME" "MCPRemoteProxy/expose-$CALC_MS_K8S_NAME"
+wait_verified 5 "$RESTARTED_AT" "VirtualMCPServer/$CALC_GW_K8S_NAME" "VirtualMCPServer/front-$CALC_MS_K8S_NAME"
 allowed "$GW_URL" "$GW_PIN" "$ALICE_PAT" || die 5 "alice's token at $GW_URL: $MCP_NOTE"
 allowed "$MS_URL" "$MS_PIN" "$ALICE_PAT" || die 5 "alice's token at $MS_URL: $MCP_NOTE"
 denied "$GW_URL" "$GW_PIN" "$XAVIER_PAT" || die 5 "xavier's $OTHER token at $GW_URL was not denied: $MCP_NOTE"
@@ -605,7 +605,7 @@ pass 12 "switching to idp converged in ${IDP_SECONDS}s (bar ${SWITCH_BAR}s): IdP
 SWITCHED_AT="$(cluster_now)"
 timed_switch 13 platform "401 list list 200 ok"
 wait_auth_reapplied "$ADMIN_TOKEN" "$(date -u +%Y-%m-%dT%H:%M:%S)" || die 13 "data-plane auth was not re-applied under platform"
-wait_verified 13 "$SWITCHED_AT" "VirtualMCPServer/$CALC_GW_K8S_NAME" "MCPRemoteProxy/expose-$CALC_MS_K8S_NAME" "Agent/$AG_K8S"
+wait_verified 13 "$SWITCHED_AT" "VirtualMCPServer/$CALC_GW_K8S_NAME" "VirtualMCPServer/front-$CALC_MS_K8S_NAME" "Agent/$AG_K8S"
 pass 13 "switching to platform again converged in ${SWITCH_SECONDS}s (bar ${SWITCH_BAR}s, pending 0; the vMCP, the front and the exposed Agent verified after the switch): IdP tokens get 401 at $GW_URL, bob's personal token opens $GW_URL, the front and the exposed Agent again, the Agent's chat calls Add again (down ${CHAT_DOWN:-none})"
 
 finish

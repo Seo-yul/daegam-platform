@@ -817,6 +817,8 @@ def build_services(
         svc_tokens=svc_tokens,
         claims=claims,
         exposure_hosts=stores.exposure_hosts,
+        # vMCP 앞단의 Entry 이름 선점 (P54 5절). Gateway 의 Entry 이름과 같은 기록이다
+        entry_names=stores.entry_names,
     )
     # 허브의 internal 항목 상태는 원본 MCP Server 의 판단이다 (T55, HubService.late_hooks)
     hub_service.server_status = mcp_server_service.item_status

@@ -242,14 +242,15 @@ slow_tokens() {
 }
 
 # slow_objects -> 느린 배포 문서의 객체 가운데 남은 것을 한 줄에 하나 찍는다. 다 사라졌으면 아무것도 찍지 않는다.
-# 플랫폼이 렌더하는 객체는 모두 daegam.devops.ai.kr/id 를 달므로 이름으로는 찾지 않는다. 오퍼레이터가 CR 에서 만드는
-# Deployment·StatefulSet·Service 는 toolhive-name 라벨(MCPServer 와 앞단 MCPRemoteProxy 의 이름)로 찾는다.
-# kubectl 이 실패하면 1 이다. 남은 것이 없다고 읽지 않는다
+# 플랫폼이 렌더하는 객체는 모두 daegam.devops.ai.kr/id 를 달므로 이름으로는 찾지 않는다. 앞단은 vMCP front-<k8s.name> 과
+# 그 MCPGroup·MCPServerEntry 다. 오퍼레이터가 CR 에서 만드는 Deployment·StatefulSet·Service 는 CR 이름을 단 toolhive-name
+# 라벨이나 app.kubernetes.io/instance 라벨로 찾는다. kubectl 이 실패하면 1 이다. 남은 것이 없다고 읽지 않는다
 slow_objects() {
   "${K[@]}" -n "$SLOW_NS" get \
-    mcpservers,mcpremoteproxies,mcpauthzconfigs,mcpexternalauthconfigs,ingresses,networkpolicies,secrets,configmaps,pods \
+    mcpservers,virtualmcpservers,mcpgroups,mcpserverentries,mcpauthzconfigs,mcpexternalauthconfigs,ingresses,networkpolicies,secrets,configmaps,pods \
     -l "daegam.devops.ai.kr/id=$SLOW_ID" -o name 2>/dev/null || return 1
-  "${K[@]}" -n "$SLOW_NS" get deploy,sts,svc -l "toolhive-name in ($SLOW_K8S,expose-$SLOW_K8S)" -o name 2>/dev/null
+  "${K[@]}" -n "$SLOW_NS" get deploy,sts,svc -l "toolhive-name in ($SLOW_K8S,front-$SLOW_K8S)" -o name 2>/dev/null || return 1
+  "${K[@]}" -n "$SLOW_NS" get deploy,svc -l "app.kubernetes.io/instance=front-$SLOW_K8S" -o name 2>/dev/null
 }
 
 # operator_pods -> ToolHive 오퍼레이터 파드를 한 줄에 하나 찍는다. kubectl 이 실패하면 1 이다
@@ -374,12 +375,12 @@ if [ "$TARGET" = orbstack ]; then
   GW_PIN="$(pin "$GW_URL" "$LB_IP")"; MS_PIN="$(pin "$MS_URL" "$LB_IP")"
   URLS=("$GW_URL" "$MS_URL"); PINS=("$GW_PIN" "$MS_PIN")
   VMCP_SEL="app.kubernetes.io/name=virtualmcpserver,app.kubernetes.io/instance=$CALC_GW_K8S_NAME"
-  FRONT_SEL="app.kubernetes.io/name=mcpremoteproxy,app.kubernetes.io/instance=expose-$CALC_MS_K8S_NAME"
+  FRONT_SEL="$(front_sel "$CALC_MS_K8S_NAME")"
   if [ "$DOC_REDEPLOYED" = 1 ]; then
     # 이전 실행이 남긴 배포를 이었다. 그 파드는 이 토큰들의 키를 모르는 JWKS 를 들고 있을 수 있으므로 새로 띄운다
     restart_pods "$VMCP_SEL" "$FRONT_SEL" || die 3 "restarting the vMCP and front pods left from an earlier run failed"
   fi
-  TARGET_NOTE="deployed $MS_URL (front expose-$CALC_MS_K8S_NAME) and $GW_URL (vMCP $CALC_GW_K8S_NAME) after the ${JWKS_CACHE_WAIT}s JWKS cache"
+  TARGET_NOTE="deployed $MS_URL (vMCP front front-$CALC_MS_K8S_NAME) and $GW_URL (vMCP $CALC_GW_K8S_NAME) after the ${JWKS_CACHE_WAIT}s JWKS cache"
 else
   # 노출해 둔 Gateway 의 host 는 E2E_PAT_GW_HOST 이고 없으면 EXPOSURE_DOMAIN 에서 나온다. 둘 다 없으면 조건부로, host 가
   # 있는데 그 Gateway 가 없으면 못 돈 것으로 건너뛴다. 허용·거부·회수와 Tool 규칙은 모두 그 Gateway 를 부른다

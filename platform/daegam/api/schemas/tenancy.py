@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from daegam.api.schemas import REQUIRED_DEFAULTS
 from daegam.k8s.gates import Feature
+from daegam.services.exposure_front import Step
 from daegam.store.auth_reapply import AuthSummary, ClusterAuthState, TurnGateHolder
 from daegam.store.base import UtcDatetime
 from daegam.store.memberships import GroupMapping, Membership
@@ -403,6 +404,8 @@ class DataPlaneAuthOut(BaseModel):
     render_epochs 는 이 코드가 종류마다 쓰는 렌더 번호이고, kinds 는 클러스터 id 마다 종류별 문서
     수다. fallbacks 는 클러스터 id 마다, 게이트를 지나지 못해 그 기능을 뺀 대체 형태로 도는 살아
     있는 문서의 수를 기능 이름마다 센 것이다. 그런 문서가 없는 클러스터와 기능은 빠진다.
+    handovers 는 클러스터 id 마다, 노출 앞단을 vMCP 로 넘겨받는 중인 MCP Server 를 넘겨받기의
+    단계마다 센 것이다(P54 11절). 그런 서버가 없는 클러스터와 단계는 빠진다.
     redis_plain_consumers 는 테넌트마다, TLS 끝점을 가진 Redis 에 아직 평문 포트로 붙는 소비자다(P61
     5절 4단계). shipped_redis_cert_expires_at 은 home 이 함께 올린 Redis 의 TLS 서버 인증서가 끝나는
     때이고, expiring 은 그것이 30일 안인가다(P61 F3). turn_tokens 는 턴 위임 토큰의 게이트와 그것을
@@ -417,6 +420,7 @@ class DataPlaneAuthOut(BaseModel):
     render_epochs: dict[ReapplyKindName, int]
     kinds: dict[str, dict[ReapplyKindName, KindCountsOut]]
     fallbacks: dict[str, dict[Feature, int]]
+    handovers: dict[str, dict[Step, int]]
     redis_plain_consumers: dict[str, list[PlainRedisConsumerOut]]
     shipped_redis_cert_expires_at: UtcDatetime | None
     shipped_redis_cert_expiring: bool

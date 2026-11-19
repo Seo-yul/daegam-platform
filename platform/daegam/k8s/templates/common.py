@@ -179,7 +179,7 @@ def rolled_out(deployment: dict[str, Any] | None) -> bool:
     """Deployment 의 롤아웃이 끝났는가. 지금 세대를 관찰했고, 모든 파드가 지금 템플릿이며 준비돼
     `replicas = updatedReplicas = availableReplicas` 가 원하는 수다. 옛 ReplicaSet 의 파드가
     남았거나 Deployment 가 없으면 거짓이다."""
-    if not deployment or not _observed(deployment):
+    if not deployment or not generation_observed(deployment):
         return False
     st = deployment.get("status") or {}
     counts = [int(st.get(k) or 0) for k in ("replicas", "updatedReplicas", "availableReplicas")]
@@ -190,7 +190,7 @@ def current_template_ready(deployment: Mapping[str, Any] | None) -> bool:
     """모든 파드가 지금 템플릿이고 하나는 준비됐는가. 지금 세대를 관찰했고 `updatedReplicas` 가
     `replicas` 에 닿았으며 준비된 파드가 있다. 원하는 수가 모두 준비되기 전에도 참이다 (P44 8절,
     `api/_agent_proxy.py` `require_rolled_out`)."""
-    if not deployment or not _observed(deployment):
+    if not deployment or not generation_observed(deployment):
         return False
     st = deployment.get("status") or {}
     ready = int(st.get("readyReplicas") or 0)
@@ -205,10 +205,10 @@ def deployment_counts(deployment: Mapping[str, Any] | None) -> tuple[int, int]:
     return _wanted(deployment), int(st.get("readyReplicas") or 0)
 
 
-def _observed(deployment: Mapping[str, Any]) -> bool:
-    """컨트롤러가 Deployment 의 지금 세대를 관찰했는가."""
-    meta = deployment.get("metadata") or {}
-    st = deployment.get("status") or {}
+def generation_observed(obj: Mapping[str, Any]) -> bool:
+    """컨트롤러가 객체(Deployment, ToolHive CR)의 지금 세대를 관찰했는가."""
+    meta = obj.get("metadata") or {}
+    st = obj.get("status") or {}
     return st.get("observedGeneration") == meta.get("generation")
 
 

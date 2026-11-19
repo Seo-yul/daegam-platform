@@ -84,3 +84,11 @@ def exposure_enabled(doc: Any) -> bool:
 def tls_secret_name_for(k8s_name: str) -> str:
     """cert-manager 모드에서 플랫폼이 이름 짓고 cert-manager 가 만드는 Secret."""
     return f"{k8s_name}-tls"
+
+
+def front_name_for(k8s_name: str) -> str:
+    """노출한 MCP Server 의 vMCP 앞단 이름 `front-<k8s.name>` (P54 5절). MCPGroup·MCPServerEntry·
+    헤더 주입 MCPExternalAuthConfig·VirtualMCPServer 가 이 이름이다. `front-` 는 다른 종류가 쓰지
+    않는 앞머리라 ToolHive 가 거기서 짓는 이름도 다른 종류의 것과 겹치지 않는다. Entry 이름의
+    선점을 쓰는 스윕(`store/mcp_servers.py` `front_entries_in_use`)도 이것을 읽는다."""
+    return f"front-{k8s_name}"

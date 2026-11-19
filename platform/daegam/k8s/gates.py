@@ -69,6 +69,17 @@ class Feature(StrEnum):
     SESSION_TLS = "session_tls"  # MCPServer sessionStorage.tls (P61)
 
 
+# vMCP 를 렌더하는 클러스터가 지나야 하는 게이트. Gateway 와 노출한 MCP Server 의 vMCP 앞단이 함께
+# 따르고(`services/data_plane_auth.py` `RENDER_GATES`), 새 노출의 422 는 이 순서로 처음 못 지난
+# 것을 댄다 (P54 5절). 정적 백엔드가 없으면 vMCP 가 네임스페이스의 Secret 을 읽는다
+VMCP_GATES: tuple[Feature, ...] = (
+    Feature.AUDIT,
+    Feature.TIMEOUTS,
+    Feature.AUTHZ_REF,
+    Feature.STATIC_BACKENDS,
+)
+
+
 @dataclass(frozen=True)
 class Requirement:
     version: Version

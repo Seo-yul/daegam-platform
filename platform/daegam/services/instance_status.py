@@ -16,7 +16,7 @@ from starlette.concurrency import run_in_threadpool
 
 from daegam.k8s.client import AccessDenied, ClusterUnreachable, KubeClient
 from daegam.k8s.labels import LABEL_ID
-from daegam.services.exposure import exposure_status
+from daegam.services.exposure import ExposureReading, read_exposure
 from daegam.store.base import utcnow
 
 logger = logging.getLogger(__name__)
@@ -206,6 +206,7 @@ class InstanceStatusMixin:
     훅과 도는 자리:
     - `_status_fields(inst, observed_at)`: 맨 앞. 응답의 모든 키와 읽기 전에 아는 경고
     - `terminating_states`: 이 상태면 클러스터를 읽지 않고 Terminating 이다
+    - `_status_exposure(inst, client, out)`: 노출 상태를 읽는 자리(with_exposure 일 때)
     - `_status_map(inst, client, obj, out, observed_at, listing=)`: 주 객체를 읽은 뒤
     - `_status_finish(inst, out)`: 어느 길로 끝나든 마지막
     """
@@ -217,7 +218,8 @@ class InstanceStatusMixin:
     # 종류를 쓴다. 구체 서비스는 반드시 채운다
     k8s_api: str = ""
     k8s_kind: str = ""
-    # 노출 앞단이 따로 있는가(MCP Server 의 MCPRemoteProxy). 노출 상태가 그 앞단을 본다
+    # 노출 앞단이 따로 있는가(MCP Server 의 MCPRemoteProxy 나 vMCP 앞단). 노출 상태가 Ingress 가
+    # 가리키는 앞단을 본다
     front_proxy: bool = False
     # 이 상태면 클러스터를 읽지 않고 Terminating 으로 답한다. Agent 만 채운다
     terminating_states: frozenset[str] = frozenset()
@@ -267,14 +269,7 @@ class InstanceStatusMixin:
             out["error"] = f"{type(e).__name__}: {e}"
             return await self._status_finish(inst, out)
         if with_exposure:
-            out["exposure"] = await run_in_threadpool(
-                exposure_status,
-                client,
-                k8s_name=k8s.name,
-                namespace=k8s.namespace,
-                exposure=inst.exposure,
-                front_proxy=self.front_proxy,
-            )
+            await self._status_exposure(inst, client, out)
         if obj is None:
             out["phase"] = "Pending" if inst.state == "deploying" else "Missing"
             out["message"] = f"{self.k8s_kind} {k8s.namespace}/{k8s.name} not found"
@@ -288,6 +283,23 @@ class InstanceStatusMixin:
         if self.status_view is None:
             raise NotImplementedError
         return await self.status_view.fields(inst, observed_at)
+
+    async def _status_exposure(
+        self, inst: Any, client: KubeClient, out: dict[str, Any]
+    ) -> ExposureReading | None:
+        """노출 상태를 `exposure` 에 싣고 읽은 것을 돌려준다. 노출하지 않았으면 None 이다. 앞단의
+        경고를 더하는 종류(MCP Server)가 이것을 넓힌다."""
+        k8s = inst.k8s
+        reading = await run_in_threadpool(
+            read_exposure,
+            client,
+            k8s_name=k8s.name,
+            namespace=k8s.namespace,
+            exposure=inst.exposure,
+            front_proxy=self.front_proxy,
+        )
+        out["exposure"] = reading.fields if reading is not None else None
+        return reading
 
     async def _status_map(
         self,

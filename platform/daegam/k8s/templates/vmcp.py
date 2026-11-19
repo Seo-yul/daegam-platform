@@ -50,6 +50,13 @@ VMCP_AUDIT_EVENT_TYPES: tuple[str, ...] = ("mcp_tool_call", "mcp_resource_read",
 # ToolHive 의 code mode 가 내는 가상 Tool 이름 (P56 4절). 게시된 Gateway 가 code mode 로 돌면 그
 # 목록에 이 이름이 있다
 CODE_MODE_TOOL = "execute_tool_script"
+# 라벨 daegam.devops.ai.kr/id 로 지우는 vMCP 묶음의 (apiVersion, kind). Gateway 의 것은 이름으로
+# 지우고 남은 것을 거두고, 노출한 MCP Server 의 vMCP 앞단의 것은 이름이 남의 것과 겹칠 수 있어
+# 라벨로만 지운다(`services/instance_base.py` `delete_labeled`, P54 5절)
+GROUP_ENTRY_KINDS: tuple[tuple[str, str], ...] = (
+    (TOOLHIVE_API, "MCPServerEntry"),
+    (TOOLHIVE_API, "MCPGroup"),
+)
 
 
 def published_pins(backend: Any) -> list[str]:
@@ -73,9 +80,11 @@ def render_group(
     namespace: str,
     description: str,
     owner: dict[str, Any] | None = None,
+    resource: str = "gateway-group",
 ) -> dict[str, Any]:
     """Gateway 마다 MCPGroup 하나 (D5). 멤버는 파드 없는 MCPServerEntry 래퍼다.
-    daegam.devops.ai.kr/id 가 인스턴스 id 라 정리·조회는 그 라벨로 한다."""
+    daegam.devops.ai.kr/id 가 인스턴스 id 라 정리·조회는 그 라벨로 한다. 노출한 MCP Server 의 vMCP
+    앞단은 resource 를 자기 값으로 준다 (P54 5절)."""
     doc = ensure_labels(
         {
             "apiVersion": TOOLHIVE_API,
@@ -84,7 +93,7 @@ def render_group(
             "spec": {"description": description},
         },
         tenant=tenant,
-        resource="gateway-group",
+        resource=resource,
         id=instance_id,
     )
     return with_owner(doc, owner)
@@ -99,11 +108,14 @@ def render_entry(
     group: str,
     url: str,
     transport: str,
-    hub_item_id: str,
+    hub_item_id: str | None,
     owner: dict[str, Any] | None = None,
     external_auth_config: str | None = None,
+    resource: str = "gateway-backend",
 ) -> dict[str, Any]:
-    """Gateway 그룹의 백엔드 래퍼. 이름 `<instance>-<item>` = vMCP workload.
+    """Gateway 그룹의 백엔드 래퍼. 이름 `<instance>-<item>` = vMCP workload. 노출한 MCP Server 의
+    vMCP 앞단은 허브 항목 없이(hub_item_id None, 라벨 없음) 자기 resource 로 그 서버를 감싼다 (P54
+    5절).
 
     external_auth_config 는 우리 MCPServer(internal·image 항목)와 플랫폼 웹 Tool(platform 항목)을
     가리키는 래퍼(`ENTRY_TOKEN_KINDS`), 묶인 토큰을 받는 게시된 vMCP(P57), 고정 헤더를 싣는 entry
@@ -126,10 +138,11 @@ def render_entry(
             "spec": spec,
         },
         tenant=tenant,
-        resource="gateway-backend",
+        resource=resource,
         id=instance_id,
     )
-    doc["metadata"]["labels"]["daegam.devops.ai.kr/hub-item"] = hub_item_id
+    if hub_item_id is not None:
+        doc["metadata"]["labels"]["daegam.devops.ai.kr/hub-item"] = hub_item_id
     return with_owner(doc, owner)
 
 
@@ -314,7 +327,7 @@ def render_vmcp(
     *,
     tenant: str,
     instance_id: str,
-    profile_id: str,
+    profile_id: str | None,
     revision: int,
     name: str,
     namespace: str,
@@ -331,6 +344,8 @@ def render_vmcp(
     timeouts: dict[str, str] | None = None,  # Entry 이름 → 호출 타임아웃 (P50 7절)
     static_backends: dict[str, str] | None = None,  # Entry 이름 → 서비스 토큰 MCPExternalAuthConfig
     code_mode: dict[str, Any] | None = None,  # spec.config.codeMode (P56 6.4절). 없으면 끈다
+    resource: str = "gateway-instance",  # 노출한 MCP Server 의 vMCP 앞단은 자기 값이다 (P54 5절)
+    template_revision: bool = True,  # 리비전 라벨을 파드 템플릿에도 단다. vMCP 앞단은 달지 않는다
 ) -> dict[str, Any]:
     """VirtualMCPServer.
     priority 모드는 접두사 없이 backends 순으로 우선순위를 주고
@@ -340,12 +355,14 @@ def render_vmcp(
     없으면(타임아웃 게이트를 지나지 못한 클러스터) vMCP 기본값(30초)이다. static_backends 가 있으면
     (G5 게이트를 지난 클러스터) 나가는 인증을 `outgoingAuth.source: inline` 으로 Entry 마다 적는다.
     vMCP 가 백엔드의 인증 설정을 발견하러 네임스페이스의 Secret·ConfigMap 을 읽지 않으므로 그 역할이
-    줄어든다(F0). default 는 두지 않는다."""
-    labels = {
-        **daegam_labels(tenant=tenant, resource="gateway-instance", id=instance_id),
-        LABEL_GATEWAY_PROFILE: profile_id,
-        LABEL_PROFILE_REVISION: str(revision),
-    }
+    줄어든다(F0). default 는 두지 않는다. profile_id 가 None 이면(vMCP 앞단) Gateway 정의의 라벨을
+    달지 않는다. revision 은 라벨 daegam.devops.ai.kr/profile-revision 이다(`vmcp_caught_up`).
+    template_revision 이 거짓이면(vMCP 앞단) 그 라벨을 CR 에만 달아, 서버를 새 리비전으로 다시
+    배포해도 앞단의 파드가 굴러가지 않는다 (P54 5절)."""
+    labels = daegam_labels(tenant=tenant, resource=resource, id=instance_id)
+    if profile_id is not None:
+        labels[LABEL_GATEWAY_PROFILE] = profile_id
+    labels[LABEL_PROFILE_REVISION] = str(revision)
     tools: list[dict[str, Any]] = []
     for b in backends:
         entry: dict[str, Any] = {"workload": b["workload"]}
@@ -401,7 +418,10 @@ def render_vmcp(
         **pod,
         "containers": [{"name": "vmcp", "resources": resources or proxy_resources()}],
     }
-    template_meta: dict[str, Any] = {"labels": dict(labels)}
+    template_labels = dict(labels)
+    if not template_revision:
+        del template_labels[LABEL_PROFILE_REVISION]
+    template_meta: dict[str, Any] = {"labels": template_labels}
     if pod_annotations:
         template_meta["annotations"] = dict(pod_annotations)
     spec["podTemplateSpec"] = {"metadata": template_meta, "spec": pod}

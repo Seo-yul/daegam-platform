@@ -46,6 +46,7 @@ from daegam.error_codes import holds_reapply
 from daegam.errors import ServiceError
 from daegam.k8s.client import KubeClient, platform_subject
 from daegam.k8s.gates import (
+    VMCP_GATES,
     Feature,
     pack_epoch,
     passing_features,
@@ -156,7 +157,9 @@ RENDER_EPOCHS: dict[str, int] = {
     # 3: 여러 backend 의 배포 때 endpoint·auth env
     # 4: local 모드 노출 앞단이 묶이지 않은 위임 토큰을 막는 forbid (P53 3.2절)
     # 5: 백엔드 파드의 라벨 (T67)
-    KIND_MCP_SERVER: 5,
+    # 6: 노출 앞단이 백엔드 하나의 vMCP 이고, 옛 앞단이 도는 서버는 vMCP 앞단이 그 자리를
+    #    넘겨받는다. 노출 NetworkPolicy 가 두 종류의 앞단 파드를 고른다 (P54 5·6절)
+    KIND_MCP_SERVER: 6,
     # 1: 감사, 이름 바꾼 툴의 필터, resources·prompts 표면, 백엔드마다의 호출 타임아웃, Cedar 참조,
     # 정적 백엔드 인증, Entry 마다의 토큰 (P50 4·6·7·8·9·12·13절)
     # 2: authz_policy 를 문장마다 정책 원소 하나로 (T63)
@@ -182,12 +185,11 @@ RENDER_EPOCHS: dict[str, int] = {
 # 종류의 기대 렌더 번호가 달라져(`render_epoch`) 살아 있는 문서가 재적용의 속도로 다시 렌더된다.
 # 렌더가 새 게이트를 따르게 되면 여기에 더하고 그 종류의 `RENDER_EPOCHS` 번호도 올린다
 RENDER_GATES: dict[str, frozenset[Feature]] = {
+    # vMCP 의 게이트는 노출 앞단이 vMCP 인지를 가른다 (P54 5절)
     KIND_MCP_SERVER: frozenset(
-        {Feature.AUTHZ_REF, Feature.ROLELESS_SA, Feature.TENANT_FENCE, Feature.MULTI_KEY_SECRETS}
+        {*VMCP_GATES, Feature.ROLELESS_SA, Feature.TENANT_FENCE, Feature.MULTI_KEY_SECRETS}
     ),
-    KIND_GATEWAY: frozenset(
-        {Feature.AUDIT, Feature.TIMEOUTS, Feature.AUTHZ_REF, Feature.STATIC_BACKENDS}
-    ),
+    KIND_GATEWAY: frozenset(VMCP_GATES),
     KIND_AGENT: frozenset(),
     KIND_HUB_ITEM: frozenset({Feature.AUTHZ_REF, Feature.ROLELESS_SA, Feature.TENANT_FENCE}),
     KIND_CLONE: frozenset({Feature.AUTHZ_REF, Feature.ROLELESS_SA, Feature.TENANT_FENCE}),
@@ -221,9 +223,11 @@ def missed_gates(kind: str, epoch: int) -> frozenset[Feature] | None:
 # 게이트를 지나지 못한 클러스터에서 그 기능을 뺀 대체 형태로 렌더하는 종류 (P50 2절). 기능을 렌더에
 # 들이는 배치가 여기에 더하고, 상태 API 가 기능마다 그런 문서를 센다
 FALLBACK_KINDS: dict[Feature, frozenset[str]] = {
-    Feature.AUDIT: frozenset({KIND_GATEWAY}),
-    Feature.TIMEOUTS: frozenset({KIND_GATEWAY}),
-    Feature.STATIC_BACKENDS: frozenset({KIND_GATEWAY}),
+    # 노출한 MCP Server 는 vMCP 앞단의 게이트 넷 가운데 하나라도 지나지 못하면 옛 앞단으로
+    # 돈다(authz_ref 는 아래 줄에 이미 든다) (P54 5절)
+    Feature.AUDIT: frozenset({KIND_GATEWAY, KIND_MCP_SERVER}),
+    Feature.TIMEOUTS: frozenset({KIND_GATEWAY, KIND_MCP_SERVER}),
+    Feature.STATIC_BACKENDS: frozenset({KIND_GATEWAY, KIND_MCP_SERVER}),
     Feature.AUTHZ_REF: frozenset({KIND_GATEWAY, KIND_MCP_SERVER, KIND_HUB_ITEM, KIND_CLONE}),
     Feature.ROLELESS_SA: frozenset({KIND_MCP_SERVER, KIND_HUB_ITEM, KIND_CLONE}),
     Feature.TENANT_FENCE: frozenset({KIND_MCP_SERVER, KIND_HUB_ITEM, KIND_CLONE}),
@@ -242,6 +246,11 @@ def _remote_proxy(kind: str, doc: Any) -> bool:
     if kind == KIND_CLONE:
         return (getattr(doc, "source", None) or {}).get("kind") == "remote"
     return False
+
+
+def _vmcp(kind: str, doc: Any) -> bool:
+    """vMCP 를 렌더하는 문서인가. Gateway 와 노출한 MCP Server 의 앞단이다 (P54 5절)."""
+    return kind == KIND_GATEWAY or (kind == KIND_MCP_SERVER and exposure_enabled(doc))
 
 
 def _cedar_by_ref(kind: str, doc: Any, passing: frozenset[Feature]) -> bool:
@@ -267,6 +276,9 @@ def _has_backend_secrets(doc: Any) -> bool:
 # 기능마다, 그 기능을 렌더하는 문서인가 (종류, 문서, 그 클러스터가 지나는 기능). 없는 기능은
 # `FALLBACK_KINDS` 의 종류 모두가 렌더한다
 _RENDERS: dict[Feature, Callable[[str, Any, frozenset[Feature]], bool]] = {
+    Feature.AUDIT: lambda kind, doc, _passing: _vmcp(kind, doc),
+    Feature.TIMEOUTS: lambda kind, doc, _passing: _vmcp(kind, doc),
+    Feature.STATIC_BACKENDS: lambda kind, doc, _passing: _vmcp(kind, doc),
     Feature.AUTHZ_REF: _cedar_by_ref,
     Feature.ROLELESS_SA: lambda kind, doc, _passing: _remote_proxy(kind, doc),
     Feature.TENANT_FENCE: lambda kind, doc, _passing: internal_server(kind, doc),
@@ -477,6 +489,14 @@ def rules_rev(base: str | None, mark: str | None) -> str | None:
     서버의 규칙 지문, 돌고 있는 파드의 앞 이름이 모두 그 글에 들어 있다. 규칙이 없으면 None 이라
     base 그대로이므로 규칙 없는 객체의 판은 오늘과 같다."""
     return marked_rev(base, rules=mark) if mark else base
+
+
+def front_rev(base: str | None, mark: str | None) -> str | None:
+    """노출 앞단을 넘겨받는 MCP Server(P54 6절)의 판 첫 절반(`marked_rev`). mark 는 넘겨받기의
+    단계(`services/exposure_front.py` `Step`)이고 기대 판에는 클러스터가 보이는 단계가, 적힌 판에는
+    렌더가 닿은 단계가 실린다. 그래서 vMCP 앞단이 `Pending` 에 머문 서버는 기대 판과 같아 틱마다
+    다시 렌더되지 않는다. 넘겨받을 것이 없으면 None 이라 base 그대로다."""
+    return marked_rev(base, front=mark) if mark else base
 
 
 def secret_env_rev(base: str | None, rev: int | None) -> str | None:
@@ -873,15 +893,19 @@ class DataPlaneAuth:
 
     async def _scan(self, cluster: Cluster, tick: _Tick) -> _Scan:
         """이 클러스터의 살아 있는 문서를 읽고 살아 있는 상태인 문서마다 기대 판의 두 절반을
-        계산한다. 인증 소비자가 아닌 문서도 렌더 번호로 다시 렌더되므로 모두 든다 (P50 1절)."""
-        docs: list[tuple[Any, Any]] = []
+        계산한다. 인증 소비자가 아닌 문서도 렌더 번호로 다시 렌더되므로 모두 든다 (P50 1절). 노출
+        앞단을 넘겨받는 MCP Server 의 기대 판이 읽을 클러스터의 옛 앞단 목록을 먼저 읽는다 (P54
+        6절, `_observe_fronts`)."""
+        docs: list[tuple[Any, Any]] = [
+            (service, doc)
+            for service in self.services
+            for doc in await service.instances.live_on_cluster(cluster.id)
+        ]
+        await self._observe_fronts(cluster, docs, tick)
         consumers: list[_Target] = []
         passing = passing_features(cluster)
-        for service in self.services:
-            for doc in await service.instances.live_on_cluster(cluster.id):
-                docs.append((service, doc))
-                if doc.state not in service.live_states:
-                    continue
+        for service, doc in docs:
+            if doc.state in service.live_states:
                 ts = await tick.settings_of(doc.tenant)
                 want = await service.want_rev(doc, ts)
                 binds = consumer_auth(self.settings, ts).binds_delegation
@@ -890,6 +914,19 @@ class DataPlaneAuth:
                 rank = switch_rank(self.settings, ts, service.auth_kind, doc)
                 consumers.append(_Target(service, doc, want, epoch, paced, rank))
         return _Scan(docs, consumers)
+
+    async def _observe_fronts(
+        self, cluster: Cluster, docs: list[tuple[Any, Any]], tick: _Tick
+    ) -> None:
+        """노출한 MCP Server 가 있는 클러스터에서만 옛 앞단 목록을 읽는다
+        (`MCPServerService.observe_fronts`). 연결할 수 없어 미뤄 둔 클러스터는 읽지 않고, 그
+        서버들은 적힌 넘겨받기 단계를 그대로 기대한다."""
+        exposed = any(svc is self.mcp_servers and exposure_enabled(doc) for svc, doc in docs)
+        state = await self.store.cluster(cluster.id) if exposed else None
+        if state is None or (state.unreachable and state.waiting(tick.now)):
+            self.mcp_servers.fronts.forget(cluster.id)
+            return
+        await self.mcp_servers.observe_fronts(cluster, tick.now)
 
     # -- 드리프트 스윕 -----------------------------------------------------------------------
 
@@ -1261,6 +1298,7 @@ class DataPlaneAuth:
         blocked: list[dict[str, str | None]] = []
         kinds: dict[str, dict[str, dict[str, int]]] = {}
         fallbacks: dict[str, dict[str, int]] = {}
+        handovers: dict[str, dict[str, int]] = {}
         stale = 0
         stale_ca = 0
         cert_expires_at = None
@@ -1282,6 +1320,8 @@ class DataPlaneAuth:
             kinds[cluster.id] = _kind_counts(scan.consumers, tick.now)
             if counts := _fallback_counts(cluster, scan.consumers):
                 fallbacks[cluster.id] = counts
+            if counts := self._handover_counts(scan.consumers):
+                handovers[cluster.id] = counts
             stale += await self._stale_runtimes(cluster, platform, scan, tick)
             stale_ca += self._stale_ca(platform, scan)
         summary = await self.store.summary()
@@ -1299,6 +1339,7 @@ class DataPlaneAuth:
             "render_epochs": dict(RENDER_EPOCHS),
             "kinds": kinds,
             "fallbacks": fallbacks,
+            "handovers": handovers,
             "redis_plain_consumers": {
                 tenant: [plain_row(r) for r in rows] for tenant, rows in by_tenant(plain).items()
             },
@@ -1310,6 +1351,16 @@ class DataPlaneAuth:
             "turn_tokens": await self._turn_tokens_status(clusters, scans, tick.now),
             "data_plane_issuer": await self._issuer_status(clusters, scans, tick.now),
         }
+
+    def _handover_counts(self, consumers: list[_Target]) -> dict[str, int]:
+        """클러스터 하나에서 노출 앞단을 넘겨받는 중인 MCP Server 를 단계마다 센다 (P54 11절,
+        `MCPServerService.handover_step`). 그런 서버가 없는 단계는 뺀다."""
+        steps = (
+            self.mcp_servers.handover_step(c.doc)
+            for c in consumers
+            if c.service is self.mcp_servers
+        )
+        return dict(Counter(str(step) for step in steps if step is not None))
 
     async def _issuer_status(
         self, clusters: list[Cluster], scans: dict[str, _Scan], now: datetime

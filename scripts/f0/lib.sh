@@ -328,7 +328,12 @@ f1_next_round() {
   f1_put round "$F1_ROUND"
 }
 
-f1_mark_install() { f0_now >"$F1_STATE/install-at-r$(f1_get round)"; }
+# f1_mark_install -> 곧 시작할 설치의 시각을 그 판의 바꾼 때로 적는다. 막 띄운 호출 루프가 설치 전에 답을 받아야 그 뒤의
+# 실패를 설치 탓으로 견줄 수 있으므로 F1_WARMUP 초(20)를 먼저 기다린다
+f1_mark_install() {
+  sleep "${F1_WARMUP:-20}"
+  f0_now >"$F1_STATE/install-at-r$(f1_get round)"
+}
 
 f1_stop_loops() { # PHASE NAME...
   local phase="$1" round name loop rc

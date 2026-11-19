@@ -520,3 +520,31 @@ def test_collector_waits_for_the_first_push_of_a_new_agent_pod(client, fake_clus
     client.portal.call(col.run_once)
     assert "agent-young" in [p for _ns, p, _c in agent.fake.log_reads]
     assert mongo["agent_events"].count_documents({"pod": "agent-young"}) == 1
+
+
+def test_a_vmcp_front_pod_is_written_to_its_mcp_server(client, fake_clusters, mongo):
+    """노출한 MCP Server 의 vMCP 앞단 파드는 그 서버의 id 라벨과 앞단의 리소스 값을 단다. 수집기는
+    그 서버의 이벤트로 적는다. 같은 vMCP 종류라도 리소스 값이 다른 파드는 그렇게 적지 않는다 (P54
+    11절)."""
+    inst, fake = _instance_with_proxy(client, fake_clusters)
+    now = utcnow()
+    front = {
+        "toolhive": "true",
+        "app.kubernetes.io/name": "virtualmcpserver",
+        "toolhive-name": f"front-{inst['k8s']['name']}",
+        "daegam.devops.ai.kr/resource": "mcp-instance-front",
+        "daegam.devops.ai.kr/id": inst["id"],
+        "daegam.devops.ai.kr/tenant": "default",
+    }
+    other = {**front, "toolhive-name": "gw-x", "daegam.devops.ai.kr/resource": "gateway-instance"}
+    fake.add_pod(DEFAULT_NS, "front-pod", front, uid="uid-f")
+    fake.add_pod(DEFAULT_NS, "gw-pod", other, uid="uid-o")
+    at = _iso(now - timedelta(seconds=5))
+    fake.add_pod_log(DEFAULT_NS, "front-pod", _event("f1", at), ts=now)
+    fake.add_pod_log(DEFAULT_NS, "gw-pod", _event("o1", at), ts=now)
+    col = audit_collector(client)
+    assert client.portal.call(col.run_once)["errors"] == []
+    f1 = mongo["mcp_audit_events"].find_one({"_id": "f1"})
+    assert (f1["tenant"], f1["instance_id"]) == ("default", inst["id"])
+    assert f1["proxy_kind"] == "virtualmcpserver"
+    assert mongo["mcp_audit_events"].find_one({"_id": "o1"})["instance_id"] is None

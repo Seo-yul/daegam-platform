@@ -3,12 +3,14 @@
 # 노출한 MCP 주소를 준비하고 토큰으로 불러 허용·거부·401 을 가르는 한 벌 (e2e_pat, e2e_oauth). `. "$HERE/lib/e2e_mcp_access.sh"`
 # 로 읽는다. 부르는 쪽이 K·WORK·ROOT·CTX·NS·TENANT·PLATFORM_NS·READY_TIMEOUT·INGRESS_CLASS·TRAEFIK_NS·TRAEFIK_SVC 와 대상 도구
 # TOOL(이름 끝)·TOOL_ARGS(비면 TOOL_FILL 로 채운다)·TOOL_EXPECT(결과에 있어야 할 글자)를 두고, e2e_json.sh·e2e_report.sh(die)·
-# e2e_api.sh(api·jq_)·e2e_pf.sh·mcp_rpc.sh(mcp_status·mcp_ingress·rpc_·svc_token)를 먼저 읽는다 (함수는 부를 때 읽는다).
+# e2e_api.sh(api·jq_)·e2e_pf.sh·mcp_rpc.sh(mcp_status·mcp_ingress·rpc_·svc_token·ROUTE_WAIT)를 먼저 읽는다 (함수는 부를
+# 때 읽는다).
 #
 # 노출 host 는 curl --resolve 로 Traefik IP(orbstack)나 DNS 로 푼 IP(설치본)에 못 박으므로 /etc/hosts 가 필요 없다. 허용은
 # tools/list 에 대상 도구가 있고 그 tools/call 이 200 에 JSON-RPC 오류 없이 끝나는 것이다. 거부는 tools/list 가 200 에 빈
-# 목록이고 tools/call 이 HTTP 403 인 것이다. 거부 문구는 vMCP("call denied by authorization policy")와 노출 앞단
-# ("Unauthorized")이 달라 상태 코드로만 가른다(docs/archive/reviews/2026-09-27-spike-p32-jwks.md 4절).
+# 목록이고 tools/call 이 HTTP 403 인 것이다. Gateway 와 노출 MCP Server 의 앞단은 모두 vMCP 라 거부 문구가
+# "call denied by authorization policy" 이지만, 옛 앞단(MCPRemoteProxy)이 남은 설치본은 "Unauthorized" 로 답하므로 상태
+# 코드로만 가른다.
 #
 # traefik_ip STEP
 #   orbstack Traefik(LoadBalancer Service TRAEFIK_NS/TRAEFIK_SVC)의 IP 를 LB_IP 에 남긴다. 없으면 die STEP
@@ -35,6 +37,9 @@
 # gateway_vmcp STEP GW_ID
 #   그 Gateway 의 vMCP 가 도는 네임스페이스를 NS 에, vMCP 파드의 라벨을 VMCP_SEL 에 남긴다(restart_pods 가 쓴다). 문서를 읽지
 #   못하거나 배포되지 않았으면 die STEP
+# front_sel MS_K8S_NAME
+#   노출한 MCP Server 의 앞단 파드 라벨을 찍는다(restart_pods 가 쓴다). 앞단은 그 서버 하나를 백엔드로 둔 vMCP
+#   front-<k8s.name> 이다
 # mcp_call URL PIN TOKEN METHOD [PARAMS]
 #   마지막 요청의 HTTP 코드를 찍고 결과는 $WORK/rpc.json 에 둔다. 파드가 막 다시 떴거나 Traefik 이 라우트를 아직 모르면
 #   (000·404·502·503) 5초씩 24번 다시 부른다
@@ -43,7 +48,8 @@
 #   채운다(deploy/dev/lab/tool_fill.py). 채우지 못하면 1
 # allowed URL PIN TOKEN / denied URL PIN TOKEN / unauthenticated URL PIN TOKEN
 #   허용·거부·401 이면 0. allowed 는 찾은 도구 이름과 인자를 MCP_TOOL·MCP_ARGS 에, 아니면 까닭을 MCP_NOTE 에 남기고 denied
-#   는 앞의 allowed 가 남긴 MCP_TOOL 을 부른다. unauthenticated 는 initialize 가 401 인 것이다
+#   는 앞의 allowed 가 남긴 MCP_TOOL 을 부른다. unauthenticated 는 initialize 가 401 인 것이다. 허용돼야 할 토큰의
+#   tools/list 에 대상 도구가 없으면 allowed 가 lib/mcp_rpc.sh 의 ROUTE_WAIT 초까지 다시 본다
 # wait_unauthenticated STEP SINCE TOKEN
 #   URLS·PINS 배열의 모든 주소가 TOKEN 을 401 로 거절할 때까지 REVOKE_POLL 초마다 본다. SINCE(epoch 초)부터 REVOKE_LIMIT 을
 #   넘기면 die STEP 이다. 걸린 초를 REFUSED_AFTER 에 남긴다
@@ -102,6 +108,8 @@ gateway_vmcp() { # STEP GW_ID
   VMCP_SEL="app.kubernetes.io/name=virtualmcpserver,app.kubernetes.io/instance=$k8s"
 }
 
+front_sel() { echo "app.kubernetes.io/name=virtualmcpserver,app.kubernetes.io/instance=front-$1"; } # MS_K8S_NAME
+
 url_host() { python3 -c 'import sys, urllib.parse as u; print(u.urlsplit(sys.argv[1]).hostname)' "$1"; } # URL
 
 pin() { # URL IP
@@ -141,11 +149,15 @@ tool_args() { # NAME
 }
 
 allowed() { # URL PIN TOKEN
-  local code
-  code="$(mcp_call "$1" "$2" "$3" tools/list)"
-  [ "$code" = 200 ] || { MCP_NOTE="tools/list -> $code: $(cat "$WORK/rpc.raw")"; return 1; }
-  MCP_TOOL="$(rpc_ "next((t['name'] for t in ((d or {}).get('result') or {}).get('tools', []) if t['name'].endswith('$TOOL')), '')")"
-  [ -n "$MCP_TOOL" ] || { MCP_NOTE="tools/list has no *$TOOL: $(cat "$WORK/rpc.json")"; return 1; }
+  local code i
+  for ((i = 0; i <= ROUTE_WAIT / 5; i++)); do
+    code="$(mcp_call "$1" "$2" "$3" tools/list)"
+    [ "$code" = 200 ] || { MCP_NOTE="tools/list -> $code: $(cat "$WORK/rpc.raw")"; return 1; }
+    MCP_TOOL="$(rpc_ "next((t['name'] for t in ((d or {}).get('result') or {}).get('tools', []) if t['name'].endswith('$TOOL')), '')")"
+    [ -z "$MCP_TOOL" ] || break
+    sleep 5
+  done
+  [ -n "$MCP_TOOL" ] || { MCP_NOTE="tools/list has no *$TOOL after ${ROUTE_WAIT}s: $(cat "$WORK/rpc.json")"; return 1; }
   MCP_ARGS="$(tool_args "$MCP_TOOL")" || { MCP_NOTE="no arguments for $MCP_TOOL"; return 1; }
   code="$(mcp_call "$1" "$2" "$3" tools/call "{\"name\": \"$MCP_TOOL\", \"arguments\": $MCP_ARGS}")"
   [ "$code" = 200 ] && [ "$(rpc_ "('ok' if d and not d.get('error') and not d['result'].get('isError')

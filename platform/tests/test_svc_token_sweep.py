@@ -29,7 +29,7 @@ from tests.helpers.agents import (
     with_tool_server,
 )
 from tests.helpers.auth import admin_headers, bearer
-from tests.helpers.consts import AG, DEFAULT_NS, GV, GW, TENANT_HEADER
+from tests.helpers.consts import AG, DEFAULT_NS, GW, TENANT_HEADER
 from tests.helpers.exposure import front_and_gateway
 from tests.helpers.gateways import gateway_up, vmcp_of
 from tests.helpers.hub import hub_env
@@ -104,10 +104,10 @@ def test_a_token_without_its_server_audience_is_renewed(client, fake_clusters, m
     wanted = ["daegam-internal:default", f"daegam-internal:default:{front['id']}"]
     for name in secrets:
         assert aud_of(fake.get("v1", "Secret", name, DEFAULT_NS)["stringData"]["token"]) == wanted
-    # 새 토큰의 판이 노출 앞단과 vMCP 의 파드 템플릿에 실려 둘 다 굴러간다
-    proxy = fake.get(GV, "MCPRemoteProxy", f"expose-{front['k8s']['name']}", DEFAULT_NS)
+    # 새 토큰의 판이 노출 앞단(vMCP, P54 5절)과 Gateway vMCP 의 파드 템플릿에 실려 둘 다 굴러간다
+    front_vmcp = vmcp_of(fake, f"front-{front['k8s']['name']}")
     consumers = (
-        (proxy, "mcp_servers", front),
+        (front_vmcp, "mcp_servers", front),
         (vmcp_of(fake, gateway["k8s"]["name"]), "gateways", gateway),
     )
     for name, (live, collection, doc) in zip(secrets, consumers, strict=True):

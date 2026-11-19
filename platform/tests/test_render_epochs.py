@@ -44,7 +44,7 @@ from tests.helpers.mcp_servers import two_backend_server
 # 다섯 지문 모두 제품 이름을 바꿀 때(P80) 번호 없이 바뀌었다. 옛 설치의 문서는 새 설치로 넘어오지
 # 않는다 (P80 2·3절)
 GOLDEN: dict[str, tuple[int, str]] = {
-    KIND_MCP_SERVER: (5, "1e77dac46c19caa0"),
+    KIND_MCP_SERVER: (6, "52d8697d724aff82"),
     KIND_GATEWAY: (3, "433f0bb4c6397530"),
     KIND_AGENT: (4, "d88bdfb68dceff83"),
     KIND_HUB_ITEM: (3, "e2e9ebe0740774b3"),
@@ -180,7 +180,7 @@ def test_every_kind_has_a_golden_rendering():
     assert set(GOLDEN) == set(RENDERS) == set(RENDER_EPOCHS)
 
 
-@pytest.mark.parametrize("kind", ["agent", "gateway"])
+@pytest.mark.parametrize("kind", ["agent", "gateway", "mcp_server"])
 def test_a_changed_rendering_raises_its_epoch(kind, client, fake_clusters, mongo):
     """렌더가 바뀌면 번호를 올린다. 번호를 올렸으면 지문도 새 렌더의 것으로 고친다."""
     epoch, digest = GOLDEN[kind]

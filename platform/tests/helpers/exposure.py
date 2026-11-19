@@ -58,16 +58,24 @@ def prep_ingress(fake: FakeClusterClient) -> None:
     cluster_secret(fake, DEFAULT_NS, "opaque", tls=False)
 
 
-def front_and_gateway(client, fake_clusters) -> tuple[dict, dict, object]:
-    """노출한 MCP Server(앞단) 하나와 그것을 백엔드로 쓰는 Gateway 하나. 둘 다 소비자다."""
-    _cid, _bp, _ds, mp = cluster_with_ingress(client)
+def exposed_server(
+    client, fake_clusters, name: str = "calc-1"
+) -> tuple[dict, str, FakeClusterClient]:
+    """Ingress 를 고를 수 있는 클러스터에 노출해 배포한 MCP Server 하나. (문서, 클러스터 id,
+    가짜)."""
+    cid, _bp, _ds, mp = cluster_with_ingress(client)
     fake = fake_clusters.by_name["edge"]
     prep_ingress(fake)
     r = clone_and_deploy(
-        client, mp, name="calc-1", exposure={"enabled": True, "host": "calc.e2e.local"}
+        client, mp, name=name, exposure={"enabled": True, "host": "calc.e2e.local"}
     )
     assert r.status_code == 201, r.text
-    front = r.json()
+    return r.json(), cid, fake
+
+
+def front_and_gateway(client, fake_clusters) -> tuple[dict, dict, object]:
+    """노출한 MCP Server(앞단) 하나와 그것을 백엔드로 쓰는 Gateway 하나. 둘 다 소비자다."""
+    front, _cid, fake = exposed_server(client, fake_clusters)
     url = f"http://mcp-{front['k8s']['name']}-proxy.{DEFAULT_NS}.svc.cluster.local:8080/mcp"
     fake.set_status(
         GV, "MCPServer", front["k8s"]["name"], DEFAULT_NS, {"phase": "Ready", "url": url}

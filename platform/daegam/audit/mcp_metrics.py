@@ -98,23 +98,27 @@ class MongoMcpMetricsStore:
         *,
         names: list[str],
         day_tz: str | None,
+        proxy_kind: str | None = None,
     ) -> dict[str, list[dict[str, Any]]]:
         """문서 하나의 묶음을 창 안에서 더한다. 유형별(`types`), Tool 호출의 Tool 별(`tools`)·
         백엔드별(`backends`)·단계별(`series`) 합이다. Tool 별은 names(문서가 광고하는 이름)만
         이름으로 묶고 나머지는 이름 없음(null) 한 행이다. 접기는 시간마다 이름 수를 막을 뿐이라
         긴 창에서는 다른 이름이 시간마다 쌓이므로, 묶음을 DB 안에서 줄여 넘긴다. day_tz 가 있으면
-        단계는 그 시간대의 날이고 없으면 시간이다."""
+        단계는 그 시간대의 날이고 없으면 시간이다. proxy_kind 를 주면 그 종류의 프록시가 남긴
+        묶음만 더한다."""
         step: Any = "$hour" if day_tz is None else day_of(day_tz)
         sums = _bucket_sums()
         calls_only = {"$match": {"type": MCP_TOOL_CALL}}
         # 묶음의 이름은 128자로 잘려 있다. 파이썬의 자르기는 $substrCP 처럼 코드 포인트로 센다
         cut = [n[:NAME_CHARS] for n in names]
         named = {"$cond": [{"$in": ["$tool", cut]}, "$tool", None]}
-        match = {
+        match: dict[str, Any] = {
             "instance_id": instance_id,
             "v": BUCKET_VERSION,
             "hour": {"$gte": since, "$lt": until},
         }
+        if proxy_kind is not None:
+            match["proxy_kind"] = proxy_kind
         return await facets(
             self.hourly,
             match,

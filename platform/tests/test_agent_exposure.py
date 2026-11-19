@@ -125,8 +125,7 @@ def test_render_ingress_paths_and_expose_policy_pod_selector():
     np = render_expose_policy(
         **common,
         name="p",
-        front_name="expose-mcp-x",
-        front_kind="mcpremoteproxy",
+        fronts=[("expose-mcp-x", "mcpremoteproxy")],
         controller_namespace="traefik",
     )
     assert np["spec"]["podSelector"]["matchLabels"] == {
