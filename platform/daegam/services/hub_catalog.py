@@ -257,6 +257,11 @@ def catalog_out(catalog: Catalog, *, admission: bool, prefix: str | None) -> dic
     }
 
 
+# SSE 로만 말하는 외부 MCP 서버를 거절하는 코드 (P54b 15절 3). 만들기(services/hub.py)와 카탈로그
+# 가져오기가 함께 쓴다
+OUTSIDE_SSE_UNSUPPORTED = "outside_sse_unsupported"
+
+
 def catalog_remote(
     catalog: Catalog,
     name: str,
@@ -271,10 +276,18 @@ def catalog_remote(
     필요한 원격은 가져올 수 없다. 자격 증명이 필요한 원격은 그 서버의
     `import_header` 를 고정 헤더로 싣는 항목만 받는다 (P86 A3). header_name 은 항목이 `auth: header`
     로 싣는 헤더 이름이고, 인증은 entry 항목만 받으므로 remote 항목에는 늘 None 이다. HTTP 헤더
-    이름이라 대소문자를 가리지 않는다. 모두 422 invalid_value 다."""
+    이름이라 대소문자를 가리지 않는다. SSE 로만 말하는 서버는 422 outside_sse_unsupported 이고
+    나머지는 모두 422 invalid_value 다."""
     server = catalog.server(name)
     if server is None or server.kind != "remote":
         raise error_cls(422, "invalid_value", f"catalog has no remote server {name!r}")
+    if server.transport == "sse":
+        # SSE 로만 말하는 원격은 허브가 받지 않는다 (P54b 15절 3). 항목의 전송과 상관없다
+        raise error_cls(
+            422,
+            OUTSIDE_SSE_UNSUPPORTED,
+            f"catalog server {name} speaks only SSE, which the hub does not support",
+        )
     if server.url_template:
         # 채운 주소는 스냅숏의 주소와 같을 수 없다 (4절)
         raise error_cls(422, "invalid_value", f"catalog server {name} has a URL template")

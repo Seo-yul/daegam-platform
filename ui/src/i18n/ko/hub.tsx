@@ -197,6 +197,7 @@ export const hub = {
     tier: { Official: "공식", Community: "커뮤니티" } as Record<string, string>,
     provenance: { available: "출처 확인 가능", none: "출처 정보 없음" },
     platforms: "아키텍처",
+    sseOnlyHint: "SSE 방식으로만 동작하는 서버라 허브에 등록할 수 없습니다.",
     needsLogin: "로그인 필요",
     needsLoginHint: "사람마다 로그인해야 사용하는 서버라 아직 허브에 등록할 수 없습니다.",
     needsCredentials: "자격 증명 필요",

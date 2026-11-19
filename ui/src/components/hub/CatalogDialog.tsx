@@ -36,7 +36,12 @@ export function CatalogDialog({ open, onClose }: { open: boolean; onClose: () =>
 /** 고를 수 없는 까닭의 한 줄. */
 function blockText(t: Messages, block: CatalogBlock): string {
   const text = t.hub.catalog;
-  const lines: Record<CatalogBlock, string> = { needsLogin: text.needsLoginHint, needsCredentials: text.needsCredentialsHint, admissionOff: text.admissionOff };
+  const lines: Record<CatalogBlock, string> = {
+    sseOnly: text.sseOnlyHint,
+    needsLogin: text.needsLoginHint,
+    needsCredentials: text.needsCredentialsHint,
+    admissionOff: text.admissionOff,
+  };
   return lines[block];
 }
 

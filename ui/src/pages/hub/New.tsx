@@ -58,6 +58,11 @@ function HubForm({ server, missing, admission }: { server: HubCatalogServer | nu
   const [clusterId, setClusterId] = useState("");
   const [url, setUrl] = useState(prefill?.url ?? "");
   const [transport, setTransport] = useState(prefill?.transport ?? "");
+  // 외부 서버(remote, entry)는 SSE 를 받지 않는다(outside_sse_unsupported). image 로 sse 를 고른 뒤 바꾸면 기본값으로 돌린다
+  const changeKind = (next: Kind) => {
+    setKind(next);
+    if (next !== "image" && transport === "sse") setTransport("");
+  };
   const [image, setImage] = useState(prefill?.image ?? "");
   const [port, setPort] = useState(prefill?.port ?? "");
   const [toolsFilter, setToolsFilter] = useState(prefill?.toolsFilter ?? "");
@@ -131,7 +136,7 @@ function HubForm({ server, missing, admission }: { server: HubCatalogServer | nu
             <NameFields testId="hub" placeholders={text.placeholders} value={names} onChange={setNames} preview={kind === "entry" ? undefined : { prefix: "hub" }} errors={nameFieldErrors(create.error)} />
             <div className="grid grid-cols-2 gap-3">
               <Field label={text.kind} htmlFor="hub-kind" hint={text.kindHint}>
-                <Select id="hub-kind" data-testid="hub-kind" value={kind} onChange={(e) => setKind(e.target.value as Kind)}>
+                <Select id="hub-kind" data-testid="hub-kind" value={kind} onChange={(e) => changeKind(e.target.value as Kind)}>
                   <option value="remote">{text.kinds.remote}</option>
                   <option value="entry">{text.kinds.entry}</option>
                   <option value="image">{text.kinds.image}</option>
@@ -191,7 +196,8 @@ function HubForm({ server, missing, admission }: { server: HubCatalogServer | nu
               <Select id="hub-transport" data-testid="hub-transport" required={kind === "entry"} value={transport} onChange={(e) => setTransport(e.target.value)}>
                 <option value="">{t.shared.defaultValue}</option>
                 <option value="streamable-http">{text.transports["streamable-http"]}</option>
-                <option value="sse">{text.transports.sse}</option>
+                {/* sse 는 image 항목의 컨테이너만 고른다. SSE 로만 말하는 외부 서버(remote, entry)는 서버가 거절한다(outside_sse_unsupported) */}
+                {kind === "image" ? <option value="sse">{text.transports.sse}</option> : null}
               </Select>
             </Field>
 

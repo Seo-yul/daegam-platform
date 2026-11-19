@@ -395,7 +395,10 @@ def test_a_catalog_remote_must_match_the_snapshot(client, cluster):
     plain = next(
         s
         for s in cat.servers
-        if s.kind == "remote" and not s.needs_login and not s.needs_credentials
+        if s.kind == "remote"
+        and s.transport != "sse"
+        and not s.needs_login
+        and not s.needs_credentials
     )
     body = {"name": "from-cat", "kind": "remote", "url": plain.url, "transport": plain.transport}
     r = client.post(HUB, json={**body, "catalog": plain.name})
@@ -418,6 +421,19 @@ def test_a_catalog_remote_must_match_the_snapshot(client, cluster):
         },
     )
     assert detail_code(r) == (422, "invalid_value")
+
+
+def test_a_catalog_remote_that_speaks_only_sse_is_refused(client, cluster):
+    """SSE 로만 말하는 카탈로그 원격은 항목이 적은 전송과 상관없이 가져오지 못한다 (P54b 15절 3)."""
+    sse = next(
+        s
+        for s in snapshot().servers
+        if s.kind == "remote" and s.transport == "sse" and not s.needs_login
+    )
+    for transport in ("sse", "streamable-http"):
+        body = {"name": f"sse-{transport}", "kind": "remote", "url": sse.url}
+        r = client.post(HUB, json={**body, "transport": transport, "catalog": sse.name})
+        assert detail_code(r) == (422, "outside_sse_unsupported"), r.text
 
 
 # -- stdio 점검 --------------------------------------------------------------------

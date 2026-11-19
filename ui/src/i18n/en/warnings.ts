@@ -124,6 +124,10 @@ export const warnings: Messages["warnings"] = {
       label: "Header value refused",
       text: "The outside server refused this hub item's header value on the platform's last call. Check the value and save it again with Replace header value.",
     },
+    outside_sse_unsupported: {
+      label: "SSE server not supported",
+      text: "This hub item's server speaks only SSE, so the platform cannot read its Tools and Gateways that use it cannot be deployed. Create a new item with the server's streamable-http address.",
+    },
     outside_header_missing: {
       label: "Header value missing",
       text: "The header value of a hub item used as a backend was not found, so it is called without the header. Ask whoever manages the hub item to save the header value again.",

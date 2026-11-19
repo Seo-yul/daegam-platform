@@ -217,7 +217,13 @@ def _entry(client, headers, name="org-entry", **extra):
     r = client.post(
         HUB,
         headers=headers,
-        json={"name": name, "kind": "entry", "url": EXT_URL, "transport": "sse", **extra},
+        json={
+            "name": name,
+            "kind": "entry",
+            "url": EXT_URL,
+            "transport": "streamable-http",
+            **extra,
+        },
     )
     assert r.status_code == 201, r.text
     return r.json()
@@ -308,7 +314,7 @@ def test_boundary_widening_needs_hub_share_and_narrowing_is_manage(env, token):
             "name": "w",
             "kind": "entry",
             "url": EXT_URL,
-            "transport": "sse",
+            "transport": "streamable-http",
             "access": SHARED_ACCESS,
         },
     )

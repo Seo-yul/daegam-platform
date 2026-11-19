@@ -89,7 +89,8 @@ def test_a_header_item_keeps_its_value_in_a_managed_secret_only(client, cluster,
 
 def test_items_without_auth_store_no_auth_field(client, cluster, mongo):
     r = client.post(
-        HUB, json={"name": "plain", "kind": "entry", "url": OUTSIDE_URL, "transport": "sse"}
+        HUB,
+        json={"name": "plain", "kind": "entry", "url": OUTSIDE_URL, "transport": "streamable-http"},
     )
     assert r.status_code == 201, r.text
     assert "auth" not in raw_item(mongo, r.json()["id"])
@@ -219,7 +220,8 @@ def test_replacing_the_value_raises_the_header_revision(client, cluster, mongo):
     r = client.put(f"{HUB}/{item['id']}/auth/header", json={"value": "a\u0007b"})
     assert detail_code(r) == (422, "outside_header_value_invalid") and "a\u0007b" not in r.text
     plain = client.post(
-        HUB, json={"name": "plain", "kind": "entry", "url": OUTSIDE_URL, "transport": "sse"}
+        HUB,
+        json={"name": "plain", "kind": "entry", "url": OUTSIDE_URL, "transport": "streamable-http"},
     ).json()
     r = client.put(f"{HUB}/{plain['id']}/auth/header", json={"value": "x"})
     assert detail_code(r) == (422, "invalid_kind")
@@ -438,7 +440,8 @@ def test_refresh_tools_updates_the_check(client, cluster, lister):
 
 def test_items_without_a_header_send_none(client, cluster, lister):
     plain = client.post(
-        HUB, json={"name": "plain", "kind": "entry", "url": OUTSIDE_URL, "transport": "sse"}
+        HUB,
+        json={"name": "plain", "kind": "entry", "url": OUTSIDE_URL, "transport": "streamable-http"},
     ).json()
     assert client.post(f"{HUB}/{plain['id']}/refresh-tools").status_code == 200
     assert lister.seen == [{}]

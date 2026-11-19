@@ -115,7 +115,8 @@ def test_a_header_entry_gets_its_own_copy_and_config(client, env, mongo):
 def test_gateways_without_header_items_render_as_before(client, env):
     _item, fake = env
     plain = client.post(
-        HUB, json={"name": "plain", "kind": "entry", "url": OUTSIDE_URL, "transport": "sse"}
+        HUB,
+        json={"name": "plain", "kind": "entry", "url": OUTSIDE_URL, "transport": "streamable-http"},
     ).json()
     inst = header_gateway(client, plain, name="gw-p")
     assert "auth_kind" not in inst["deployed_backends"][0]
