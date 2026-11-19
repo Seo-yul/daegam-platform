@@ -31,6 +31,7 @@ from daegam.audit.mcp_metrics import (
 )
 from daegam.audit.store import MCP_PROMPT_GET, MCP_RESOURCE_READ, MCP_TOOL_CALL
 from daegam.k8s.gates import Feature, passing_features
+from daegam.k8s.labels import APP_MCPSERVER
 from daegam.k8s.templates.vmcp import CODE_MODE_TOOL
 from daegam.services.advertised_names import advertised_tools, advertised_tools_of
 from daegam.services.data_plane_auth import KIND_GATEWAY, missed_gates
@@ -70,7 +71,9 @@ class McpMetricsReports:
         )
 
     async def mcp_server(self, doc: MCPServer, *, window: str, tz: str) -> dict[str, Any]:
-        """MCP Server 하나의 메트릭. 이름은 배포한 리비전이 광고하는 Tool 이다."""
+        """MCP Server 하나의 메트릭. 이름은 배포한 리비전이 광고하는 Tool 이다. 서버 자신의 프록시
+        (`mcpserver`)가 남긴 것만 센다. 노출한 서버의 vMCP 앞단(`virtualmcpserver`)도 그 서버의
+        이벤트로 모이지만, 앞단을 거친 호출은 서버의 프록시에도 닿으므로 한 번만 센다 (P54 11절)."""
         if (hit := self._cache.get((doc.id, window, tz))) is not None:
             return hit
         rev = doc.deployed
@@ -78,7 +81,7 @@ class McpMetricsReports:
         if rev is not None:
             versions = await self.backend_apis.get_versions(version_refs_of(rev))
             names = set(advertised_tools_of(rev, versions))
-        out = await self._report(doc.id, window, tz, names, backends=None)
+        out = await self._report(doc.id, window, tz, names, backends=None, proxy_kind=APP_MCPSERVER)
         out["source"]["audit"] = "on"
         self._cache.put((doc.id, window, tz), out)
         return out
@@ -120,11 +123,12 @@ class McpMetricsReports:
         names: set[str],
         *,
         backends: dict[str, Any] | None,
+        proxy_kind: str | None = None,
     ) -> dict[str, Any]:
         now = utcnow()
         since, steps, day_tz = window_steps(window, tz, now)
         sums = await self.store.window_sums(
-            instance_id, since, now, names=sorted(names), day_tz=day_tz
+            instance_id, since, now, names=sorted(names), day_tz=day_tz, proxy_kind=proxy_kind
         )
         types = {row["_id"]: row for row in sums["types"]}
         calls = types.get(MCP_TOOL_CALL)

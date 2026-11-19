@@ -7,13 +7,15 @@
 (`claimed`·`claim`)은 (클러스터, 네임스페이스, 이름) 마다 유일한 기록이라 함께 도는 두 배포를
 가른다. 적용 직전 막이(`require_own`)는 클러스터의 Entry 라벨을 보고 기록 없는 옛 Entry 를
 덮어쓰지 않는다. `GatewayEntries` 는 서비스가 생성자에서 만든다.
+
+노출한 MCP Server 의 vMCP 앞단도 Entry 이름 `front-<k8s.name>` 을 같은 기록에 선점한다 (P54 5절).
 """
 
 from __future__ import annotations
 
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable, Collection
-from contextlib import asynccontextmanager
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import datetime
 from typing import Any
 
@@ -30,6 +32,7 @@ from daegam.store.gateway_entry_names import (
     entry_claim_id,
 )
 from daegam.store.gateways import Gateway, GatewayBackendSnapshot, GatewayK8s, MongoGatewayStore
+from daegam.store.mcp_servers import MongoMCPServerStore
 from daegam.store.name_claims import CLAIM_GRACE
 
 logger = logging.getLogger("daegam.gateways")
@@ -49,18 +52,22 @@ async def entry_owners(client: KubeClient, namespace: str) -> dict[str, str | No
 
 
 class GatewayEntries:
-    """Entry 이름의 배포 전 검사, 선점과 그 놓기, 적용 직전 막이, 자기 Entry 만 지우기."""
+    """Entry 이름의 배포 전 검사, 선점과 그 놓기, 적용 직전 막이, 자기 Entry 만 지우기. 노출한 MCP
+    Server 의 vMCP 앞단도 Entry 이름 `front-<k8s.name>` 을 같은 기록에 선점한다 (P54 5절). servers
+    는 쓸기가 그 이름을 쓰고 있는 것으로 읽는 MCP Server 의 스토어다."""
 
     def __init__(
         self,
         *,
         names: MongoEntryNameStore,
         gateways: MongoGatewayStore,
+        servers: MongoMCPServerStore,
         k8s: Callable[[Gateway], GatewayK8s],
         conflict: Callable[..., ServiceError],
     ):
         self.names = names
         self.gateways = gateways
+        self.servers = servers
         self._k8s = k8s
         # 서비스의 409 k8s_name_conflict 생성 (`BaseInstanceService._name_conflict`)
         self._conflict = conflict
@@ -95,9 +102,15 @@ class GatewayEntries:
         """배포 스냅샷의 Entry 이름을 모두 선점하고 새로 넣은 기록을 돌려준다. 자기 기록은 새
         nonce 로 다시 선점한다. 다른 Gateway 가 쥔 이름이 있으면 이 호출이 넣은 것을 지우고 409
         다."""
+        return await self.claim_names(doc, {b.workload for b in doc.deployed_backends})
+
+    async def claim_names(self, doc: Any, names: Collection[str]) -> list[EntryNameClaim]:
+        """`claim` 의 이름을 받는 꼴. 노출한 MCP Server 가 vMCP 앞단의 Entry 이름 하나를 자기 것으로
+        선점할 때도 쓴다 (P54 5절). doc 은 id·tenant·cluster_id 와 이 서비스가 아는 k8s 를 가진
+        문서다."""
         namespace = self._k8s(doc).namespace
         inserted: list[EntryNameClaim] = []
-        for name in sorted({b.workload for b in doc.deployed_backends}):
+        for name in sorted(names):
             try:
                 claim, new = await self._claim_one(doc, namespace, name)
             except ServiceError:
@@ -107,16 +120,13 @@ class GatewayEntries:
                 inserted.append(claim)
         return inserted
 
-    async def _claim_one(
-        self, doc: Gateway, namespace: str, name: str
-    ) -> tuple[EntryNameClaim, bool]:
+    async def _claim_one(self, doc: Any, namespace: str, name: str) -> tuple[EntryNameClaim, bool]:
         """이름 하나를 선점한다. 다른 Gateway 가 쥐고 있으면 그 Gateway 를 gateway_ids 로 실은 409
         다. 선점에 진 뒤 기록을 읽기 전에 쥔 쪽이 놓았으면 한 번 더 선점해 본다. 그래도 쥔 쪽을 읽지
         못할 때만 누구인지 없이 답한다."""
-        key = entry_claim_id(doc.cluster_id or "", namespace, name)
         for _ in range(2):
             got = await self.names.claim(
-                key,
+                self._key(doc, name),
                 resource_id=doc.id,
                 tenant=doc.tenant,
                 cluster_id=doc.cluster_id,
@@ -125,17 +135,29 @@ class GatewayEntries:
             )
             if got is not None:
                 return got
-            holder = await self.names.get(key)
+            holder = await self.holder(doc, name)
             if holder is not None:
                 raise await self.conflict(namespace, name, holder.resource_id)
         raise await self.conflict(namespace, name, None)
 
+    def _key(self, doc: Any, name: str) -> str:
+        """그 문서의 클러스터·네임스페이스에서 Entry 이름 하나의 선점 기록 id."""
+        return entry_claim_id(doc.cluster_id or "", self._k8s(doc).namespace, name)
+
+    async def holder(self, doc: Any, name: str) -> EntryNameClaim | None:
+        """그 문서의 클러스터·네임스페이스에서 Entry 이름 하나를 쥔 선점 기록. 없으면 None 이다."""
+        return await self.names.get(self._key(doc, name))
+
+    def claimed(self, doc: Gateway) -> AbstractAsyncContextManager[None]:
+        """deploying 으로 옮기는 저장 동안 배포 스냅샷의 Entry 이름을 선점한다(`claimed_names`)."""
+        return self.claimed_names(doc, {b.workload for b in doc.deployed_backends})
+
     @asynccontextmanager
-    async def claimed(self, doc: Gateway) -> AsyncIterator[None]:
-        """deploying 으로 옮기는 저장 동안 Entry 이름을 선점한다. 공개 host 의 선점
-        (`ExposureValidationMixin._host_claimed`)과 같이, 블록 안에서 무엇이든 실패하면 이 호출이
-        새로 넣은 기록만 지운다."""
-        inserted = await self.claim(doc)
+    async def claimed_names(self, doc: Any, names: Collection[str]) -> AsyncIterator[None]:
+        """블록 동안 names 를 선점한다. 공개 host 의 선점(`ExposureValidationMixin._host_claimed`)과
+        같이, 블록 안에서 무엇이든 실패하면 이 호출이 새로 넣은 기록만 지운다. vMCP 앞단은 적용 전
+        라벨 검사를 이 블록 안에서 한다 (P54 5절)."""
+        inserted = await self.claim_names(doc, names)
         try:
             yield
         except BaseException:
@@ -149,8 +171,7 @@ class GatewayEntries:
     async def release_except(self, doc: Gateway, keep: Collection[str]) -> None:
         """이 문서의 선점 가운데 지금 클러스터·네임스페이스의 keep 이름이 아닌 것을 읽은 nonce 로
         놓는다. 재배포가 뺀 이름과 실패한 배포가 적용하지 못한 이름이다."""
-        namespace = self._k8s(doc).namespace
-        kept = {entry_claim_id(doc.cluster_id or "", namespace, name) for name in keep}
+        kept = {self._key(doc, name) for name in keep}
         await self._remove([c for c in await self.names.of_resource(doc.id) if c.id not in kept])
 
     async def release_unapplied(
@@ -170,12 +191,15 @@ class GatewayEntries:
         """이 문서가 적용할 Entry 가운데 다른 문서의 라벨(daegam.devops.ai.kr/id)을 단 채 살아 있는
         것의 이름 → 그 문서 id. 선점이 생기기 전에 겹친 Entry 와, 지운 Gateway 의 라벨이 남은 Entry
         다."""
+        return await self.foreign_names(doc, client, [b.workload for b in doc.deployed_backends])
+
+    async def foreign_names(
+        self, doc: Any, client: KubeClient, names: Collection[str]
+    ) -> dict[str, str]:
+        """`foreign` 의 이름을 받는 꼴. names 가운데 다른 문서의 라벨을 단 채 살아 있는 Entry 의
+        이름 → 그 문서 id 다."""
         owners = await entry_owners(client, self._k8s(doc).namespace)
-        return {
-            b.workload: owner
-            for b in doc.deployed_backends
-            if (owner := owners.get(b.workload)) not in (None, doc.id)
-        }
+        return {name: owner for name in names if (owner := owners.get(name)) not in (None, doc.id)}
 
     async def skip_foreign(
         self, doc: Gateway, client: KubeClient, rendered: list[dict[str, Any]]
@@ -199,7 +223,12 @@ class GatewayEntries:
     async def require_own(self, doc: Gateway, client: KubeClient) -> None:
         """적용 직전 막이. 이 문서가 적용할 Entry 가 다른 문서의 것이면 force SSA 로 덮어쓰지 않게
         아무것도 쓰기 전에 409 로 멈춘다."""
-        foreign = await self.foreign(doc, client)
+        await self.require_own_names(doc, client, [b.workload for b in doc.deployed_backends])
+
+    async def require_own_names(self, doc: Any, client: KubeClient, names: Collection[str]) -> None:
+        """`require_own` 의 이름을 받는 꼴. 노출한 MCP Server 의 vMCP 앞단도 적용 전에 쓴다 (P54
+        5절)."""
+        foreign = await self.foreign_names(doc, client, names)
         if foreign:
             name = min(foreign)
             raise await self.conflict(self._k8s(doc).namespace, name, foreign[name])
@@ -215,10 +244,11 @@ class GatewayEntries:
             await run_in_threadpool(client.delete, TOOLHIVE_API, ENTRY_KIND, name, namespace)
 
     async def sweep(self, now: datetime) -> dict[str, list[str]]:
-        """리컨실 단계. 유예(`CLAIM_GRACE`)가 지난 선점 가운데 그 Gateway 가 더는 쓰지 않는 이름의
-        것을 읽은 nonce 로 지운다. 전이를 저장하기 전에 죽은 배포와, 재배포가 이름을 빼고 놓기 전에
-        죽은 자리가 남긴 기록이다."""
+        """리컨실 단계. 유예(`CLAIM_GRACE`)가 지난 선점 가운데 그 Gateway 나 노출한 MCP Server 가
+        더는 쓰지 않는 이름의 것을 읽은 nonce 로 지운다. 전이를 저장하기 전에 죽은 배포와, 재배포가
+        이름을 빼거나 노출을 끄고 놓기 전에 죽은 자리가 남긴 기록이다."""
         in_use = await self.gateways.entry_names_in_use()
+        in_use |= await self.servers.front_entries_in_use()
         released: list[str] = []
         for claim in await self.names.all():
             # 리컨실 리스를 항목마다 늘린다 (P67)

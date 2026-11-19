@@ -8053,6 +8053,8 @@ export interface components {
          *     render_epochs 는 이 코드가 종류마다 쓰는 렌더 번호이고, kinds 는 클러스터 id 마다 종류별 문서
          *     수다. fallbacks 는 클러스터 id 마다, 게이트를 지나지 못해 그 기능을 뺀 대체 형태로 도는 살아
          *     있는 문서의 수를 기능 이름마다 센 것이다. 그런 문서가 없는 클러스터와 기능은 빠진다.
+         *     handovers 는 클러스터 id 마다, 노출 앞단을 vMCP 로 넘겨받는 중인 MCP Server 를 넘겨받기의
+         *     단계마다 센 것이다(P54 11절). 그런 서버가 없는 클러스터와 단계는 빠진다.
          *     redis_plain_consumers 는 테넌트마다, TLS 끝점을 가진 Redis 에 아직 평문 포트로 붙는 소비자다(P61
          *     5절 4단계). shipped_redis_cert_expires_at 은 home 이 함께 올린 Redis 의 TLS 서버 인증서가 끝나는
          *     때이고, expiring 은 그것이 30일 안인가다(P61 F3). turn_tokens 는 턴 위임 토큰의 게이트와 그것을
@@ -8077,6 +8079,12 @@ export interface components {
             };
             /** Fallbacks */
             fallbacks: {
+                [key: string]: {
+                    [key: string]: number;
+                };
+            };
+            /** Handovers */
+            handovers: {
                 [key: string]: {
                     [key: string]: number;
                 };
@@ -13941,6 +13949,14 @@ export interface components {
             /** Version */
             version: number;
         };
+        /**
+         * Step
+         * @description 옛 앞단을 넘겨받는 단계 (P54 6절). 렌더가 닿은 단계를 서버의 판에 표시로 싣는다
+         *     (`front_rev`). switch 와 missing 은 렌더가 적지 않는다. 그 렌더는 drain 이나 wait·held 에
+         *     닿는다. missing 은 vMCP 앞단의 VirtualMCPServer 가 없는 서버이고 렌더가 다시 만든다.
+         * @enum {string}
+         */
+        Step: "wait" | "switch" | "drain" | "delete" | "held" | "missing";
         /**
          * StrictApplyCheckOut
          * @description failures 는 cluster:write 에게만 차 있고 그 밖에는 빈 목록이다(`api/clusters.py` `_out`).

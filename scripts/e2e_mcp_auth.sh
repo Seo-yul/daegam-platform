@@ -15,11 +15,12 @@
 #   STEP 4  vMCP: 무토큰 401(WWW-Authenticate) / 타 그룹 토큰 200+빈 목록+call denied / 테넌트 그룹 성공
 #   STEP 5  client credentials 토큰(cid=agent-dev)으로 tools/call Add(3,4) -> 7 (cid 정책 통과)
 #   STEP 6  agent_client_ids 에서 agent-dev 제거 + redeploy -> 같은 토큰의 tools/call 이 인가 거부
-#   STEP 7  MCP Server 를 복제해 http://calc-auth.e2e.local/mcp 로 노출 배포 → 앞단 MCPRemoteProxy expose-<k8s.name> 이
-#           oidcConfigRef{daegam-oidc, daegam-mcp, resourceUrl=external_url}+trustProxyHeaders 로 Ready,
-#           external_url 무토큰 401(WWW-Authenticate), 테넌트 그룹 토큰 tools/call Add(3,4) -> 7,
-#           두 꼴의 RFC 9728 메타데이터는 200 이고 Ingress 밖 경로(/health)는 404, 앞단 토큰은 그 MCP Server 의
-#           audience 를 함께 싣는다(P50 9절), 내부 프록시 경로(mcp-<k8s.name>-proxy:8080)는 무토큰과 사람 토큰을
+#   STEP 7  MCP Server 를 복제해 http://calc-auth.e2e.local/mcp 로 노출 배포 → 앞단은 그 서버 하나를 백엔드로 둔 vMCP
+#           front-<k8s.name> 이고(P54 5절) incomingAuth oidc{daegam-oidc, daegam-mcp, resourceUrl=external_url}와 Cedar
+#           참조로 Ready, Ingress 는 vmcp-front-<k8s.name>:4483 을 가리킨다. external_url 무토큰 401(WWW-Authenticate),
+#           테넌트 그룹 토큰 tools/call Add(3,4) -> 7, 두 꼴의 RFC 9728 메타데이터는 200 이고 Ingress 밖 경로(/health)는
+#           404, 앞단의 Entry 는 headerInjection 으로 Secret svc-expose-<k8s.name> 의 토큰을 보내고 그 토큰은 그 MCP Server
+#           의 audience 를 함께 싣는다(P50 9절), 내부 프록시 경로(mcp-<k8s.name>-proxy:8080)는 무토큰과 사람 토큰을
 #           401 로, 그 서버의 audience 를 실은 서비스 토큰을 200 으로 받는다.
 #           턴 위임 토큰(P53 3.2절): oidc 의 앞단 정책에는 묶이지 않은 위임 토큰을 막는 forbid 가 없다(local 만 렌더한다).
 #           그래도 위임 토큰의 모양(그룹 없이 act·bound_to·tenant)인 토큰은 그룹과 cid 로만 받는 바탕 정책이 거절하고,
@@ -230,7 +231,7 @@ done
 [ -n "$denied" ] || die 6 "cid call still succeeds after removing $AGENT_CLIENT_ID from cid policy"
 pass 6 "cid call denied after removing $AGENT_CLIENT_ID from cid policy (rc=$rc err=$(head -c 80 "$WORK/mcp.err" | tr '\n' ' '))"
 
-# ---------- 7. 노출된 MCP Server: 앞단 프록시 oidc, 무토큰 401, 토큰 7, 내부 경로 무인증 ----------
+# ---------- 7. 노출된 MCP Server: vMCP 앞단 oidc, 무토큰 401, 토큰 7, 내부 경로 무인증 ----------
 LB_IP="$("${K[@]}" -n "$TRAEFIK_NS" get svc "$TRAEFIK_SVC" -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)"
 [ -n "$LB_IP" ] || die 7 "Service $TRAEFIK_NS/$TRAEFIK_SVC has no LoadBalancer IP (is Traefik installed?)"
 # 한 문서는 배포를 하나만 가진다. 같은 정의를 노출로 한 벌 더 띄우려면 복제한 뒤 배포한다 (D42). 이전 실행이 남긴
@@ -256,10 +257,24 @@ for ((i = 0; i < READY_TIMEOUT / 5; i++)); do
   sleep 5
 done
 echo "  status.exposure: $front"
-"${K[@]}" -n "$NS" get mcpremoteproxy "expose-$MX_NAME" -o json >"$WORK/front.json" || die 7 "MCPRemoteProxy expose-$MX_NAME missing"
-FRONT="$(json_of "$WORK/front.json" 'd["status"].get("phase"), d["spec"]["oidcConfigRef"]["name"], d["spec"]["oidcConfigRef"]["audience"], d["spec"]["oidcConfigRef"].get("resourceUrl"), d["spec"].get("trustProxyHeaders"), "authz" if d["spec"].get("authzConfig") or d["spec"].get("authzConfigRef") else "no-authz"')"
-[ "$FRONT" = "Ready daegam-oidc daegam-mcp $EXT_URL True authz" ] || die 7 "front proxy spec/status: $FRONT"
-# 앞단의 서비스 토큰은 이 MCP Server 하나를 연다 (P50 9절)
+# 앞단은 이 서버 하나를 백엔드로 둔 vMCP front-<k8s.name> 이다 (P54 5절). vMCP 에는 trustProxyHeaders 가 없고 외부 주소는
+# resourceUrl 이 정한다
+FX="front-$MX_NAME"
+"${K[@]}" -n "$NS" get virtualmcpserver "$FX" -o json >"$WORK/front.json" || die 7 "VirtualMCPServer $FX missing"
+FRONT="$(json_of "$WORK/front.json" '(d["status"].get("phase"), d["spec"]["incomingAuth"]["type"],
+  d["spec"]["incomingAuth"]["oidcConfigRef"]["name"], d["spec"]["incomingAuth"]["oidcConfigRef"]["audience"],
+  d["spec"]["incomingAuth"]["oidcConfigRef"].get("resourceUrl"),
+  "authz" if d["spec"]["incomingAuth"].get("authzConfig") or d["spec"]["incomingAuth"].get("authzConfigRef") else "no-authz")')"
+[ "$FRONT" = "Ready oidc daegam-oidc daegam-mcp $EXT_URL authz" ] || die 7 "vMCP front spec/status: $FRONT"
+backend="$("${K[@]}" -n "$NS" get ingress "$MX_NAME" -o jsonpath='{.spec.rules[0].http.paths[0].backend.service.name}:{.spec.rules[0].http.paths[0].backend.service.port.number}')" \
+  || die 7 "Ingress $MX_NAME missing"
+[ "$backend" = "vmcp-$FX:4483" ] || die 7 "Ingress $MX_NAME backend $backend (want vmcp-$FX:4483)"
+# 앞단의 Entry 는 서비스 토큰을 headerInjection 으로 보낸다. 그 토큰은 이 MCP Server 하나를 연다 (P50 9절)
+ENTRY_AUTH="$("${K[@]}" -n "$NS" get mcpserverentry "$FX" -o jsonpath='{.spec.externalAuthConfigRef.name}')" || die 7 "MCPServerEntry $FX missing"
+[ "$ENTRY_AUTH" = "$FX" ] || die 7 "MCPServerEntry $FX sends auth config '$ENTRY_AUTH' (want $FX)"
+INJECT="$("${K[@]}" -n "$NS" get mcpexternalauthconfig "$FX" -o jsonpath='{.spec.type} {.spec.headerInjection.headerName} {.spec.headerInjection.valueSecretRef.name}')" \
+  || die 7 "MCPExternalAuthConfig $FX missing"
+[ "$INJECT" = "headerInjection Authorization svc-expose-$MX_NAME" ] || die 7 "MCPExternalAuthConfig $FX: $INJECT"
 FRONT_AUD="$(token_aud "$NS" "svc-expose-$MX_NAME")" || die 7 "Secret svc-expose-$MX_NAME has no readable token"
 [ "$FRONT_AUD" = "[\"daegam-internal:$TENANT\", \"daegam-internal:$TENANT:$MX_ID\"]" ] || die 7 "front token aud: $FRONT_AUD"
 code=""
@@ -271,7 +286,7 @@ done
 WWW="$(hdr www-authenticate "$WORK/rpc.hdr")"
 [ -n "$WWW" ] || die 7 "401 via ingress without WWW-Authenticate"
 # 노출은 MCP 와 RFC 9728 메타데이터 경로만 연다 (P50 5절). 메타데이터는 두 꼴 모두 이 주소를 resource 로 답하고,
-# 앞단 프록시의 /health 는 Traefik 의 404 다. 옛 렌더(Prefix /)에서는 /health 가 200 이다
+# 앞단의 /health 는 Traefik 의 404 다. 옛 렌더(Prefix /)에서는 /health 가 200 이다
 for p in /.well-known/oauth-protected-resource /.well-known/oauth-protected-resource/mcp; do
   code="$(get_ingress "http://$EXPOSE_HOST$p" "$EXPOSE_HOST:80:$LB_IP")"
   [ "$code" = "200" ] || die 7 "GET http://$EXPOSE_HOST$p via Traefik -> $code (expected 200)"
@@ -279,9 +294,10 @@ for p in /.well-known/oauth-protected-resource /.well-known/oauth-protected-reso
 done
 code="$(get_ingress "http://$EXPOSE_HOST/health" "$EXPOSE_HOST:80:$LB_IP")"
 [ "$code" = "404" ] || die 7 "GET http://$EXPOSE_HOST/health via Traefik -> $code (only /mcp and the metadata path are routed)"
-code="$(mcp_ingress "$EXT_URL" "$EXPOSE_HOST:80:$LB_IP" tools/call '{"name": "Add", "arguments": {"a": 3, "b": 4}}' "$GROUP_TOKEN")"
+# 막 뜬 vMCP 앞단은 서버를 라우팅하기까지 ROUTE_WAIT 안에서 다시 본다(lib/mcp_rpc.sh)
+code="$(ingress_until "$ADD_SEVEN" "$EXT_URL" "$EXPOSE_HOST:80:$LB_IP" tools/call '{"name": "Add", "arguments": {"a": 3, "b": 4}}' "$GROUP_TOKEN")"
 [ "$code" = "200" ] || die 7 "group token tools/call via $EXT_URL -> $code: $(cat "$WORK/rpc.raw")"
-rpc_ 'json.dumps(d["result"]["content"])' | grep -q 7 || die 7 "Add via ingress without 7: $(cat "$WORK/rpc.json")"
+[ "$(rpc_ "$ADD_SEVEN")" = True ] || die 7 "Add via ingress without 7: $(cat "$WORK/rpc.json")"
 # 타 그룹 토큰은 인증은 통과해도 Cedar 가 막는다 (HTTP 403 이거나 JSON-RPC error, 또는 isError 결과)
 code="$(mcp_ingress "$EXT_URL" "$EXPOSE_HOST:80:$LB_IP" tools/call '{"name": "Add", "arguments": {"a": 3, "b": 4}}' "$OTHER_TOKEN")"
 if [ "$code" = "200" ] && [ "$(rpc_ '"ok" if (d or {}).get("result") and not d["result"].get("isError") else "denied"')" = "ok" ]; then
@@ -289,7 +305,7 @@ if [ "$code" = "200" ] && [ "$(rpc_ '"ok" if (d or {}).get("result") and not d["
 fi
 OTHER_CODE="$code"
 # 턴 위임 토큰 (P53 3.2절). 앞단의 forbid 는 local 모드에만 렌더된다. oidc 에서 위임 토큰의 모양을 막는 것은 바탕 정책이다
-FRONT_POLICIES="$(authz_policies mcpremoteproxy "$NS" "expose-$MX_NAME")"
+FRONT_POLICIES="$(authz_policies virtualmcpserver "$NS" "$FX")"
 if echo "$FRONT_POLICIES" | grep -q claim_bound_to; then die 7 "the oidc front renders the delegation forbid (local mode only): $FRONT_POLICIES"; fi
 BOUND_TOKEN="$(user_token '{"sub": "e2e-person", "extra": {"act": {"sub": "svc:agent:e2e"}, "bound_to": "mcp-server:'"$MX_ID"'", "tenant": "'"$TENANT"'"}}')" \
   || die 7 "a token shaped like a turn token from $OIDC/_test/token failed"
@@ -314,7 +330,7 @@ SVC_TOKEN="$(svc_token "$MX_ID")" || die 7 "svc_token.py failed"
 rc="$(mcp --token "$SVC_TOKEN" list "http://127.0.0.1:${PROXY_PORT}/mcp")"
 [ "$rc" = "0" ] || die 7 "internal proxy tools/list with service token rc=$rc: $(cat "$WORK/mcp.err")"
 [ -n "$(mcp_json '[t for t in d["tools"] if t.endswith("Add")][0]')" ] || die 7 "internal proxy lists no Add: $(mcp_json 'd["tools"]')"
-pass 7 "exposed $EXPOSE_NAME ($MX_NAME) $EXT_URL: front expose-$MX_NAME Ready (oidcConfigRef daegam-oidc/daegam-mcp resourceUrl=$EXT_URL, trustProxyHeaders), no-token 401 (WWW-Authenticate: $WWW), metadata 200, /health 404, group token Add -> 7, other-group -> $OTHER_CODE, internal mcp-$MX_NAME-proxy: no-token 401, human token 401, service token 200; turn-token shape (bound_to, act, no groups) -> $BOUND_CODE, IdP token with act and $MCP_GROUP -> 7, no delegation forbid on the oidc front"
+pass 7 "exposed $EXPOSE_NAME ($MX_NAME) $EXT_URL: vMCP front $FX Ready (oidcConfigRef daegam-oidc/daegam-mcp resourceUrl=$EXT_URL), Ingress -> $backend, Entry token by headerInjection of svc-expose-$MX_NAME, no-token 401 (WWW-Authenticate: $WWW), metadata 200, /health 404, group token Add -> 7, other-group -> $OTHER_CODE, internal mcp-$MX_NAME-proxy: no-token 401, human token 401, service token 200; turn-token shape (bound_to, act, no groups) -> $BOUND_CODE, IdP token with act and $MCP_GROUP -> 7, no delegation forbid on the oidc front"
 
 # ---------- 7b. 새 서버는 자기 audience 로만 검증한다 (P50 9절, G9 2단계) ----------
 # 복제본은 이 실행이 새로 만든 문서라 처음부터 옮겨 가 있다(clone_fresh). 1단계 렌더는 테넌트 audience 라 여기서 멈춘다
@@ -369,12 +385,9 @@ done
 [ "$rolling" = "[]" ] || die 7r "the front did not take the rule within ${READY_TIMEOUT}s: $rolling"
 RULE_TOKEN="$(user_token '{"sub": "member-ruled", "groups": ["'"$MCP_GROUP"'", "'"$RULE_GROUP"'"]}')" \
   || die 7r "an IdP token with $MCP_GROUP and $RULE_GROUP from $OIDC/_test/token failed"
-code=""
-for ((i = 0; i < 12; i++)); do  # 앞단의 새 파드가 첫 요청에서 JWKS 를 받는다
-  code="$(mcp_ingress "$EXT_URL" "$EXPOSE_HOST:80:$LB_IP" tools/call '{"name": "Add", "arguments": {"a": 3, "b": 4}}' "$RULE_TOKEN")"
-  [ "$code" = 200 ] && break; sleep 5
-done
-{ [ "$code" = 200 ] && rpc_ 'json.dumps(d["result"]["content"])' | grep -q 7; } \
+# 앞단의 새 파드는 첫 요청에서 JWKS 를 받고, 서버를 라우팅하기까지 ROUTE_WAIT 안에서 다시 본다(lib/mcp_rpc.sh)
+code="$(ingress_until "$ADD_SEVEN" "$EXT_URL" "$EXPOSE_HOST:80:$LB_IP" tools/call '{"name": "Add", "arguments": {"a": 3, "b": 4}}' "$RULE_TOKEN")"
+{ [ "$code" = 200 ] && [ "$(rpc_ "$ADD_SEVEN")" = True ]; } \
   || die 7r "a token with $RULE_GROUP through the front -> $code: $(cat "$WORK/rpc.raw")"
 code="$(mcp_ingress "$EXT_URL" "$EXPOSE_HOST:80:$LB_IP" tools/list '{}' "$GROUP_TOKEN")"
 { [ "$code" = 200 ] && [ "$(rpc_ '((d or {}).get("result") or {}).get("tools")')" = "[]" ]; } \
@@ -410,7 +423,9 @@ api GET /hub >/dev/null
 [ "$(jq_ "[i['id'] for i in d if i['id']=='$HUB_ID']")" = "[]" ] || die 9 "hub item $HUB_ID survived deleting $MS_NAME"
 gone=""
 for ((i = 0; i < 24; i++)); do
-  left="$("${K[@]}" -n "$NS" get "ingress/$MX_NAME" "networkpolicy/daegam-expose-$MX_NAME" "mcpremoteproxy/expose-$MX_NAME" -o name --ignore-not-found 2>/dev/null | wc -l | tr -d ' ')"
+  left="$("${K[@]}" -n "$NS" get "ingress/$MX_NAME" "networkpolicy/daegam-expose-$MX_NAME" "virtualmcpserver/front-$MX_NAME" \
+    "mcpgroup/front-$MX_NAME" "mcpserverentry/front-$MX_NAME" "mcpauthzconfig/front-$MX_NAME-authz" \
+    "mcpexternalauthconfig/front-$MX_NAME" -o name --ignore-not-found 2>/dev/null | wc -l | tr -d ' ')"
   [ "$left" = "0" ] && { gone=1; break; }; sleep 5
 done
 [ -n "$gone" ] || die 9 "exposure objects of $MX_NAME still present"

@@ -47,9 +47,8 @@ from daegam.k8s.gates import (
     tenant_secret_refusal,
     toolhive_has,
 )
-from daegam.k8s.labels import LABEL_ID, LABEL_PROFILE_REVISION, stable_hash
+from daegam.k8s.labels import LABEL_ID, LABEL_PROFILE_REVISION, LABEL_RESOURCE, stable_hash
 from daegam.k8s.merge import (
-    EXPOSE_PROXY_LOCKED_PATHS,
     IGNORED_BY_OPERATOR,
     LOCKED_PATHS,
     locked_path_strings,
@@ -71,9 +70,9 @@ from daegam.k8s.templates.common import (
     rolled_out,
     template_annotation,
 )
-from daegam.k8s.templates.exposure import expose_proxy_name
 from daegam.k8s.templates.mcpserver import SESSION_REPLICAS, token_key
 from daegam.k8s.templates.svc_token import expose_svc_name, secret_value, svc_token_rev
+from daegam.k8s.templates.vmcp import GROUP_ENTRY_KINDS
 from daegam.pem import ca_sha256
 from daegam.secrets import K8sSecretStore
 from daegam.services.advanced_edit import AdvancedEditor
@@ -81,7 +80,6 @@ from daegam.services.authz_configs import (
     AUTHZ_WAIT_SECONDS,
     REAPPLY_AUTHZ_WAIT_SECONDS,
     apply_docs,
-    apply_in_order,
     delete_authz_config,
 )
 from daegam.services.backend_apis import select_changes
@@ -94,6 +92,7 @@ from daegam.services.condition_records import (
 )
 from daegam.services.data_plane_auth import (
     KIND_MCP_SERVER,
+    front_rev,
     own_audience_rev,
     redis_tls_rev,
     render_epoch,
@@ -101,21 +100,36 @@ from daegam.services.data_plane_auth import (
 )
 from daegam.services.data_services import ClusterMismatch, check_same_cluster
 from daegam.services.exposure import (
+    RESOURCE_MCP_FRONT,
     ExposureInput,
+    ExposureReading,
     ExposureValidationMixin,
+    FrontInputs,
     delete_expose_objects,
     exposure_from_input,
     exposure_to_input,
-    mcp_expose_docs,
+    front_policies,
     status_base,
     unauthenticated_warnings,
 )
+from daegam.services.exposure_front import (
+    FRONT_MARKS,
+    ExposureFronts,
+    FrontPass,
+    Step,
+    front_locked_paths,
+    handover_warning,
+    require_vmcp_front,
+)
+from daegam.services.gateway_entries import GatewayEntries
+from daegam.services.gateway_timeouts import longest_backend_timeout
 from daegam.services.hub import HubError, HubService
 from daegam.services.instance_base import (
     EDIT_STATES,
     IN_PROGRESS,
     PROVISION_STATES,
     BaseInstanceService,
+    delete_labeled,
 )
 from daegam.services.instance_status import (
     ROLLOUT_WATCH,
@@ -132,10 +146,7 @@ from daegam.services.mcp_inputs import (
     snapshot_fits,
 )
 from daegam.services.mcp_spec import ProfileValidationError, scope_for, validate_tools
-from daegam.services.proxy_accounts import (
-    proxy_service_account,
-    require_proxy_account,
-)
+from daegam.services.proxy_accounts import proxy_service_account
 from daegam.services.redis_tls_consumers import RecentReads
 from daegam.services.references import MCP_SERVER_IN_USE, ReferenceService
 from daegam.services.rule_compile import (
@@ -186,6 +197,7 @@ from daegam.store.base import hash_token, issue_token, utcnow
 from daegam.store.clusters import DEFAULT_REDIS_CA_SECRET, Cluster
 from daegam.store.data_services import REDIS_CA_KEY, DataService, MongoDataServiceStore
 from daegam.store.exposure_hosts import MongoExposureHostStore
+from daegam.store.gateway_entry_names import MongoEntryNameStore
 from daegam.store.gateways import MongoGatewayStore
 from daegam.store.hub import HubItem
 from daegam.store.mcp_servers import (
@@ -259,6 +271,7 @@ class MCPServerService(ExposureValidationMixin, BaseInstanceService[MCPServer]):
         svc_tokens: SvcTokens,
         claims: Claims,
         exposure_hosts: MongoExposureHostStore,
+        entry_names: MongoEntryNameStore,
     ):
         self.servers = servers
         # 배포 해제·삭제 가드가 참조를 센다 (P75 2절)
@@ -283,6 +296,15 @@ class MCPServerService(ExposureValidationMixin, BaseInstanceService[MCPServer]):
         self.claims = claims
         # 공개 host 의 선점 기록 (P70). 노출을 저장하기 전에 host 를 잡는다
         self.exposure_hosts = exposure_hosts
+        # vMCP 앞단의 Entry 이름은 Gateway 의 Entry 이름과 같은 선점 기록을 쓴다 (P54 5절, D82)
+        self.entries = GatewayEntries(
+            names=entry_names,
+            gateways=gateway_instances,
+            servers=servers,
+            k8s=self._k8s,
+            conflict=self._name_conflict,
+        )
+        self.fronts = ExposureFronts(self.entries, MCPServerError, self._name_conflict)
         # Advanced 편집 (F7a). MCPServer 는 플랫폼 잠금에 proxyrunner 가 덮어쓰는 경로까지 막는다
         self.editor: AdvancedEditor[MCPServer] = AdvancedEditor(
             kind="MCPServer",
@@ -455,7 +477,12 @@ class MCPServerService(ExposureValidationMixin, BaseInstanceService[MCPServer]):
         out: set[int] = set()
         labeled = False
         for pod in pods:
-            label = ((pod.get("metadata") or {}).get("labels") or {}).get(LABEL_PROFILE_REVISION)
+            labels = (pod.get("metadata") or {}).get("labels") or {}
+            if labels.get(LABEL_RESOURCE) == RESOURCE_MCP_FRONT:
+                # vMCP 앞단의 파드도 이 서버의 id 와 리비전 라벨을 단다. 백엔드 파드가 아니다
+                # (P54 5절)
+                continue
+            label = labels.get(LABEL_PROFILE_REVISION)
             labeled = labeled or label is not None
             if (pod.get("status") or {}).get("phase") in ("Succeeded", "Failed"):
                 continue
@@ -710,8 +737,8 @@ class MCPServerService(ExposureValidationMixin, BaseInstanceService[MCPServer]):
             inp, tenant=tenant, name=doc.name, cluster=cluster, namespace=ns_name
         )
         if exposure_snapshot.enabled:
-            # 새 노출 앞단은 역할 없는 ServiceAccount 로만 만든다 (P50 2절·10절)
-            require_proxy_account(cluster, MCPServerError)
+            # 새 노출의 앞단은 vMCP 다. 그 게이트를 지나지 못한 클러스터는 거절한다 (P54 5절)
+            require_vmcp_front(cluster, MCPServerError)
         self._stamp_deploying(
             doc,
             cluster=cluster,
@@ -750,7 +777,6 @@ class MCPServerService(ExposureValidationMixin, BaseInstanceService[MCPServer]):
         doc.deployed_inputs = inputs_from_documents(
             rev, backends, services, deploying_since=doc.deploying_since
         )
-        k8s = self._k8s(doc)
         # 저장된 overrides 가 지금 잠긴 경로를 건드리면 토큰·Secret 을 만들기 전에 멈춘다
         await self.editor.check_stored_rendered(doc)
 
@@ -776,21 +802,35 @@ class MCPServerService(ExposureValidationMixin, BaseInstanceService[MCPServer]):
         )
         # 세션 저장소를 TLS 로 렌더했는지가 이 배포의 판단이다. 다시 렌더는 그것을 따른다 (P61)
         doc.deployed_inputs.session_tls = session_tls_of(docs[-1])
-        # 4. 노출 (앞단 MCPRemoteProxy → Ingress → NetworkPolicy). MCPServer 가 이미 있으면 앞단을
-        # 먼저 적용하고 받아들여지기를 기다린다. 앞단이 실패하면 서버의 Cedar 가 바뀌기 전에
-        # 배포가 멈춘다 (P52 2절). 새 서버는 앞단 문서가 그 uid 를 써서 서버가
-        # 먼저다. 껐으면 이름으로 정리한다
-        front_first = doc.exposure.enabled and bool(doc.k8s_uid)
-        if front_first:
-            await self._apply_front(doc, client, effective, fresh=False)
+        # 4. 노출 (Ingress 가 가리키는 앞단 → Ingress → NetworkPolicy, 다른 앞단의 몫). MCPServer 가
+        # 이미 있으면 앞단을 먼저 적용하고 받아들여지기를 기다린다. 앞단이 실패하면 서버의 Cedar 가
+        # 바뀌기 전에 배포가 멈춘다 (P52 2절, P54 7절). 새 서버는 앞단 문서가 그 uid 를 써서 서버가
+        # 먼저다. 다른 앞단의 몫은 서버 뒤다 (P54 5절). 껐으면 이름으로 정리한다
+        if not doc.exposure.enabled:
+            await self._apply_server(doc, client, docs)
+            await self._drop_exposure(doc, client)
+            return
+        front = None
+        if doc.k8s_uid:
+            front = await self._apply_front(doc, client, effective, fresh=False)
         await self._apply_server(doc, client, docs)
-        if doc.exposure.enabled and not front_first:
-            await self._apply_front(doc, client, effective, fresh=False)
-        elif not doc.exposure.enabled:
-            await run_in_threadpool(
-                delete_expose_objects, client, k8s.name, k8s.namespace, front_proxy=True
-            )
-            doc.svc_token_servers = []
+        if front is None:
+            front = await self._apply_front(doc, client, effective, fresh=False)
+        self._stamp_front(
+            doc, await self.fronts.finish(doc, client, front, wait=AUTHZ_WAIT_SECONDS)
+        )
+
+    async def _drop_exposure(self, doc: MCPServer, client: KubeClient) -> None:
+        """노출을 끈 서버의 두 앞단과 Ingress·NetworkPolicy 를 지우고 vMCP 앞단의 Entry 이름을
+        놓는다 (P54 6절)."""
+        k8s = self._k8s(doc)
+        await run_in_threadpool(
+            delete_expose_objects, client, k8s.name, k8s.namespace, front_proxy=True
+        )
+        # vMCP 앞단의 Entry 와 그룹은 이름이 남의 것과 겹칠 수 있어 이 서버의 라벨로만 지운다
+        await delete_labeled(client, GROUP_ENTRY_KINDS, k8s.namespace, doc.id)
+        await self.entries.release_except(doc, ())
+        doc.svc_token_servers = []
 
     async def _ensure_spec_tokens(
         self,
@@ -852,17 +892,29 @@ class MCPServerService(ExposureValidationMixin, BaseInstanceService[MCPServer]):
         await run_in_threadpool(client.apply, render_token_secret(doc, tokens))
 
     async def _apply_consumer(self, doc: MCPServer, client: KubeClient, *, rotate: bool) -> None:
-        """노출했으면 앞단을 먼저 다시 적용하고(회전이면 새 토큰으로), 회전이 아니면 MCPServer 를
-        배포 스냅샷으로 다시 적용한다 (P50 1절). 인증 입력은 앞단이 실으므로 앞단이 먼저다.
+        """노출했으면 Ingress 가 가리키는 앞단을 먼저 다시 적용하고(회전이면 새 토큰으로), 회전이
+        아니면 MCPServer 를 배포 스냅샷으로 다시 적용한 뒤 다른 앞단의 몫을 한다 (P50 1절, P54 5절).
+        인증 입력은 앞단이 실으므로 앞단이 먼저다.
         스냅샷이 지금 배포의 것이 아니면 500 integrity_error 로 막는다. MCPServer 단계(스냅샷 확인,
         저장된 overrides 의 검사, 적용)가 실패해도 앞단은 이미 새 인증으로 돌고, 실패는 그대로
         올라가 재적용이 이 문서를 막거나 미룬다. 회전은 앞단 토큰의 일이라 MCPServer 를 건드리지
         않는다. 스펙 토큰 Secret 은 평문이 발급 때만 있으므로 다시 쓰지 않는다."""
         effective = EffectiveConfig.model_validate(doc.effective_config)
+        front = None
         if doc.exposure.enabled:
-            await self._apply_front(
+            front = await self._apply_front(
                 doc, client, effective, fresh=rotate, authz_wait=REAPPLY_AUTHZ_WAIT_SECONDS
             )
+        await self._apply_consumer_server(doc, client, rotate=rotate)
+        if front is not None:
+            # 다른 앞단의 몫과 넘겨받기의 다음 단계는 서버 뒤다 (P54 5·6절)
+            step = await self.fronts.finish(doc, client, front, wait=REAPPLY_AUTHZ_WAIT_SECONDS)
+            self._stamp_front(doc, step)
+
+    async def _apply_consumer_server(
+        self, doc: MCPServer, client: KubeClient, *, rotate: bool
+    ) -> None:
+        """`_apply_consumer` 의 MCPServer 단계. 회전은 앞단 토큰의 일이라 건너뛴다."""
         if rotate:
             return
         if server_holds_rules(spec_of_revision(self._pinned(doc))) and not rules_toolhive_ok(
@@ -919,10 +971,11 @@ class MCPServerService(ExposureValidationMixin, BaseInstanceService[MCPServer]):
         *,
         fresh: bool,
         authz_wait: float = AUTHZ_WAIT_SECONDS,
-    ) -> None:
-        """노출 앞단의 서비스 토큰(fresh 면 새로, 아니면 Secret 의 것)과 그 판을 담은 앞단 객체를
-        적용한다. 배포와 서비스 토큰 회전·인증 재적용이 함께 쓴다. 토큰은 이 MCP Server 하나의
-        audience 를 싣는다 (P50 9절)."""
+    ) -> FrontPass:
+        """노출 앞단의 서비스 토큰(fresh 면 새로, 아니면 Secret 의 것)과 그 판을 담은, Ingress 가
+        가리키는 앞단을 적용한다(`ExposureFronts.serve`). 배포와 서비스 토큰 회전·인증 재적용이 함께
+        쓴다. 토큰은 이 MCP Server 하나의 audience 를 싣는다 (P50 9절). 다른 앞단의 몫은 서버 뒤의
+        `ExposureFronts.finish` 다."""
         k8s = self._k8s(doc)
         token = await self.svc_tokens.ensure(
             client,
@@ -936,10 +989,12 @@ class MCPServerService(ExposureValidationMixin, BaseInstanceService[MCPServer]):
         )
         doc.svc_token_rev = svc_token_rev(token)
         doc.svc_token_servers = [doc.id]
-        await apply_in_order(
+        return await self.fronts.serve(
+            doc,
             client,
-            await self._expose_docs(doc, effective, svc_token=token),
-            MCPServerError,
+            await self._cluster_of(doc),
+            await self._front_inputs(doc, effective),
+            svc_token=token,
             wait=authz_wait,
         )
 
@@ -947,9 +1002,12 @@ class MCPServerService(ExposureValidationMixin, BaseInstanceService[MCPServer]):
         """소비자 판에 파드가 믿는 Redis CA 의 지문(P61)과 자기 audience 로 옮겨 갔다는 표시(P50
         9절)를 더한다. 판을 적는 자리는 적용한 렌더의 것만 적으므로(`_stamp_auth`) 옮겨 간 서버와
         CA 가 바뀐 서버는 다시 렌더될 때까지 기대 판과 다르다. audience 표시를 바깥에 두어 옮겨 가는
-        판이 CA 표시와 상관없이 알아보인다."""
+        판이 CA 표시와 상관없이 알아보인다. 맨 바깥은 클러스터가 보이는 넘겨받기의 단계다(P54
+        6절, `ExposureFronts.expected_mark`)."""
         base = await self._base_rev(doc, ts)
-        return own_audience_rev(redis_tls_rev(base, await self._redis_ca(doc)), doc.audience_switch)
+        ca = await self._redis_ca(doc)
+        rev = own_audience_rev(redis_tls_rev(base, ca), doc.audience_switch)
+        return front_rev(rev, self.fronts.expected_mark(doc, rev))
 
     async def _base_rev(self, doc: MCPServer, ts: Any) -> str | None:
         """인증 입력의 소비자 판에 Tool 규칙의 지문을 얹은 것 (P52 2절, `rules_rev`)."""
@@ -979,12 +1037,13 @@ class MCPServerService(ExposureValidationMixin, BaseInstanceService[MCPServer]):
         return mark
 
     async def paced_revs(self, doc: MCPServer, ts: Any) -> frozenset[str | None]:
-        """Redis CA 표시만 다른 판. 표시가 없거나 마지막 렌더의 지문이다. CA 가 바뀐 것은 회수가
-        아니라서 네임스페이스마다의 속도로 간다."""
+        """Redis CA 표시나 넘겨받기의 단계만 다른 판. CA 표시는 없거나 마지막 렌더의 지문이다. CA 가
+        바뀐 것과 넘겨받기는 회수가 아니라서 네임스페이스마다의 속도로 간다 (P54 6절)."""
         base = await self._base_rev(doc, ts)
         return frozenset(
-            own_audience_rev(redis_tls_rev(base, mark), doc.audience_switch)
+            front_rev(own_audience_rev(redis_tls_rev(base, mark), doc.audience_switch), step)
             for mark in (None, doc.redis_ca)
+            for step in FRONT_MARKS
         )
 
     async def _stamp_auth(self, doc: MCPServer, *, rotate: bool = False) -> None:
@@ -996,9 +1055,32 @@ class MCPServerService(ExposureValidationMixin, BaseInstanceService[MCPServer]):
         if rotate:
             return
         ts = await self.tenancy.tenant_settings.get(doc.tenant)
-        doc.set_stamp_base(await self._base_rev(doc, ts))
+        doc.set_stamp_base(await self._base_rev(doc, ts), failures=doc.auth_failures)
         passing = passing_features(await self._cluster_of(doc))
         doc.mark_rendered(_rendered_rev(doc), render_epoch(self.auth_kind, passing))
+
+    @staticmethod
+    def _stamp_front(doc: MCPServer, step: Step | None) -> None:
+        """적용한 렌더가 닿은 넘겨받기의 단계를 판에 얹는다 (P54 6절). held 면 실패 수를 이어 세어
+        재적용의 실패 백오프(5분에서 60분)가 지난 뒤에 다시 본다(`held_until`). 재적용 시각은 두지
+        않아 그 사이의 인증 변경은 도는 옛 앞단에 곧바로 닿는다. 판을 적지 않는 동작(회전)은 두지
+        않는다."""
+        if not doc.stamp_pending:
+            return
+        doc.auth_rev = _rendered_rev(doc, step)
+        if step is Step.HELD:
+            doc.auth_failures = doc.stamp_failures + 1
+
+    async def observe_fronts(self, cluster: Cluster, now: datetime) -> None:
+        """재적용 틱이 클러스터마다 부른다. 노출 앞단을 넘겨받는 서버의 기대 판이 이것을 읽는다
+        (`ExposureFronts.observe`). now 는 그 틱의 때다. 읽지 못하면 그 클러스터의 서버는 적힌
+        단계를 그대로 기대한다."""
+        try:
+            client = await run_in_threadpool(self.cluster_service.client_for, cluster)
+            await self.fronts.observe(cluster, client, now)
+        except Exception as e:  # noqa: BLE001 - 클러스터 스윕이 같은 실패를 따로 적는다
+            logger.info("exposure fronts of cluster %s unread: %s", cluster.id, e)
+            self.fronts.forget(cluster.id)
 
     async def _redis_ca(self, doc: MCPServer) -> str | None:
         """마지막 렌더가 TLS 로 붙인 Redis 들의 지금 CA 지문(`redis_ca_mark`, 출처는
@@ -1060,16 +1142,26 @@ class MCPServerService(ExposureValidationMixin, BaseInstanceService[MCPServer]):
             return False, None
         return True, ca_sha256((data or {}).get(REDIS_CA_KEY))
 
-    async def _expose_docs(
-        self, doc: MCPServer, effective: EffectiveConfig, *, svc_token: str | None = None
-    ) -> list[dict[str, Any]]:
-        """앞단 묶음. 인증 입력은 소비자 판과 같은 함수에서 온다 (P32 8절)."""
+    async def _front_inputs(self, doc: MCPServer, effective: EffectiveConfig) -> FrontInputs:
+        """두 앞단의 렌더 재료. 인증 입력은 소비자 판과 같은 함수에서 온다 (P32 8절). 두 앞단은 같은
+        대상(front)의 Cedar 를 싣는다 (P54 7절)."""
         k8s = self._k8s(doc)
         auth = await self._consumer_auth(doc.tenant)
         cluster = await self._cluster_of(doc)
         owner = owner_ref("MCPServer", k8s.name, doc.k8s_uid) if doc.k8s_uid else None
         rules, roles = await self._front_rule_policies(doc, cluster)
-        return mcp_expose_docs(
+        oidc_ref = auth.oidc_ref(doc.exposure.external_url) if auth.token_auth else None
+        policies = front_policies(
+            tenant=doc.tenant,
+            instance_id=doc.id,
+            tenant_group=auth.tenant_group,
+            agent_client_ids=auth.agent_client_ids,
+            client_id_claim=auth.client_id_claim,
+            binds_delegation=auth.binds_delegation,
+            rules=rules,
+        )
+        rev = self._pinned(doc)
+        return FrontInputs(
             tenant=doc.tenant,
             instance_id=doc.id,
             k8s_name=k8s.name,
@@ -1077,20 +1169,17 @@ class MCPServerService(ExposureValidationMixin, BaseInstanceService[MCPServer]):
             exposure=doc.exposure,
             effective=effective,
             owner=owner,
-            oidc_ref=auth.oidc_ref(doc.exposure.external_url) if auth.token_auth else None,
-            tenant_group=auth.tenant_group,
-            agent_client_ids=list(auth.agent_client_ids),
-            client_id_claim=auth.client_id_claim,
+            oidc_ref=oidc_ref,
+            policies=tuple(policies) if oidc_ref else (),
             groups_claim=auth.groups_claim,
-            svc_token=svc_token,
+            roles_claim=ROLES_CLAIM if roles else None,
             svc_token_rev=doc.svc_token_rev,
             # 역할 없는 ServiceAccount 와 Cedar 참조 (P50 8·10절). 게이트를 지나지 못한 클러스터는
             # 오늘의 꼴이다
             service_account=proxy_service_account(cluster),
             authz_by_ref=Feature.AUTHZ_REF in passing_features(cluster),
-            binds_delegation=auth.binds_delegation,
-            rules=rules,
-            roles_claim=ROLES_CLAIM if roles else None,
+            revision=rev.revision,
+            drain_seconds=longest_backend_timeout(rev),
         )
 
     async def _front_rule_policies(
@@ -1152,24 +1241,48 @@ class MCPServerService(ExposureValidationMixin, BaseInstanceService[MCPServer]):
         cluster = await self._cluster_of(doc)
         if server_holds_rules(spec) and not rules_toolhive_ok(cluster):
             out.append(rule_warning(RULES_TOOLHIVE_OLD))
-        if not self.token_auth or not any(has_caller_rule(r) for r in rules):
+        if not self._enforces_callers(doc):
             return out
         behind = await self._gateways_behind(doc, spec)
         if behind:
             out.append(rule_warning(RULES_GATEWAYS_BEHIND, ", ".join(behind)))
-        if doc.exposure.enabled and doc.k8s is not None:
-            try:
-                client = await self.client_for_doc(doc)
-            except ServiceError:
-                client = None
-            front = (
-                await read_deployment(client, expose_proxy_name(doc.k8s.name), doc.k8s.namespace)
-                if client is not None
-                else None
-            )
-            if front is not None and not rolled_out(front):
-                out.append(rule_warning(RULES_FRONT_ROLLING))
         return out
+
+    def _enforces_callers(self, doc: MCPServer) -> bool:
+        """서버와 노출 앞단이 누가 부를지의 규칙을 지키는가. 토큰 인증에서 배포한 리비전이 그런
+        규칙을 든 서버다."""
+        if not self.token_auth or doc.state == "draft":
+            return False
+        spec = spec_of_revision(self._pinned(doc))
+        return any(has_caller_rule(r) for sel in spec.backends for r in sel.tool_rules.values())
+
+    async def _status_exposure(
+        self, doc: MCPServer, client: KubeClient, out: dict[str, Any]
+    ) -> ExposureReading | None:
+        """노출 상태와 앞단의 두 경고 (P54 7·11절). Ingress 는 노출 상태가 한 번 읽고, 규칙이
+        굴러가는 경고와 옛 앞단이 아직 Ingress 를 쥔 까닭이 그것이 가리키는 앞단을 쓴다. 넘겨받는
+        동안(wait)은 옛 앞단이다."""
+        reading = await super()._status_exposure(doc, client, out)
+        if reading is None or reading.front is None:
+            return reading
+        k8s = self._k8s(doc)
+        try:
+            if self._enforces_callers(doc):
+                front = await read_deployment(client, reading.front[1], k8s.namespace)
+                if front is not None and not rolled_out(front):
+                    out["warnings"].append(rule_warning(RULES_FRONT_ROLLING))
+            cluster = await self._cluster_of(doc)
+            reason = await self.fronts.pending_reason(doc, client, cluster, reading)
+        except Exception as e:  # noqa: BLE001 - 상태 조회는 예외를 던지지 않는다
+            logger.debug("mcp server %s: exposure front warnings unread: %s", doc.id, e)
+            return reading
+        if reason:
+            out["warnings"].append(handover_warning(reason))
+        return reading
+
+    def handover_step(self, doc: MCPServer) -> Step | None:
+        """상태 API 가 세는 넘겨받기의 단계 (`ExposureFronts.counted_step`, P54 11절)."""
+        return self.fronts.counted_step(doc)
 
     async def _gateways_behind(self, doc: MCPServer, spec: MCPServerSpec) -> list[str]:
         """이 서버를 백엔드로 두고 그 Entry 토큰이 지금 규칙 지문을 싣지 않은 Gateway 의 이름
@@ -1235,10 +1348,11 @@ class MCPServerService(ExposureValidationMixin, BaseInstanceService[MCPServer]):
         client = await self._cleanup_client(doc)
         if client is None:
             return
-        # 2. 노출 객체 (ownerReference 로 GC 되지만 이름으로 한 번 더) → MCPServer
+        # 2. 노출 객체, 두 앞단 모두 (ownerReference 로 GC 되지만 이름으로 한 번 더) → MCPServer
         await run_in_threadpool(
             delete_expose_objects, client, k8s.name, k8s.namespace, front_proxy=True
         )
+        await delete_labeled(client, GROUP_ENTRY_KINDS, k8s.namespace, doc.id)
         await run_in_threadpool(client.delete, TOOLHIVE_API, "MCPServer", k8s.name, k8s.namespace)
         # 테넌트 울타리 설정 (P50 11절). 소유자가 없어 이름으로 지운다. 게이트가 닫힌 뒤에도 남은
         # 것을 지우도록 렌더와 상관없이 지운다
@@ -1390,13 +1504,27 @@ class MCPServerService(ExposureValidationMixin, BaseInstanceService[MCPServer]):
         for rendered in rendered_docs[:-1]:
             docs.append(await self.editor.document(doc, rendered, locked=["*"], drift=False))
         if doc.exposure.enabled:
-            # 노출 문서: 앞단 프록시는 인증 경로가 잠기고 Ingress·NetworkPolicy 는 전부 잠긴다
+            # 노출 문서: 앞단 CR 은 인증 경로가 잠기고 나머지는 전부 잠긴다 (P54 11절)
             _cluster, _rev, _backends, _services, effective = await self._context(doc)
             for rendered in await self._expose_docs(doc, effective):
-                is_proxy = rendered["kind"] == "MCPRemoteProxy"
-                locked = locked_path_strings(EXPOSE_PROXY_LOCKED_PATHS) if is_proxy else ["*"]
+                locked = front_locked_paths(rendered["kind"])
                 docs.append(await self.editor.document(doc, rendered, locked=locked, drift=False))
         return {"documents": docs}
+
+    async def _expose_docs(
+        self, doc: MCPServer, effective: EffectiveConfig
+    ) -> list[dict[str, Any]]:
+        """노출 묶음(토큰 Secret 없이). 두 앞단이 함께 있는 동안은 둘 다다
+        (`ExposureFronts.rendered`). manifest 가 보인다. 클러스터를 읽지 못해도 manifest 는 서버
+        문서를 보여야 하므로 두 앞단이 함께 있는 꼴로 렌더한다(`ExposureFronts.unread`)."""
+        inputs = await self._front_inputs(doc, effective)
+        cluster = await self._cluster_of(doc)
+        try:
+            client = await self.client_for_doc(doc)
+            return await self.fronts.rendered(client, cluster, inputs)
+        except Exception as e:  # noqa: BLE001 - manifest 는 클러스터를 읽지 못해도 답한다
+            logger.info("mcp server %s: exposure fronts unread for the manifest: %s", doc.id, e)
+            return self.fronts.unread(cluster, inputs)
 
     # -- F7a: Basic 편집 ---------------------------------------------------------------
 
@@ -1434,8 +1562,8 @@ class MCPServerService(ExposureValidationMixin, BaseInstanceService[MCPServer]):
                     exclude_id=doc.id,
                 )
                 if doc.exposure.enabled and not was_exposed:
-                    # 이미 도는 앞단은 오늘의 꼴로 남고, 새 앞단만 거절한다 (P50 2절 표)
-                    require_proxy_account(cluster, MCPServerError)
+                    # 이미 도는 앞단은 그 꼴로 남고, 새 앞단만 거절한다 (P54 5절)
+                    require_vmcp_front(cluster, MCPServerError)
             # 새 노출은 따로 저장하지 않는다. 재배포가 deploying 으로 옮기는 같은 저장이 쓴다.
             # 재배포가 시작하지 못하면 아무것도 저장되지 않아 옛 host 를 놓지 않는다 (P70 2절)
             claim_host = "exposure" in sent
@@ -1611,10 +1739,11 @@ def redeploy_warnings(doc: MCPServer, before: MCPServerInputs | None) -> list[st
     return custom_image_tls_warnings(doc.current, endpoints, before)
 
 
-def _rendered_rev(doc: MCPServer) -> str | None:
+def _rendered_rev(doc: MCPServer, step: Step | None = None) -> str | None:
     """적용한 렌더의 판 첫 절반. 렌더 앞의 인증 입력(`MCPServer.stamp_base`)에 그 렌더가 단 CA
-    지문(`redis_ca`)과 audience 표시를 얹는다."""
-    return own_audience_rev(redis_tls_rev(doc.stamp_base, doc.redis_ca), doc.audience_switch)
+    지문(`redis_ca`)과 audience 표시, 그 렌더가 닿은 넘겨받기의 단계(P54 6절)를 얹는다."""
+    rev = own_audience_rev(redis_tls_rev(doc.stamp_base, doc.redis_ca), doc.audience_switch)
+    return front_rev(rev, step)
 
 
 def _ca_sources(doc: MCPServer) -> list[str]:

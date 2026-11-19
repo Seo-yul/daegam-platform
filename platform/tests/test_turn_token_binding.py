@@ -96,7 +96,7 @@ def test_a_local_exposure_front_forbids_every_delegation_token(local_admin, fake
     )
     assert r.status_code == 201, r.text
     server = r.json()
-    front = fake.get(GV, "MCPRemoteProxy", f"expose-{server['k8s']['name']}", DEFAULT_NS)
+    front = fake.get(GV, "VirtualMCPServer", f"front-{server['k8s']['name']}", DEFAULT_NS)
     policies = cedar_policies(front, fake=fake)
     assert policies[-1] == delegation_forbid(FRONT_TARGET.format(server["id"]), "default")
     assert local_admin.get(f"{MS}/{server['id']}").status_code == 200

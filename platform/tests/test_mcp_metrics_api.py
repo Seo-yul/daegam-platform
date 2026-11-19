@@ -14,7 +14,7 @@ from daegam.services.mcp_metrics.reports import McpMetricsReports, percentile, w
 from daegam.services.mcp_metrics.rollup import McpMetricsRollup
 from daegam.store.backend_apis import MongoBackendAPIStore
 from daegam.store.base import utcnow
-from daegam.store.hour_marks import hour_of
+from daegam.store.hour_marks import HOUR, hour_of
 from daegam.store.leases import Lease
 from tests.helpers.aio import run_store
 from tests.helpers.consts import MS, T2
@@ -44,6 +44,8 @@ def server_with_calls(client, fake_clusters, mongo) -> dict[str, Any]:
             # 광고하지 않는 이름은 나머지 행으로 간다
             mcp_call_event(4, now, doc["id"], tool="Nope"),
             mcp_call_event(5, now, doc["id"], type="mcp_resource_read", tool=None),
+            # vMCP 앞단의 이벤트는 서버의 프록시에도 닿은 호출이라 세지 않는다 (P54 11절)
+            mcp_call_event(6, now, doc["id"], proxy_kind="virtualmcpserver", backend="front-x"),
         ]
     )
     store = client.app.state.mcp_metrics_reports.store
@@ -63,6 +65,35 @@ def test_the_window_and_time_zone_are_checked(client, server_with_calls) -> None
     assert sum(s["calls"] for s in week["series"]) == 4
     assert client.get(url, params={"window": "1h"}).status_code == 422
     assert client.get(url, params={"tz": "Mars/Base"}).status_code == 422
+
+
+def test_a_call_through_the_exposure_front_counts_once(client, fake_clusters, mongo) -> None:
+    """노출한 MCP Server 의 vMCP 앞단을 거친 호출은 앞단과 서버의 프록시에 이벤트를 하나씩
+    남기고 둘 다 그 서버의 것이다. 서버의 메트릭은 서버 자신의 프록시만 세어 한 번이다. 묶음은
+    종류와 백엔드마다 따로 남아 앞단의 Entry 에도 한 번이다 (P54 11절)."""
+    _, _, _, ms = mcp_server_env(client)
+    r = clone_and_deploy(client, ms)
+    assert r.status_code == 201, r.text
+    sid = r.json()["id"]
+    now = utcnow()
+    mongo["mcp_audit_events"].insert_many(
+        [
+            mcp_call_event("front", now, sid, proxy_kind="virtualmcpserver", backend="front-x"),
+            mcp_call_event("server", now, sid),
+        ]
+    )
+    store = client.app.state.mcp_metrics_reports.store
+    rollup = McpMetricsRollup(store, Lease(store.db, "pod-a"), interval=60)
+    client.portal.call(rollup.recount, hour_of(now))
+    out = client.get(f"{MS}/{sid}/metrics").json()
+    assert out["totals"]["calls"] == 1
+    assert [(t["tool"], t["calls"]) for t in out["by_tool"]] == [("Add", 1)]
+    assert sum(b["calls"] for b in out["series"]) == 1
+    assert "by_backend" not in out
+    every = client.portal.call(
+        lambda: store.window_sums(sid, hour_of(now), now + HOUR, names=["Add"], day_tz=None)
+    )
+    assert {b["_id"]: b["calls"] for b in every["backends"]} == {"front-x": 1, None: 1}
 
 
 # -- 보고 ---------------------------------------------------------------------------------------

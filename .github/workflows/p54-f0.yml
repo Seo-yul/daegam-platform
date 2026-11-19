@@ -296,9 +296,11 @@ jobs:
           {
             "${k[@]}" get pods -A -o wide || true
             "${k[@]}" get events -A --sort-by=.lastTimestamp 2>/dev/null | tail -n 80 || true
-            "${k[@]}" -n daegam-system logs deploy/daegam-platform --tail=200 || true
+            # 재적용은 플랫폼 파드 가운데 하나에서 돈다. 파드마다 접근 로그를 뺀 줄을 찍는다
+            "${k[@]}" -n daegam-system logs -l app=daegam-platform --prefix --tail=-1 --max-log-requests=4 |
+              grep -v -e 'GET /healthz' -e '" [0-9][0-9][0-9]' | tail -n 300 || true
             "${k[@]}" -n toolhive-system logs deploy/toolhive-operator --tail=150 || true
-            "${k[@]}" get mcpremoteproxies,virtualmcpservers,mcpserverentries,mcpauthzconfigs -A || true
+            "${k[@]}" get mcpremoteproxies,virtualmcpservers,mcpgroups,mcpserverentries,mcpauthzconfigs -A || true
           } 2>&1 | bash scripts/f0/redact.sh
       - name: summary
         if: ${{ always() }}

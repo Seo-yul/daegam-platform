@@ -35,7 +35,6 @@ from tests.helpers.agent_runtime import deployed_agent, env_map, skip_start_chec
 from tests.helpers.agents import template_spec
 from tests.helpers.consts import (
     DEFAULT_NS,
-    GV,
     GW,
     ISSUER,
     PLATFORM_JWKS,
@@ -276,18 +275,18 @@ def test_consumers_rerender_for_their_own_inputs_and_wait_out_their_clusters_bac
     front, gateway, fake = front_and_gateway(client, fake_clusters)
     secret = entry_token_secret(gateway)
     token = fake.get("v1", "Secret", secret, DEFAULT_NS)["stringData"]["token"]
-    vmcp, proxy = gateway["k8s"]["name"], f"expose-{front['k8s']['name']}"
+    vmcp, front_vmcp = gateway["k8s"]["name"], f"front-{front['k8s']['name']}"
     both = sorted([front["id"], gateway["id"]])
     with api_client(local_app) as local:
         result = run_data_plane_auth(local)
         assert result["ensured"] == [DEFAULT_NS] and sorted(result["reapplied"]) == both
         assert _oidc_config(fake, OIDC_CONFIG_NAME)["spec"]["inline"]["issuer"] == ISSUER
         assert "oidcConfigRef" in vmcp_of(fake, vmcp)["spec"]["incomingAuth"]
-        assert "oidcConfigRef" in fake.get(GV, "MCPRemoteProxy", proxy, DEFAULT_NS)["spec"]
+        assert "oidcConfigRef" in vmcp_of(fake, front_vmcp)["spec"]["incomingAuth"]
         assert run_data_plane_auth(local)["reapplied"] == []
     assert sorted(run_data_plane_auth(client)["reapplied"]) == both
     assert vmcp_of(fake, vmcp)["spec"]["incomingAuth"]["type"] == "anonymous"
-    assert "oidcConfigRef" not in fake.get(GV, "MCPRemoteProxy", proxy, DEFAULT_NS)["spec"]
+    assert vmcp_of(fake, front_vmcp)["spec"]["incomingAuth"]["type"] == "anonymous"
     # 다른 테넌트의 설정 변경은 이 테넌트의 소비자를 다시 렌더하지 않는다
     assert (
         client.patch("/tenants/other/settings", json={"agent_client_ids": ["x"]}).status_code == 200

@@ -4,7 +4,9 @@ ToolHive 는 `MCPServer.spec.audit.enabled` 일 때 프록시 파드 stdout 으�
 (파일 경로를 줄 수 없다). 플랫폼이 60초 주기로 테넌트 네임스페이스의 프록시 파드
 (`toolhive=true` + `app.kubernetes.io/name` ∈ mcpserver | virtualmcpserver | mcpremoteproxy,
 orbstack 의 실제 파드 라벨로 확인) 로그를 `pods/log` 로 읽어 `"audit_id"` 가 있는 줄만 JSON 으로
-파싱해 `mcp_audit_events` 에 넣는다. `_id` 가 audit_id 라 중복은 무시된다.
+파싱해 `mcp_audit_events` 에 넣는다. `_id` 가 audit_id 라 중복은 무시된다. 파드는 `toolhive-name`
+으로 그 CR 을 둔 문서에 적고, 노출한 MCP Server 의 vMCP 앞단 파드는 그 서버의 id 라벨로 그 서버에
+적는다 (P54 11절, `front_owner`).
 
 Agent 런타임(`daegam.devops.ai.kr/resource=agent-instance` 파드의 `agent` 컨테이너)은 관측 이벤트를
 stdout 에 `{"daegam_event": ...}` 한 줄씩 쓴다(agent-runtime/README.md). 같은 폴링이 그 줄을
@@ -54,6 +56,7 @@ from daegam.k8s.templates.agent import AGENT_CONTAINER, EVENTS_URL_ENV
 from daegam.k8s.templates.agent import RESOURCE as AGENT_RESOURCE
 from daegam.k8s.templates.common import named_item
 from daegam.services.clusters import ClusterService
+from daegam.services.exposure import RESOURCE_MCP_FRONT
 from daegam.services.periodic import cancel_task, run_periodic
 from daegam.services.telemetry.normalize import json_object, parse_agent_line, preview_mark
 from daegam.services.telemetry.writer import TelemetryWriter
@@ -182,6 +185,16 @@ def parse_agent_log(text: str, *, salt: str = "") -> tuple[list[dict[str, Any]],
     return _parse_lines(text, partial(parse_agent_line, salt=salt))
 
 
+def front_owner(labels: dict[str, str]) -> tuple[str | None, str] | None:
+    """노출한 MCP Server 의 vMCP 앞단 파드면 (테넌트, 그 서버 id) 다 (P54 11절). 그 파드는 서버의
+    id 라벨과 앞단의 리소스 값을 단다. 리소스 값이 Gateway 의 vMCP 파드와 가른다. 아니면 None
+    이다."""
+    owner = labels.get(LABEL_ID)
+    if labels.get(LABEL_RESOURCE) != RESOURCE_MCP_FRONT or not owner:
+        return None
+    return labels.get(LABEL_TENANT), owner
+
+
 class AuditCollector:
     def __init__(
         self,
@@ -292,7 +305,7 @@ class AuditCollector:
                 pod: dict[str, Any], _names=names, _owner=ns_tenant
             ) -> tuple[str | None, str | None]:
                 labels = (pod.get("metadata") or {}).get("labels") or {}
-                hit = _names.get(labels.get(NAME_LABEL, ""))
+                hit = _names.get(labels.get(NAME_LABEL, "")) or front_owner(labels)
                 return hit if hit else (_owner, None)
 
             try:

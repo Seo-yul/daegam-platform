@@ -1,7 +1,9 @@
 """서비스 토큰 스윕 (D41). 리컨실이 한 시간에 한 번 리스 안에서 부른다.
 
 소비자 셋(Gateway 의 vMCP, 노출한 MCP Server 의 앞단, Agent 의 런타임)을 돌며 Secret 의 토큰을 서명
-검증 없이 들여다본다. 토큰은 여는 서버마다 하나다(P50 9절). 토큰이 없거나, JWT 가 아니거나, `kid` 가
+검증 없이 들여다본다. 노출한 MCP Server 의 두 앞단(옛 MCPRemoteProxy 와 vMCP 앞단, P54 5절)은
+토큰 Secret 하나를 함께 쓰므로, 회전의 재렌더가 Ingress 가 가리키는 앞단과 다른 앞단의 몫을 함께
+굴린다. 토큰은 여는 서버마다 하나다(P50 9절). 토큰이 없거나, JWT 가 아니거나, `kid` 가
 지금 서명 키와 다르거나, 만료가 `renew_before`(6개월) 안이거나, audience 가 그 서버에 원하는 것과
 다르면(`audiences_due`) 새로 내어 넣고 소비자를 굴린다. 옛 토큰은 자기 `exp` 까지 유효하므로
 굴리기가 늦어도 6개월의 겹침 창이 안전망이다. local 에이전트의 gateway_token 은 iss·aud·groups 가

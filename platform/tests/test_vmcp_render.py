@@ -8,9 +8,19 @@ test_preview_from_draft_renders_group_entries_vmcp 가 본다.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from daegam.auth.cedar import client_id_policy, group_policy
+from daegam.k8s.labels import LABEL_PROFILE_REVISION, LABEL_RESOURCE
 from daegam.k8s.templates import oidc_config_ref, vmcp_incoming_auth
-from daegam.k8s.templates.vmcp import vmcp_policies
+from daegam.k8s.templates.vmcp import (
+    LABEL_GATEWAY_PROFILE,
+    render_entry,
+    render_group,
+    render_vmcp,
+    vmcp_policies,
+)
+from daegam.store.clusters import ClusterScheduling
 from tests.helpers.auth import admin_headers
 from tests.helpers.clusters import default_cluster
 from tests.helpers.consts import GW, HUB, TENANT_HEADER
@@ -74,3 +84,49 @@ def test_oauth_advertises_the_mcp_scope_on_the_vmcp_ref(oauth_client, fake_clust
         "audience": "daegam-mcp",
         "scopes": ["mcp"],
     }
+
+
+def test_the_exposure_front_renders_with_its_own_resource_and_no_gateway_labels():
+    """노출한 MCP Server 의 vMCP 앞단은 Gateway 의 렌더를 자기 resource 값으로 쓴다. Entry 에는 허브
+    항목 라벨이 없고 vMCP 에는 Gateway 정의 라벨이 없으며 리비전 라벨은 있다 (P54 5절)."""
+    group = render_group(
+        tenant="t",
+        instance_id="s",
+        name="front-mcp-a",
+        namespace="ns",
+        description="d",
+        resource="mcp-instance-front",
+    )
+    entry = render_entry(
+        tenant="t",
+        instance_id="s",
+        name="front-mcp-a",
+        namespace="ns",
+        group="front-mcp-a",
+        url="http://mcp-mcp-a-proxy.ns.svc.cluster.local:8080/mcp",
+        transport="streamable-http",
+        hub_item_id=None,
+        resource="mcp-instance-front",
+    )
+    vmcp = render_vmcp(
+        tenant="t",
+        instance_id="s",
+        profile_id=None,
+        revision=4,
+        name="front-mcp-a",
+        namespace="ns",
+        group="front-mcp-a",
+        backends=[{"workload": "front-mcp-a"}],
+        failure_mode="best_effort",
+        # pod_placement 가 읽는 두 칸만 있다
+        effective=SimpleNamespace(  # type: ignore[arg-type]
+            images=SimpleNamespace(pull_secret=None), scheduling=ClusterScheduling()
+        ),
+        resource="mcp-instance-front",
+    )
+    for doc in (group, entry, vmcp):
+        assert doc["metadata"]["labels"][LABEL_RESOURCE] == "mcp-instance-front"
+    assert "daegam.devops.ai.kr/hub-item" not in entry["metadata"]["labels"]
+    assert LABEL_GATEWAY_PROFILE not in vmcp["metadata"]["labels"]
+    template = vmcp["spec"]["podTemplateSpec"]["metadata"]["labels"]
+    assert template[LABEL_PROFILE_REVISION] == "4" and LABEL_GATEWAY_PROFILE not in template

@@ -273,7 +273,7 @@ def test_the_front_holds_role_rules_and_a_rule_naming_only_an_agent_is_closed_th
     agent = stored_agent(mongo, "helper")
     rules = {"Add": DEV, "Divide": {"callers": {"agents": [agent]}}}
     _bp, inst, fake = _front(local_admin, fake_clusters, rules)
-    front = f"expose-{inst['k8s']['name']}"
+    front = f"front-{inst['k8s']['name']}"
     config = fake.get(GV, AUTHZ_CONFIG_KIND, f"{front}-authz", DEFAULT_NS)["spec"]["config"]
     assert config["role_claim_name"] == ROLES_CLAIM
     policies = config["policies"]
@@ -296,7 +296,7 @@ def test_a_redeploy_applies_the_front_before_an_existing_server(local_admin, fak
     r = local_admin.post(f"{MS}/{inst['id']}/redeploy")
     assert r.status_code == 200, r.text
     kinds = [o["kind"] for o in fake.applied[start:]]
-    assert kinds.index("MCPRemoteProxy") < kinds.index("MCPServer")
+    assert kinds.index("VirtualMCPServer") < kinds.index("MCPServer")
 
 
 def test_a_gateway_rerenders_when_its_backend_servers_rules_change(

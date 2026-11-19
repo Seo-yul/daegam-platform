@@ -14,9 +14,9 @@
 #
 # P8 F7 exposure checks (7~10): the platform's `daegam-expose-<k8s.name>` NetworkPolicy is rendered
 # by platform/daegam/k8s/templates/exposure.py:render_expose_policy (via `uv run`) and applied next to the
-# tenant policy. A pod labelled like a ToolHive MCPRemoteProxy front pod
-# (app.kubernetes.io/name=mcpremoteproxy, app.kubernetes.io/instance=expose-<k8s.name>) must be
-# reachable from the ingress-controller namespace (np-ctl) and from nowhere else.
+# tenant policy. A pod labelled like the ToolHive vMCP front pod of an exposed MCP Server (P54 section 5:
+# app.kubernetes.io/name=virtualmcpserver, app.kubernetes.io/instance=front-<k8s.name>, Service
+# vmcp-front-<k8s.name>:4483) must be reachable from the ingress-controller namespace (np-ctl) and from nowhere else.
 #
 # P30 (D52) CHECK 12·13: 대감 차트(charts/daegam)가 렌더한 NetworkPolicy daegam-ui 를 helm template --show-only 로 떼어 와
 # daegam-system 에 건다.
@@ -52,7 +52,7 @@ POD_SUBNET="${POD_SUBNET:-10.244.0.0/16}"
 POLICY="$ROOT/deploy/dev/tenant-networkpolicy.yaml"
 # 노출 CHECK: 앞단 파드 흉내(라벨만 ToolHive 와 같다), 컨트롤러 네임스페이스, 렌더링한 expose 정책
 FRONT_K8S_NAME="mcp-calc"                    # MCP Server 의 k8s.name (mcp- 접두사 포함)
-FRONT_NAME="expose-${FRONT_K8S_NAME}"        # 앞단 MCPRemoteProxy CR 이름
+FRONT_NAME="front-${FRONT_K8S_NAME}"         # 앞단 VirtualMCPServer CR 이름 (P54 5절)
 EXPOSE_POLICY="daegam-expose-${FRONT_K8S_NAME}"
 CTL_NS="np-ctl"                              # Ingress 컨트롤러 네임스페이스 역할
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/daegam-netpol.XXXXXX")"
@@ -143,33 +143,38 @@ grep -q "CALICO_IPV4POOL_CIDR" "$WORK/calico.yaml" || die "calico.yaml: CALICO_I
 echo ">> policy engine: $("${K[@]}" -n kube-system get ds calico-node -o jsonpath='{.metadata.name} ready={.status.numberReady}')"
 
 # ---------- expose policy rendered by the platform code (before the cluster, fails fast) ----------
+# MCP Server 의 노출 정책은 vMCP 앞단을 렌더하는 클러스터에서 두 종류의 앞단 파드(옛 앞단 MCPRemoteProxy
+# expose-<k8s.name>, vMCP front-<k8s.name>)를 함께 고른다(P54 5절, services/exposure.py mcp_fronts). 흉내 파드는
+# 새 앞단인 vMCP 의 라벨을 단다
 (cd "$ROOT/platform" && uv run --quiet python - "$FRONT_K8S_NAME" "$FRONT_NAME" "$CTL_NS" "$WORK/expose-policy.json" <<'PY')
 import json, sys
 from daegam.k8s.templates import expose_policy_name, render_expose_policy
+from daegam.services.exposure import mcp_fronts
 k8s_name, front, ctl_ns, out = sys.argv[1:5]
+fronts = mcp_fronts(k8s_name, vmcp=True)
+assert (front, "virtualmcpserver") in fronts, fronts
 doc = render_expose_policy(
     tenant="np", instance_id="e2e-netpol", resource="mcp-instance-expose-policy",
-    name=expose_policy_name(k8s_name), namespace="np-a",
-    front_name=front, front_kind="mcpremoteproxy", controller_namespace=ctl_ns,
+    name=expose_policy_name(k8s_name), namespace="np-a", fronts=fronts, controller_namespace=ctl_ns,
 )
 json.dump(doc, open(out, "w"), indent=1)
 PY
-python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["metadata"]["name"]==sys.argv[2], d["metadata"]; print("  rendered", d["metadata"]["name"], "podSelector", d["spec"]["podSelector"]["matchLabels"], "from", d["spec"]["ingress"][0]["from"])' "$WORK/expose-policy.json" "$EXPOSE_POLICY"
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["metadata"]["name"]==sys.argv[2], d["metadata"]; print("  rendered", d["metadata"]["name"], "podSelector", d["spec"]["podSelector"], "from", d["spec"]["ingress"][0]["from"])' "$WORK/expose-policy.json" "$EXPOSE_POLICY"
 
 # ---------- workloads ----------
 for ns in np-a np-b daegam-system "$CTL_NS"; do
   "${K[@]}" create namespace "$ns" --dry-run=client -o yaml | "${K[@]}" apply -f - >/dev/null
 done
-# 앞단 파드 흉내: ToolHive MCPRemoteProxy 파드와 같은 라벨의 nginx (실측 라벨, orbstack ToolHive v0.51.2)
+# 앞단 파드 흉내: ToolHive vMCP 파드와 같은 라벨의 nginx 와 vMCP Service 이름·포트(vmcp-<CR>:4483)
 "${K[@]}" -n np-a apply -f - >/dev/null <<YAML
 apiVersion: apps/v1
 kind: Deployment
-metadata: {name: front, labels: {app.kubernetes.io/name: mcpremoteproxy, app.kubernetes.io/instance: ${FRONT_NAME}}}
+metadata: {name: front, labels: {app.kubernetes.io/name: virtualmcpserver, app.kubernetes.io/instance: ${FRONT_NAME}}}
 spec:
   replicas: 1
-  selector: {matchLabels: {app.kubernetes.io/name: mcpremoteproxy, app.kubernetes.io/instance: ${FRONT_NAME}}}
+  selector: {matchLabels: {app.kubernetes.io/name: virtualmcpserver, app.kubernetes.io/instance: ${FRONT_NAME}}}
   template:
-    metadata: {labels: {app.kubernetes.io/name: mcpremoteproxy, app.kubernetes.io/instance: ${FRONT_NAME}}}
+    metadata: {labels: {app.kubernetes.io/name: virtualmcpserver, app.kubernetes.io/instance: ${FRONT_NAME}}}
     spec:
       nodeSelector: {kubernetes.io/hostname: ${CLUSTER}-worker}
       containers:
@@ -180,10 +185,10 @@ spec:
 ---
 apiVersion: v1
 kind: Service
-metadata: {name: mcp-${FRONT_NAME}-remote-proxy}
+metadata: {name: vmcp-${FRONT_NAME}}
 spec:
-  selector: {app.kubernetes.io/name: mcpremoteproxy, app.kubernetes.io/instance: ${FRONT_NAME}}
-  ports: [{port: 8080, targetPort: 80}]
+  selector: {app.kubernetes.io/name: virtualmcpserver, app.kubernetes.io/instance: ${FRONT_NAME}}
+  ports: [{port: 4483, targetPort: 80}]
 YAML
 "${K[@]}" -n np-a apply -f - >/dev/null <<YAML
 apiVersion: apps/v1
@@ -227,7 +232,7 @@ done
 for ns in np-a np-b daegam-system "$CTL_NS"; do
   "${K[@]}" -n "$ns" wait pod/curl --for=condition=Ready --timeout=180s >/dev/null
 done
-FRONT_URL="http://mcp-${FRONT_NAME}-remote-proxy.np-a.svc:8080/"
+FRONT_URL="http://vmcp-${FRONT_NAME}.np-a.svc:4483/"
 WEB_IP="$("${K[@]}" -n np-a get pod -l app=web -o jsonpath='{.items[0].status.podIP}')"
 WEB_NODE="$("${K[@]}" -n np-a get pod -l app=web -o jsonpath='{.items[0].spec.nodeName}')"
 echo ">> web pod IP $WEB_IP on node $WEB_NODE, service web.np-a.svc"
@@ -316,7 +321,7 @@ echo ">> tenant policy only: $CTL_NS must be blocked from the front pod"
 if expect 7 "$CTL_NS" "$FRONT_URL" 000; then pass 7 "$CTL_NS -> front pod blocked by the tenant policy alone"; else record_fail 7 "$CTL_NS reaches the front pod without the expose policy"; fi
 echo ">> applying rendered $EXPOSE_POLICY to np-a"
 "${K[@]}" -n np-a apply -f "$WORK/expose-policy.json"
-"${K[@]}" -n np-a get networkpolicy "$EXPOSE_POLICY" -o jsonpath='  netpol: {.metadata.name} podSelector={.spec.podSelector.matchLabels} from={.spec.ingress[0].from}{"\n"}'
+"${K[@]}" -n np-a get networkpolicy "$EXPOSE_POLICY" -o jsonpath='  netpol: {.metadata.name} podSelector={.spec.podSelector} from={.spec.ingress[0].from}{"\n"}'
 if expect 8 "$CTL_NS" "$FRONT_URL" 200; then pass 8 "$CTL_NS -> front pod allowed once $EXPOSE_POLICY is applied"; else record_fail 8 "$CTL_NS still blocked with $EXPOSE_POLICY (selector/labels wrong?)"; fi
 if expect 9 np-b "$FRONT_URL" 000; then pass 9 "np-b -> front pod still blocked"; else record_fail 9 "np-b reaches the front pod through the expose policy"; fi
 if expect 10 "$CTL_NS" http://web.np-a.svc/ 000; then pass 10 "$CTL_NS -> web (not the front pod) still blocked"; else record_fail 10 "$CTL_NS reaches other pods in np-a (expose policy too wide)"; fi

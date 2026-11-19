@@ -71,7 +71,6 @@ from tests.helpers.agent_runtime import (
 from tests.helpers.agents import compile_spec, make_ctx, template_spec
 from tests.helpers.consts import (
     DEFAULT_NS,
-    GV,
     ISSUER,
     OIDC_AUDIENCE,
     OIDC_ISSUER,
@@ -474,7 +473,7 @@ def test_switching_renders_gateways_and_fronts_as_local_mode_and_back(
         {"_id": "default", "tenant": "default", "mcp_group": "team-other"}
     )
     vmcp = gateway["k8s"]["name"]
-    proxy = f"expose-{front['k8s']['name']}"
+    front_vmcp = f"front-{front['k8s']['name']}"
     both = sorted([front["id"], gateway["id"]])
     permit = delegation_permit(GATEWAY_TARGET.format(gateway["id"]), "default")
     with api_client(_oidc_app(settings, fake_clusters, fake_secrets, "platform")) as app:
@@ -486,7 +485,7 @@ def test_switching_renders_gateways_and_fronts_as_local_mode_and_back(
     policies = cedar_policies(vmcp_of(fake, vmcp), fake=fake)
     assert group_policy("daegam-default") in policies and permit in policies
     assert not any("team-other" in p for p in policies)
-    front_policies = cedar_policies(fake.get(GV, "MCPRemoteProxy", proxy, DEFAULT_NS), fake=fake)
+    front_policies = cedar_policies(vmcp_of(fake, front_vmcp), fake=fake)
     assert any("claim_bound_to" in p for p in front_policies)
     with api_client(_oidc_app(settings, fake_clusters, fake_secrets, "idp")) as app:
         assert sorted(run_data_plane_auth(app)["reapplied"]) == both

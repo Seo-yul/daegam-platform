@@ -33,7 +33,7 @@ from daegam.store.base import (
     utcnow,
 )
 from daegam.store.data_services import DataServiceKind, RedisTls
-from daegam.store.exposure import Exposure
+from daegam.store.exposure import Exposure, front_name_for
 from daegam.store.instances import DEPLOYED_ONLY, NOT_DRAFT, MongoInstanceStore
 from daegam.store.tenants import Binding
 from daegam.store.tool_rules import ServerToolRule
@@ -245,11 +245,18 @@ class MCPServer(Document, ConsumerAuthState):
         return None
 
     # 이번 렌더 앞에 적은 판의 바탕(인증 입력의 판, `MCPServerService._stamp_auth`). 적용한 렌더가
-    # 그 위에 Redis 와 audience 표시를 얹어 판을 다시 적는다. 저장하지 않는다
+    # 그 위에 Redis 와 audience 표시, 넘겨받기의 단계를 얹어 판을 다시 적는다. 저장하지 않는다
     _stamp_base: tuple[str | None] | None = PrivateAttr(default=None)
+    # 판을 적기 전의 재적용 실패 수. 넘겨받기를 다시 미루는 렌더가 이어 센다 (P54 6절)
+    _stamp_failures: int = PrivateAttr(default=0)
 
-    def set_stamp_base(self, base: str | None) -> None:
+    def set_stamp_base(self, base: str | None, *, failures: int = 0) -> None:
         self._stamp_base = (base,)
+        self._stamp_failures = failures
+
+    @property
+    def stamp_failures(self) -> int:
+        return self._stamp_failures
 
     @property
     def stamp_pending(self) -> bool:
@@ -380,6 +387,20 @@ class MongoMCPServerStore(MongoInstanceStore[MCPServer]):
         value = record.model_dump(mode="python") if record is not None else None
         res = await self.coll.update_one(query, {"$set": {CONDITIONS_RECORD: value}})
         return res.matched_count == 1
+
+    async def front_entries_in_use(self) -> set[tuple[str, str, str, str]]:
+        """배포 쪽의 노출한 서버가 쥐는 vMCP 앞단의 Entry 이름 `front-<k8s.name>` (P54 5절). (문서
+        id, 클러스터, 네임스페이스, Entry 이름) 이고 Entry 이름 선점의 쓸기가 Gateway 의 것과 함께
+        읽는다 (`services/gateway_entries.py` `GatewayEntries.sweep`). 노출을 끄거나 내리거나 지우면
+        빠지므로 쓸기가 그 선점을 놓는다."""
+        cursor = self.coll.find(
+            {"exposure.enabled": True, **NOT_DRAFT}, {"cluster_id": 1, "k8s": 1}
+        )
+        return {
+            (d["_id"], d.get("cluster_id"), k8s["namespace"], front_name_for(k8s["name"]))
+            for d in await cursor.to_list()
+            if (k8s := d.get("k8s"))
+        }
 
     async def live_with_rules(self) -> list[MCPServer]:
         """어느 리비전에든 Tool 규칙을 든 배포 쪽 문서다. 규칙이 없는 backend 는 그 칸을 저장하지

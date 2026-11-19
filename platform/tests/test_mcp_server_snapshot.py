@@ -132,7 +132,7 @@ def _front_after_a_local_reapply(client, local_app, fake, inst, client_id: str) 
     start = len(fake.applied)
     with api_client(local_app) as local:
         assert run_data_plane_auth(local)["blocked"] == [inst["id"]]
-    fronts = [o for o in fake.applied[start:] if o["kind"] == "MCPRemoteProxy"]
+    fronts = [o for o in fake.applied[start:] if o["kind"] == "VirtualMCPServer"]
     assert len(fronts) == 1 and "MCPServer" not in _kinds_since(fake, start)
     return fronts[0]
 

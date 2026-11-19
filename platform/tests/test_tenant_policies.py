@@ -173,8 +173,7 @@ def _namespace_render() -> list[dict[str, Any]]:
             instance_id="ms-1",
             resource="mcp-instance-expose-policy",
             name="daegam-expose-mcp-calc",
-            front_name="expose-mcp-calc",
-            front_kind="mcpremoteproxy",
+            fronts=[("expose-mcp-calc", "mcpremoteproxy")],
             **expose,
         ),
         render_expose_policy(

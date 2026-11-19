@@ -51,11 +51,11 @@ function withoutTrailingList(text: string): string {
 }
 
 function shownWarnings(t: Messages): ShownWarning[] {
-  const byCode = Object.entries(t.warnings.codes).flatMap(([code, entry]) =>
-    "choices" in entry
-      ? Object.entries(entry.choices).map(([choice, text]) => ({ key: `${code}/${choice}`, label: entry.label, text }))
-      : [{ key: code, label: entry.label, text: typeof entry.text === "string" ? withoutTrailingList(entry.text) : entry.text({ schedules: 2, triggers: 1, broken: 3 }) }],
-  );
+  const byCode = Object.entries(t.warnings.codes).flatMap(([code, entry]) => {
+    if ("choices" in entry) return Object.entries(entry.choices).map(([choice, text]) => ({ key: `${code}/${choice}`, label: entry.label, text }));
+    if ("withReason" in entry) return [{ key: code, label: entry.label, text: entry.withReason("Pending") }];
+    return [{ key: code, label: entry.label, text: typeof entry.text === "string" ? withoutTrailingList(entry.text) : entry.text({ schedules: 2, triggers: 1, broken: 3 }) }];
+  });
   const caused = Object.entries(t.warnings.codes.agent_tool_hidden.causes).map(([cause]) => ({
     key: `agent_tool_hidden/${cause}`,
     ...describeWarning(t, `agent_tool_hidden: hidden (cause: ${cause}; tools: a)`),
@@ -83,6 +83,41 @@ describe.each([
   it("대시로 설명을 잇지 않는다", () => {
     const dashed = shownWarnings(t).filter((w) => DASH.test(w.text));
     expect(dashed).toEqual([]);
+  });
+});
+
+describe("노출 앞단의 넘겨받기 경고 (P54 11절)", () => {
+  const LINE = "front_handover_pending: the external address still goes through the previous front proxy, because the new vMCP front cannot take over yet";
+  const RAW = `${LINE} (reason: Pending)`;
+
+  it("서버 문장의 vMCP phase 를 사전 문장에 넣는다", () => {
+    expect(describeWarning(ko, RAW)).toMatchObject({
+      code: "front_handover_pending",
+      label: "앞단 전환 대기",
+      text: "이 MCP Server 의 외부 주소는 아직 이전 앞단 프록시로 연결됩니다. 새 앞단이 Pending 상태라서 바꾸지 않았습니다. 이 상태가 이어지면 Advanced 탭에서 새 앞단의 클러스터 리소스를 확인해 주세요.",
+      known: true,
+    });
+    expect(describeWarning(en, RAW).text).toBe(
+      "This MCP Server's external address still goes through the previous front proxy. The new front is Pending, so the platform has not switched yet. If this lasts, check the new front's cluster resources in the Advanced tab.",
+    );
+  });
+
+  it("실패한 단계의 코드도 그대로 넣는다", () => {
+    const text = describeWarning(ko, `${LINE} (reason: name_taken)`).text;
+    expect(text).toContain("새 앞단이 name_taken 상태라서 바꾸지 않았습니다.");
+    expect(describeWarning(en, `${LINE} (reason: authz_not_ready)`).text).toContain("The new front is authz_not_ready, so");
+  });
+
+  it("까닭이 없거나 영문자와 밑줄 밖의 글이면 서버 원문을 그대로 보인다", () => {
+    for (const raw of [LINE, `${LINE} (Pending)`, `${LINE} (reason: not ready)`]) {
+      expect(describeWarning(ko, raw)).toMatchObject({ code: "front_handover_pending", text: raw, known: false });
+    }
+  });
+
+  it("서버 상수의 코드 그대로 표에 있다", () => {
+    const src = readFileSync(resolve(process.cwd(), "../platform/daegam/services/exposure_front.py"), "utf8");
+    expect(/^FRONT_HANDOVER_PENDING = "front_handover_pending"$/m.test(src)).toBe(true);
+    expect(Object.hasOwn(ko.warnings.codes, "front_handover_pending")).toBe(true);
   });
 });
 

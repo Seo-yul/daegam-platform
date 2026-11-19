@@ -83,6 +83,27 @@ mcp_ingress() { # URL RESOLVE METHOD [PARAMS-JSON] [BEARER] -> 마지막 요청�
   echo "$code"
 }
 
+# 새로 뜬 vMCP 파드는 첫 건강 확인에 실패한 백엔드를 다음 확인(ToolHive 0.53 은 30초 뒤)이 지날 때까지 unknown 으로 두고
+# 그 Tool 을 내지 않는다 (P54 6절). 막 노출한 MCP Server 의 vMCP 앞단과 규칙이나 토큰이 바뀌어 다시 뜬 앞단의 파드가
+# 그렇다. 그 Tool 이 보이기를 이만큼(초) 기다린다
+ROUTE_WAIT=120
+# Add(3,4) 의 결과 content 에 7 이 들었는가. ingress_until 의 CHECK 와 그 뒤의 확인이 함께 쓴다
+# shellcheck disable=SC2034  # 이 파일을 읽는 스크립트가 쓴다
+ADD_SEVEN='"7" in json.dumps(((d or {}).get("result") or {}).get("content"))'
+
+# ingress_until CHECK URL RESOLVE METHOD [PARAMS-JSON] [BEARER] -> 마지막 요청의 HTTP 코드. 결과는 $WORK/rpc.json
+#   mcp_ingress 를 5초마다 ROUTE_WAIT 초까지 다시 부른다. 200 이고 $WORK/rpc.json 에서 CHECK(json_of 의 식)가 True 이면
+#   멈춘다
+ingress_until() {
+  local check="$1" code i; shift
+  for ((i = 0; i <= ROUTE_WAIT / 5; i++)); do
+    code="$(mcp_ingress "$@")"
+    [ "$code" = 200 ] && [ "$(rpc_ "$check" 2>/dev/null)" = True ] && break
+    sleep 5
+  done
+  echo "$code"
+}
+
 # mcp [--token T] list|call URL [TOOL ARGS_JSON] -> 종료 코드
 #   deploy/dev/lab/mcp_client.py 로 부른다. 결과는 $WORK/mcp.json, 오류는 $WORK/mcp.err 다
 mcp() {

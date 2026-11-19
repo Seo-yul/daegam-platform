@@ -36,6 +36,12 @@ interface ChosenWarningText<K extends string> {
   choices: Record<K, string>;
 }
 
+/** 서버 문장 끝의 괄호에 든 까닭을 문장 안에 넣는 경고. 까닭을 읽지 못하면 화면이 서버 원문을 보인다. */
+interface InlineReasonWarningText {
+  label: string;
+  withReason: (reason: string) => string;
+}
+
 /** 서버 문장의 원인을 받아 한 문장을 더하는 경고. 원인을 읽지 못하면 text 만 보인다. */
 interface CausedWarningText {
   label: string;
@@ -114,6 +120,12 @@ export const warnings = {
       label: "앞단 반영 중",
       text: "노출 앞단이 아직 새 파드로 바뀌는 중이라, 앞단을 거친 호출에는 앞의 Tool 규칙이 적용됩니다. 모든 파드가 바뀌면 새 규칙이 적용됩니다.",
     },
+    // 옛 앞단이 아직 외부 주소를 쥔 노출 MCP Server (P54 11절). reason 은 새 앞단(vMCP)의 phase 나 그 몫이 실패한 까닭이다
+    front_handover_pending: {
+      label: "앞단 전환 대기",
+      withReason: (reason: string): string =>
+        `이 MCP Server 의 외부 주소는 아직 이전 앞단 프록시로 연결됩니다. 새 앞단이 ${reason} 상태라서 바꾸지 않았습니다. 이 상태가 이어지면 Advanced 탭에서 새 앞단의 클러스터 리소스를 확인해 주세요.`,
+    },
     // 서버 컨테이너가 Tool 의 입력 스키마에서 풀지 못한 인자 조건 (P52 4절). 그 Tool 은 모든 호출을 거절한다
     conditions_unresolved: {
       label: "인자 조건 확인 필요",
@@ -180,7 +192,7 @@ export const warnings = {
       label: "Code mode 로 숨김",
       text: "서버가 읽기 전용이라고 알려 주지 않는 Tool 이 있어, Code mode 를 켠 이 Gateway 에서는 그 Tool 이 보이지 않고 호출도 거절됩니다. MCP Server 의 Tool 이면 클러스터의 런타임 이미지를 새 판으로 올린 뒤 그 서버를 다시 배포하고, 허브 항목의 Tool 이면 그 Tool 을 백엔드의 Tool 선택에서 빼 주세요.",
     },
-    // 원인은 서버 문장의 `cause: <원인>` 에서 읽는다(lib/warningText.ts causeIn)
+    // 원인은 서버 문장의 `cause: <원인>` 에서 읽는다(lib/warningText.ts valueIn)
     agent_tool_hidden: {
       label: "Tool 숨김",
       text: "이 Agent 가 선택한 Tool 가운데 규칙이 이 Agent 를 허용하지 않는 것이 있어 Agent 가 그 Tool 을 볼 수 없습니다.",
@@ -363,7 +375,7 @@ export const warnings = {
       label: "점검 없이 허용",
       text: "개발용 설정으로 점검 없이 코드 실행을 허용하고 있습니다. 운영 환경에서는 이 설정을 쓰지 마세요.",
     },
-  } satisfies Record<string, WarningText | CountedWarningText | CausedWarningText | ChosenWarningText<GateReason> | ChosenWarningText<CodeModeCause>>,
+  } satisfies Record<string, WarningText | CountedWarningText | CausedWarningText | ChosenWarningText<GateReason> | ChosenWarningText<CodeModeCause> | InlineReasonWarningText>,
 
   /** 허브 항목 상세가 codes 대신 쓰는 문장. 같은 코드를 Gateway 도 내지만 고치는 법이 다르다 (P52 7절). */
   hubCodes: {

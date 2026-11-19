@@ -67,6 +67,7 @@ from daegam.k8s.templates.svc_token import (
     render_svc_token_secret,
 )
 from daegam.k8s.templates.vmcp import (
+    GROUP_ENTRY_KINDS,
     anonymous_policies,
     published_pins,
     vmcp_cluster_url,
@@ -281,7 +282,11 @@ class GatewayService(ExposureValidationMixin, BaseInstanceService[Gateway]):
         self.exposure_hosts = exposure_hosts
         # Entry 이름의 배포 전 검사·선점·적용 직전 막이 (D82)
         self.entries = GatewayEntries(
-            names=entry_names, gateways=gateways, k8s=self._k8s, conflict=self._name_conflict
+            names=entry_names,
+            gateways=gateways,
+            servers=mcp_instances,
+            k8s=self._k8s,
+            conflict=self._name_conflict,
         )
         # 상태 훅과 Entry 토큰 객체 (P72 2.2절)
         self.status_view = GatewayStatusView(
@@ -728,10 +733,6 @@ class GatewayService(ExposureValidationMixin, BaseInstanceService[Gateway]):
 
     def _sibling_stores(self) -> list[Any]:
         return [self.gateways, self.mcp_instances, self.agents]
-
-    def _claim_stores(self) -> list[Any]:
-        """해제와 삭제가 공개 host 와 함께 Entry 이름의 선점도 놓는다 (D82)."""
-        return [self.exposure_hosts, self.entries.names]
 
     def _owner(self, doc: Gateway) -> dict[str, Any] | None:
         """이 문서의 vMCP 를 가리키는 ownerReference. vMCP 를 아직 적용하지 않아 uid 가 없으면
@@ -1566,12 +1567,7 @@ class GatewayService(ExposureValidationMixin, BaseInstanceService[Gateway]):
         await delete_authz_config(client, k8s.name, k8s.namespace)
         # ownerReference 로 GC 되지만, daegam.devops.ai.kr/id 라벨로 남은 것을 명시적으로 지운다
         # (폴백)
-        await delete_labeled(
-            client,
-            ((TOOLHIVE_API, "MCPServerEntry"), (TOOLHIVE_API, "MCPGroup")),
-            k8s.namespace,
-            doc.id,
-        )
+        await delete_labeled(client, GROUP_ENTRY_KINDS, k8s.namespace, doc.id)
         # 토큰 객체는 vMCP 가 소유하지만, 첫 배포가 uid 를 얻기 전에 멈췄으면 소유자 없이 남는다.
         # 지금 스냅샷의 것과 라벨로 찾은 것(재배포가 뺀 Entry 의 것)을 이름으로 지운다
         names = set(entry_token_objects(k8s.name, doc.deployed_backends).values())

@@ -18,7 +18,7 @@ import re
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Protocol
 
 from kubernetes.client.rest import ApiException
@@ -67,6 +67,8 @@ from daegam.k8s.templates.svc_token import (
 from daegam.services.claims import tick_item
 from daegam.services.clusters import ClusterService
 from daegam.services.data_plane_auth import KIND_AGENT, KIND_GATEWAY, KIND_MCP_SERVER
+from daegam.services.gateway_entries import GatewayEntries
+from daegam.services.gateway_timeouts import INTERNAL_MARGIN_SECONDS
 from daegam.services.tenancy import TenancyError, TenancyService, k8s_name
 from daegam.store.agents import Agent
 from daegam.store.base import iso_utc
@@ -75,6 +77,7 @@ from daegam.store.exposure import (
     AgentExposure,
     Exposure,
     ExposureTLS,
+    front_name_for,
     normalize_cors_origin,
     tls_secret_name_for,
 )
@@ -98,6 +101,8 @@ RESOURCE_EXPOSE_PROXY = "mcp-instance-expose"
 RESOURCE_MCP_INGRESS = "mcp-instance-ingress"
 RESOURCE_GATEWAY_INGRESS = "gateway-instance-ingress"
 RESOURCE_MCP_POLICY = "mcp-instance-expose-policy"
+# 노출한 MCP Server 의 vMCP 앞단 객체 (P54 5절). 롤백 안내가 이 값으로 지운다
+RESOURCE_MCP_FRONT = "mcp-instance-front"
 RESOURCE_GATEWAY_POLICY = "gateway-instance-expose-policy"
 
 
@@ -481,138 +486,210 @@ def validate_exposure(
 # -- 문서 묶음 -------------------------------------------------------------------------
 
 
-def mcp_expose_docs(
+@dataclass(frozen=True)
+class FrontInputs:
+    """노출한 MCP Server 의 두 앞단(옛 MCPRemoteProxy, vMCP)이 함께 쓰는 렌더 재료 (P54 5·7절).
+    oidc_ref 는 resourceUrl 이 external_url 인 사람 참조이고 발급자가 없는 header 모드에서는
+    None 이다. policies 는 두 앞단이 같은 대상(front)으로 싣는 Cedar 다(`front_policies`).
+    groups_claim 은 앞단의 ToolHive 가 그룹을 읽을 클레임(`ConsumerAuth.groups_claim`),
+    roles_claim 은 역할 절이 있을 때의 role_claim_name 이다 (P52 2·3절). revision 은 vMCP 앞단의
+    CR 라벨이다. drain_seconds 는 서버의 가장 긴 backend 타임아웃(`longest_backend_timeout`)이고
+    옛 앞단을 넘겨받는 drain 이 쓰며, vMCP 앞단의 호출 타임아웃은 거기에 틈을 더한다 (P54 5·6절)."""
+
+    tenant: str
+    instance_id: str
+    k8s_name: str
+    namespace: str
+    exposure: Exposure
+    effective: EffectiveConfig
+    owner: dict[str, Any] | None
+    oidc_ref: dict[str, Any] | None = None
+    policies: tuple[str, ...] = ()
+    groups_claim: str | None = None
+    roles_claim: str | None = None
+    svc_token_rev: str = "0"
+    service_account: str | None = None
+    authz_by_ref: bool = False
+    revision: int = 0
+    drain_seconds: int = 0
+
+    @property
+    def timeout_seconds(self) -> int:
+        """vMCP 앞단의 호출 타임아웃. 서버가 backend 호출을 먼저 끝내도록 틈을 더하고 Gateway
+        백엔드의 상한은 두지 않는다 (P54 5절)."""
+        return self.drain_seconds + INTERNAL_MARGIN_SECONDS
+
+    @property
+    def drain(self) -> timedelta:
+        return timedelta(seconds=self.drain_seconds)
+
+
+def front_policies(
     *,
     tenant: str,
     instance_id: str,
-    k8s_name: str,
-    namespace: str,
-    exposure: Exposure,
-    effective: EffectiveConfig,
-    owner: dict[str, Any] | None,
-    oidc_ref: dict[str, Any] | None = None,
-    tenant_group: str | None = None,
-    agent_client_ids: list[str] | None = None,
+    tenant_group: str | None,
+    agent_client_ids: Sequence[str],
     client_id_claim: str,
-    groups_claim: str | None,
-    svc_token: str | None = None,
-    svc_token_rev: str = "0",
-    service_account: str | None = None,
-    authz_by_ref: bool = False,
-    binds_delegation: bool = False,
-    rules: Sequence[str] = (),
-    roles_claim: str | None = None,
-) -> list[dict[str, Any]]:
-    """MCP Server 노출 묶음이다. (서비스 토큰 Secret,) MCPExternalAuthConfig, 앞단
-    MCPRemoteProxy expose-<k8s.name>, Ingress, NetworkPolicy 순이다. oidc_ref(resourceUrl 이
-    external_url 인 사람 참조)가 있으면(발급자 있는 모드) 앞단에 그것과 Cedar 를 건다. 앞단은 모든
-    모드에서 안쪽 MCPServer 에 서비스 토큰을 낸다(D41). svc_token 이 있으면 Secret 문서도
-    낸다(배포 경로). 미리보기는 토큰 없이 렌더한다. binds_delegation(local 모드)이면 앞단에 묶이지
-    않은 위임 토큰을 막는 forbid 를 더한다. 앞단에 묶인 토큰은 아무도 내지 않으므로 모든 턴 토큰이
-    거절된다 (P53 3.2절). groups_claim 은 앞단의 ToolHive 가 그룹을 읽을 클레임이다
-    (`ConsumerAuth.groups_claim`). rules 는 서버의 Tool 규칙 forbid 이고 roles_claim 은 역할 절이
-    있을 때의 role_claim_name 이다 (P52 2·3절)."""
-    front = expose_proxy_name(k8s_name)
-    svc_name = expose_svc_name(k8s_name)
-    authz = authz_ref = None
+    binds_delegation: bool,
+    rules: Sequence[str],
+) -> list[str]:
+    """노출 앞단의 Cedar. 테넌트 정책, local 모드(binds_delegation)면 앞단에 묶이지 않은 위임 토큰을
+    막는 forbid, 서버의 Tool 규칙 forbid 순이다. 앞단에 묶인 토큰은 아무도 내지 않으므로 모든 턴
+    토큰이 거절된다 (P53 3.2절, P52 2절). 두 앞단이 같은 대상으로 같은 정책을 싣는다 (P54 7절)."""
+    policies = tenant_policies(tenant_group or "", list(agent_client_ids), client_id_claim)
+    if binds_delegation:
+        policies.append(delegation_forbid(FRONT_TARGET.format(instance_id), tenant))
+    return [*policies, *rules]
+
+
+def front_token_secret(inputs: FrontInputs, token: str) -> dict[str, Any]:
+    """두 앞단이 안쪽 MCPServer 에 내는 서비스 토큰의 Secret `svc-expose-<k8s.name>` (D41). 키
+    `token` 은 옛 앞단의 bearer 설정이, `authorization` 은 vMCP 앞단의 헤더 주입이 읽는다."""
+    return render_svc_token_secret(
+        name=expose_svc_name(inputs.k8s_name),
+        namespace=inputs.namespace,
+        token=token,
+        tenant=inputs.tenant,
+        resource=RESOURCE_EXPOSE_SVC_TOKEN,
+        id=inputs.instance_id,
+        owner=inputs.owner,
+    )
+
+
+def proxy_front_docs(inputs: FrontInputs) -> list[dict[str, Any]]:
+    """옛 앞단 묶음. (Cedar 를 든 MCPAuthzConfig,) bearer MCPExternalAuthConfig, MCPRemoteProxy
+    expose-<k8s.name> 순이다. 발급자 있는 모드면 앞단에 사람 참조와 Cedar 를 건다. G8 게이트를 지난
+    클러스터는 Cedar 를 앞단의 MCPAuthzConfig 에 싣고 참조한다 (P50 8절). 앞단은 모든 모드에서 안쪽
+    MCPServer 에 서비스 토큰을 낸다(D41)."""
+    front = expose_proxy_name(inputs.k8s_name)
+    svc_name = expose_svc_name(inputs.k8s_name)
     docs: list[dict[str, Any]] = []
-    if oidc_ref:
-        policies = tenant_policies(tenant_group or "", agent_client_ids or [], client_id_claim)
-        if binds_delegation:
-            policies.append(delegation_forbid(FRONT_TARGET.format(instance_id), tenant))
-        policies += rules
-        if authz_by_ref:
-            # G8 게이트를 지난 클러스터는 정책을 앞단의 MCPAuthzConfig 에 싣고 참조한다 (P50 8절)
-            docs.append(
-                render_authz_config(
-                    cr_name=front,
-                    namespace=namespace,
-                    policies=policies,
-                    tenant=tenant,
-                    resource=RESOURCE_EXPOSE_AUTHZ,
-                    id=instance_id,
-                    groups_claim=groups_claim,
-                    owner=owner,
-                    roles_claim=roles_claim,
-                )
-            )
-            authz_ref = authz_config_ref(front)
-        else:
-            authz = render_authz_inline(policies, groups_claim, roles_claim)
-    ing = effective.ingress
-    tls_secret, issuer = ingress_tls(exposure, k8s_name)
-    if svc_token:
-        docs.append(
-            render_svc_token_secret(
-                name=svc_name,
-                namespace=namespace,
-                token=svc_token,
-                tenant=tenant,
-                resource=RESOURCE_EXPOSE_SVC_TOKEN,
-                id=instance_id,
-                owner=owner,
-            )
-        )
+    authz = authz_ref = None
+    if inputs.oidc_ref and inputs.authz_by_ref:
+        docs.append(front_authz_config(inputs, front, RESOURCE_EXPOSE_AUTHZ, list(inputs.policies)))
+        authz_ref = authz_config_ref(front)
+    elif inputs.oidc_ref:
+        authz = render_authz_inline(list(inputs.policies), inputs.groups_claim, inputs.roles_claim)
     docs.append(
         render_external_auth_config(
             name=svc_name,
-            namespace=namespace,
+            namespace=inputs.namespace,
             secret_name=svc_name,
             mode="bearer",
-            tenant=tenant,
+            tenant=inputs.tenant,
             resource=RESOURCE_EXPOSE_SVC_TOKEN,
-            id=instance_id,
-            owner=owner,
+            id=inputs.instance_id,
+            owner=inputs.owner,
         )
     )
-    return docs + [
+    docs.append(
         render_remote_proxy(
-            tenant=tenant,
-            item_id=instance_id,
+            tenant=inputs.tenant,
+            item_id=inputs.instance_id,
             name=front,
-            namespace=namespace,
-            url=proxy_service_url(k8s_name, namespace),
+            namespace=inputs.namespace,
+            url=proxy_service_url(inputs.k8s_name, inputs.namespace),
             transport="streamable-http",
             resource=RESOURCE_EXPOSE_PROXY,
-            oidc_config_ref=oidc_ref,
+            oidc_config_ref=inputs.oidc_ref,
             authz_config=authz,
             authz_config_ref=authz_ref,
             trust_proxy_headers=True,
             audit=True,
-            owner=owner,
+            owner=inputs.owner,
             external_auth_config=svc_name,
-            pod_annotations={SVC_TOKEN_REV_ANNOTATION: svc_token_rev},
-            service_account=service_account,
-        ),
+            pod_annotations={SVC_TOKEN_REV_ANNOTATION: inputs.svc_token_rev},
+            service_account=inputs.service_account,
+        )
+    )
+    return docs
+
+
+def front_authz_config(
+    inputs: FrontInputs, cr_name: str, resource: str, policies: list[str]
+) -> dict[str, Any]:
+    """앞단 CR cr_name 이 참조하는 `<cr_name>-authz` (P50 8절). 그 앞단의 Cedar 를 싣는다."""
+    return render_authz_config(
+        cr_name=cr_name,
+        namespace=inputs.namespace,
+        policies=policies,
+        tenant=inputs.tenant,
+        resource=resource,
+        id=inputs.instance_id,
+        groups_claim=inputs.groups_claim,
+        owner=inputs.owner,
+        roles_claim=inputs.roles_claim,
+    )
+
+
+def mcp_fronts(k8s_name: str, *, vmcp: bool) -> list[tuple[str, str]]:
+    """노출 NetworkPolicy 가 고를 앞단 파드의 (이름, 파드 라벨의 종류). vmcp 면 두 종류 모두이고
+    (P54 5절), 아니면 옛 앞단 하나다."""
+    fronts = [(expose_proxy_name(k8s_name), FRONT_KIND_PROXY)]
+    if vmcp:
+        fronts.append((front_name_for(k8s_name), FRONT_KIND_VMCP))
+    return fronts
+
+
+def mcp_route_docs(
+    inputs: FrontInputs,
+    *,
+    to_vmcp: bool,
+    fronts: Sequence[tuple[str, str]],
+    annotations: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    """MCP Server 노출의 Ingress 와 NetworkPolicy. to_vmcp 면 Ingress 가 vMCP 앞단의 Service
+    `vmcp-front-<k8s.name>:4483` 으로, 아니면 옛 앞단의 Service 로 간다. annotations 는 Cluster
+    ingress.annotations 위에 얹는 것이다(앞단을 바꾼 때, P54 6절)."""
+    ing = inputs.effective.ingress
+    tls_secret, issuer = ingress_tls(inputs.exposure, inputs.k8s_name)
+    if to_vmcp:
+        service, port = vmcp_service_name(front_name_for(inputs.k8s_name)), VMCP_PORT
+    else:
+        service, port = (
+            proxy_service_name(expose_proxy_name(inputs.k8s_name), remote=True),
+            PROXY_PORT,
+        )
+    return [
         render_ingress(
-            tenant=tenant,
-            instance_id=instance_id,
+            tenant=inputs.tenant,
+            instance_id=inputs.instance_id,
             resource=RESOURCE_MCP_INGRESS,
-            name=k8s_name,
-            namespace=namespace,
-            host=exposure.host or "",
-            ingress_class=exposure.ingress_class or "",
-            service_name=proxy_service_name(front, remote=True),
-            port=PROXY_PORT,
+            name=inputs.k8s_name,
+            namespace=inputs.namespace,
+            host=inputs.exposure.host or "",
+            ingress_class=inputs.exposure.ingress_class or "",
+            service_name=service,
+            port=port,
             tls_secret=tls_secret,
             cluster_issuer=issuer,
-            annotations=ing.annotations,
-            owner=owner,
+            annotations={**(ing.annotations or {}), **(annotations or {})},
+            owner=inputs.owner,
             paths=MCP_EXPOSE_PATHS,
         ),
         render_expose_policy(
-            tenant=tenant,
-            instance_id=instance_id,
+            tenant=inputs.tenant,
+            instance_id=inputs.instance_id,
             resource=RESOURCE_MCP_POLICY,
-            name=expose_policy_name(k8s_name),
-            namespace=namespace,
-            front_name=front,
-            front_kind=FRONT_KIND_PROXY,
+            name=expose_policy_name(inputs.k8s_name),
+            namespace=inputs.namespace,
+            fronts=fronts,
             controller_namespace=ing.controller_namespace,
             controller_ip_blocks=ing.controller_ip_blocks,
-            owner=owner,
+            owner=inputs.owner,
         ),
     ]
+
+
+def mcp_expose_docs(inputs: FrontInputs, *, svc_token: str | None = None) -> list[dict[str, Any]]:
+    """vMCP 앞단의 게이트를 지나지 못한 클러스터의 노출 묶음. (서비스 토큰 Secret,) 옛 앞단
+    (`proxy_front_docs`), 그 앞단으로 가는 Ingress, NetworkPolicy 순이다. svc_token 이 있으면 Secret
+    문서도 낸다(배포 경로). 미리보기는 토큰 없이 렌더한다."""
+    secret = [front_token_secret(inputs, svc_token)] if svc_token else []
+    fronts = mcp_fronts(inputs.k8s_name, vmcp=False)
+    route = mcp_route_docs(inputs, to_vmcp=False, fronts=fronts)
+    return [*secret, *proxy_front_docs(inputs), *route]
 
 
 def gateway_expose_docs(
@@ -652,8 +729,7 @@ def gateway_expose_docs(
             resource=RESOURCE_GATEWAY_POLICY,
             name=expose_policy_name(k8s_name),
             namespace=namespace,
-            front_name=k8s_name,
-            front_kind=FRONT_KIND_VMCP,
+            fronts=[(k8s_name, FRONT_KIND_VMCP)],
             controller_namespace=ing.controller_namespace,
             controller_ip_blocks=ing.controller_ip_blocks,
             owner=owner,
@@ -661,18 +737,40 @@ def gateway_expose_docs(
     ]
 
 
+def proxy_front_refs(k8s_name: str) -> list[tuple[str, str, str]]:
+    """옛 앞단의 (apiVersion, kind, name). MCPRemoteProxy, 그 Cedar 설정, bearer
+    MCPExternalAuthConfig 다. 토큰 Secret 은 vMCP 앞단과 함께 쓰므로 들지 않는다."""
+    front = expose_proxy_name(k8s_name)
+    return [
+        (TOOLHIVE_API, "MCPRemoteProxy", front),
+        (TOOLHIVE_API, AUTHZ_CONFIG_KIND, authz_config_name(front)),
+        (TOOLHIVE_API, "MCPExternalAuthConfig", expose_svc_name(k8s_name)),
+    ]
+
+
+def vmcp_front_refs(k8s_name: str) -> list[tuple[str, str, str]]:
+    """vMCP 앞단 가운데 이름이 그 앞단의 것뿐인 객체 (P54 5절). VirtualMCPServer, 그 Cedar 설정,
+    헤더 주입 MCPExternalAuthConfig 다. MCPGroup 과 MCPServerEntry 는 다른 문서와 이름이 겹칠 수
+    있어 그 서버의 라벨을 단 것만 지운다(`k8s/templates/vmcp.py` `GROUP_ENTRY_KINDS`)."""
+    front = front_name_for(k8s_name)
+    return [
+        (TOOLHIVE_API, "VirtualMCPServer", front),
+        (TOOLHIVE_API, AUTHZ_CONFIG_KIND, authz_config_name(front)),
+        (TOOLHIVE_API, "MCPExternalAuthConfig", front),
+    ]
+
+
 def expose_object_refs(k8s_name: str, *, front_proxy: bool) -> list[tuple[str, str, str]]:
     """삭제 단계에서 이름으로 지울 (apiVersion, kind, name). ownerReference 로 GC 되지만 한 번 더
-    지운다."""
+    지운다. front_proxy(MCP Server)면 두 앞단과 그 토큰 Secret 까지다 (P54 6절). vMCP 앞단의
+    Entry 와 그룹은 이름으로 지우지 않는다(`vmcp_front_refs`)."""
     refs = [
         (INGRESS_API, "Ingress", k8s_name),
         (INGRESS_API, "NetworkPolicy", expose_policy_name(k8s_name)),
     ]
     if front_proxy:
-        front = expose_proxy_name(k8s_name)
-        refs.append((TOOLHIVE_API, "MCPRemoteProxy", front))
-        refs.append((TOOLHIVE_API, AUTHZ_CONFIG_KIND, authz_config_name(front)))
-        refs.append((TOOLHIVE_API, "MCPExternalAuthConfig", expose_svc_name(k8s_name)))
+        refs += proxy_front_refs(k8s_name)
+        refs += vmcp_front_refs(k8s_name)
         refs.append(("v1", "Secret", expose_svc_name(k8s_name)))
     return refs
 
@@ -687,16 +785,29 @@ def delete_expose_objects(
 # -- 상태 --------------------------------------------------------------------------------
 
 
-def exposure_status(
+@dataclass
+class ExposureReading:
+    """상태 조회 하나가 읽은 노출 (P54 7·11절). fields 는 응답의 노출 상태다. front 는 노출 앞단이
+    따로 있는 종류(MCP Server)에서 Ingress 를 읽었을 때 그것이 가리키는 앞단의 (종류, 이름)이고,
+    front_cr 은 그 CR 이다(없으면 None). 같은 조회의 앞단 경고가 Ingress 를 다시 읽지 않고 이것을
+    쓴다."""
+
+    fields: dict[str, Any]
+    front: tuple[str, str] | None = None
+    front_cr: dict[str, Any] | None = None
+
+
+def read_exposure(
     client: KubeClient,
     *,
     k8s_name: str,
     namespace: str,
     exposure: Exposure,
     front_proxy: bool,
-) -> dict[str, Any] | None:
-    """{front_phase, address_assigned, tls_secret_present, certificate_ready}. 노출하지 않았으면
-    None. 조회 실패는 필드를 None 으로 둔다 (예외 없음)."""
+) -> ExposureReading | None:
+    """노출 상태 `{front_phase, address_assigned, tls_secret_present, certificate_ready}` 와
+    Ingress 가 가리키는 앞단. 노출하지 않았으면 None. 조회 실패는 필드를 None 으로 둔다 (예외
+    없음)."""
     if not exposure.enabled:
         return None
     out: dict[str, Any] = {
@@ -705,11 +816,13 @@ def exposure_status(
         "tls_secret_present": None,
         "certificate_ready": None,
     }
+    reading = ExposureReading(out)
     try:
-        if front_proxy:
-            cr = client.get(TOOLHIVE_API, "MCPRemoteProxy", expose_proxy_name(k8s_name), namespace)
-            out["front_phase"] = ((cr or {}).get("status") or {}).get("phase") if cr else "Missing"
         ingress = client.get(INGRESS_API, "Ingress", k8s_name, namespace)
+        if front_proxy:
+            kind, name = reading.front = serving_front(ingress, k8s_name)
+            cr = reading.front_cr = client.get(TOOLHIVE_API, kind, name, namespace)
+            out["front_phase"] = ((cr or {}).get("status") or {}).get("phase") if cr else "Missing"
         if exposure.tls.mode == "edge":
             # 앞단이 공개하는 클러스터는 LoadBalancer 가 없어 Ingress 상태에 주소가 쓰이지 않는다.
             # 판정하지 않는다(None). 화면은 "앞단이 공개" 로 보인다
@@ -744,7 +857,23 @@ def exposure_status(
         pass
     except Exception:  # noqa: BLE001 - cert-manager CRD 없음 등. 상태 조회가 인스턴스 조회를 막지 않는다
         pass
-    return out
+    return reading
+
+
+def ingress_service(ingress: dict[str, Any] | None) -> str | None:
+    """Ingress 의 첫 경로가 가는 Service 이름. 노출 Ingress 의 경로는 모두 한 Service 로 간다."""
+    rules = ((ingress or {}).get("spec") or {}).get("rules") or [{}]
+    paths = (rules[0].get("http") or {}).get("paths") or [{}]
+    return ((paths[0].get("backend") or {}).get("service") or {}).get("name")
+
+
+def serving_front(ingress: dict[str, Any] | None, k8s_name: str) -> tuple[str, str]:
+    """노출한 MCP Server 의 Ingress 가 가리키는 앞단의 (종류, 이름) (P54 6·11절). vMCP 앞단의
+    Service 로 가면 그 VirtualMCPServer 이고, 그 밖(옛 앞단, Ingress 없음)은 옛 앞단이다."""
+    front = front_name_for(k8s_name)
+    if ingress_service(ingress) == vmcp_service_name(front):
+        return "VirtualMCPServer", front
+    return "MCPRemoteProxy", expose_proxy_name(k8s_name)
 
 
 # -- 옵션 조회 ---------------------------------------------------------------------------
@@ -864,6 +993,8 @@ class ExposureValidationMixin:
 
     require_oidc_exposure: bool = False  # Agent 는 header 모드 노출을 아예 막는다 (D27)
     exposure_hosts: MongoExposureHostStore  # 공개 host 의 선점 기록 (P70). 생성자가 채운다
+    # Entry 이름의 선점 (D82). Gateway 와 노출한 MCP Server(vMCP 앞단, P54 5절)의 생성자가 채운다
+    entries: GatewayEntries | None = None
 
     def _sibling_stores(self) -> list[Any]:
         """host 유일성을 함께 보는 다른 인스턴스 스토어. 배선이 채운다 (D27)."""
@@ -883,9 +1014,12 @@ class ExposureValidationMixin:
         return Exposure()
 
     def _claim_stores(self) -> list[MongoNameClaimStore[Any]]:
-        """해제와 삭제가 놓는 이 종류의 선점 기록. 셋 모두 공개 host 이고 Gateway 는 Entry 이름을
-        더한다."""
-        return [self.exposure_hosts]
+        """해제와 삭제가 놓는 이 종류의 선점 기록. 셋 모두 공개 host 이고 Entry 이름을 선점하는
+        종류(`entries`)는 그 기록을 더한다."""
+        stores: list[MongoNameClaimStore[Any]] = [self.exposure_hosts]
+        if self.entries is not None:
+            stores.append(self.entries.names)
+        return stores
 
     async def _held_claims(self, inst: Any) -> list[HeldClaim]:
         """해제의 마지막 저장 앞에서 읽어 두는 그 리소스의 선점 (P70 2절). 저장 뒤 읽은 nonce 로

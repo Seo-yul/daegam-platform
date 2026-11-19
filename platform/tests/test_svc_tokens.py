@@ -82,10 +82,14 @@ def test_consumer_objects_render():
         "type": "bearerToken",
         "bearerToken": {"tokenSecretRef": {"name": "svc-expose-mcp-a", "key": "token"}},
     }
-    # 노출 해제는 앞단과 함께 토큰 객체 둘도 이름으로 지운다
+    # 노출 해제는 두 앞단과 함께 토큰 객체도 이름으로 지운다 (P54 6절)
     kinds = [(k, n) for _api, k, n in expose_object_refs("mcp-a", front_proxy=True)]
     assert ("MCPExternalAuthConfig", "svc-expose-mcp-a") in kinds
     assert ("Secret", "svc-expose-mcp-a") in kinds
+    assert {("VirtualMCPServer", "front-mcp-a"), ("MCPExternalAuthConfig", "front-mcp-a")} <= set(
+        kinds
+    )
+    assert ("MCPAuthzConfig", "front-mcp-a-authz") in kinds
     assert all(k != "Secret" for _api, k, _n in expose_object_refs("mcp-a", front_proxy=False))
 
 
