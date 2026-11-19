@@ -153,6 +153,13 @@
 #            Agent 의 토큰은 두 이름 어느 것도 부르지 못한다(이 Agent 의 목록이 그 순간 읽힌 거절만 센다). 끝난 뒤 이 Agent 의
 #            토큰은 add_numbers 만 보고 7 을 받는다. 끝에 규칙과 오버라이드를 걷은 리비전을 재배포해 STEP 12·13 이 전처럼
 #            Add·Divide 를 쓰게 한다
+#   STEP 11c (local·memory, P56) code mode 의 스크립트. Add·Divide 를 읽기로 표시한 MCP Server calc-read-agent-e2e 를 게시해
+#            code mode 를 켠 Gateway code-gw-agent-e2e 로 묶는다. 그 Gateway 의 규칙은 Divide 를 developer 이상에게만 열어 모든
+#            Agent 에게서 숨긴다. Agent code-agent-e2e 의 메인은 Tool 을 고르지 않은 그 Gateway 노드로 execute_tool_script 를
+#            들고, 서브에이전트의 다른 노드가 같은 Gateway 의 Add 에 승인을 둔다. 스크립트는 먼저 승인을 묻고(interrupt 의 Tool
+#            이 스크립트이고 결정은 그 승인의 approve·reject 다), 승인하면 Add 의 결과를 돌려주며, vMCP 의 감사 기록이 그
+#            스크립트를 sub=관리자, act=svc:agent:agent-code-agent-e2e 로 남긴다. 스크립트 안에서 Divide 를 부르면 승인 뒤
+#            unknown tool 로 실패한다. Agent·Gateway·서버는 그 단계가 지운다
 #   STEP 12  STEP 13 이 쓸 정의를 먼저 복제(support-e2e-ext, draft)한 뒤 delete → Deployment·Service·NetworkPolicy·token
 #            Secret·provider Secret copies gone; 404 afterwards (삭제가 정의까지 지우므로 410 이 아니다). 삭제 전에 뒤에서 연
 #            {"sleep": 20} 턴(memory 면 STEP 7 의 이전 세션)은 삭제 호출 뒤 30초 안에 error{code: turn_cancelled} 로 끝난다.
@@ -199,7 +206,8 @@
 #            재배포하면 daegam.devops.ai.kr/config-sha 가 같고 새 ReplicaSet 이 없으며, 둘째 provider 의 키를 바꿔 재배포하면 값이
 #            바뀌고 새 파드의 DAEGAM_LLM_OPENAI_E2E_B_API_KEY 가 새 키다. 마지막에 돈다
 #   cleanup  남은 복제본 삭제; MCP Server and Database cleanup requested; STEP 2 가 넣은 stub provider 제거.
-#            STEP 5g·14 가 만든 것(Agent·Gateway·게시·provider)은 그 단계가 끝에서 걷고, 도중에 실패하면 EXIT 트랩이 걷는다
+#            STEP 5g·11c·14 가 만든 것(Agent·Gateway·MCP Server·게시·provider)은 그 단계가 끝에서 걷고, 도중에 실패하면 EXIT
+#            트랩이 걷는다
 #
 # Steps print `STEP n PASS|SKIP|FAIL: ...`. macOS has no `timeout`, so every wait is a polling loop.
 # Names: 한글 display_name 을 보내고 K8s 이름은 소문자·하이픈 name 이다 (D24).
@@ -332,10 +340,14 @@ KEY_PROVIDER_A="openai-e2e-a"; KEY_PROVIDER_B="openai-e2e-b"; KEY_MODEL="gpt-4o-
 KEY_ENV_A="DAEGAM_LLM_OPENAI_E2E_A_API_KEY"; KEY_ENV_B="DAEGAM_LLM_OPENAI_E2E_B_API_KEY"
 KEY_A="sk-e2e-a-not-a-real-key"; KEY_B="sk-e2e-b-not-a-real-key"; KEY_B_NEW="sk-e2e-b-rotated-not-a-real-key"
 KEY_AG_NAME="keys-agent-e2e"; KEY_AG_DISPLAY="키 두 벌 에이전트 e2e"
+# 11c (P56) 의 code mode Gateway 와 그 백엔드 MCP Server, 스크립트를 쓰는 Agent 와 승인을 둔 서브에이전트
+CODE_MS_NAME="calc-read-agent-e2e"; CODE_GW_NAME="code-gw-agent-e2e"; CODE_SUB="calc"
+CODE_AG_NAME="code-agent-e2e"; CODE_AG_DISPLAY="스크립트 에이전트 e2e"
 # STEP 5g·14 가 만든 것. 그 단계가 끝에서 걷고 비우며, 도중에 실패하면 EXIT 트랩이 걷는다
 GW_AG_ID=""; KEY_AG_ID=""; KEY_PROVIDERS_ADDED=0
 SAFE_AG_ID=""; SAFE_SIDS=""   # 8s 의 Agent 와 그 세션. 8s 가 끝에서 걷고, 도중에 실패하면 EXIT 트랩이 걷는다
 JUDGE_AG_ID=""   # 8j 의 Agent. 8j 가 끝에서 걷고, 도중에 실패하면 EXIT 트랩이 걷는다
+CODE_AG_ID=""; CODE_GW_ID=""; CODE_MS_ID=""   # 11c 가 만든 것. 11c 가 끝에서 걷고, 도중에 실패하면 EXIT 트랩이 걷는다
 SAFE_CHOICES=""; SAFE_CHOICE_IDS=""   # 8s 가 읽은 그 Agent 에 대한 내 기억한 선택("Tool:선택")과 그 id
 BG_PID=""                 # 뒤에서 SSE 를 받는 curl (sse_bg)
 DRAIN_W_PID=""; DRAIN_L_PID=""   # 10d 가 뒤에서 여는 두 턴의 curl (sse_bg_as)
@@ -422,6 +434,19 @@ drop_turn_setup() {
   fi
 }
 
+# drop_code_mode [STEP]: STEP 11c 가 만든 Agent·Gateway·MCP Server 를 걷는다. Agent 가 Gateway 를, Gateway 가 서버의 게시
+# 항목을 붙드므로 이 차례다. 서버 삭제가 게시 항목을 함께 지운다. api_delete 는 끝내 못 지워도 멈추지 않으므로, STEP 을
+# 주면 하나씩 사라졌는지 보고 아니면 die STEP 이다. EXIT 트랩은 STEP 없이 부른다
+drop_code_mode() {
+  local path
+  for path in ${CODE_AG_ID:+"/agents/$CODE_AG_ID"} ${CODE_GW_ID:+"/gateways/$CODE_GW_ID"} \
+    ${CODE_MS_ID:+"/mcp-servers/$CODE_MS_ID"}; do
+    api_delete "$path"
+    [ -z "${1:-}" ] || wait_gone "$path" || die "$1" "$path is still there after its delete"
+  done
+  CODE_AG_ID=""; CODE_GW_ID=""; CODE_MS_ID=""
+}
+
 # 11r 이 STEP 3 의 MCP Server 에 둔 규칙과 오버라이드를 걷는다. 다음 실행이 규칙 없는 서버에서 시작하게 한다. 실패하면
 # 사람이 할 일을 찍는다
 drop_tool_rules() {
@@ -447,6 +472,7 @@ cleanup() {
   drop_safety_agent
   drop_judge_agent
   drop_key_agent
+  drop_code_mode
   drop_tool_rules
   drop_turn_setup
   # 13(s) 의 서비스 어카운트. 그 단계가 끝에서 지우고, 도중에 끝났으면 여기서 지운다
@@ -491,6 +517,8 @@ MCP_CLIENT_NAME="e2e-agent"
 . "$HERE/lib/e2e_turn_tokens.sh"
 # Tool 규칙(P52, 11r)의 rules_save·rules_redeploy·rules_settled·rules_rolled·tool_names·call_refused 는 여기에 있다
 . "$HERE/lib/e2e_tool_rules.sh"
+# code mode(P56, 11c)의 code_read_body·script_args·SCRIPT_TOOL 은 여기에 있다
+. "$HERE/lib/e2e_code_mode.sh"
 # oidc 의 group_mappings_add(1t 가 더한다)·group_mappings_restore(EXIT 트랩이 되돌린다)는 여기에 있다
 . "$HERE/lib/e2e_group_mappings.sh"
 # 데이터 플레인 토큰 (aud daegam-mcp). USER TENANT [OIDC_GROUP] -> local 은 사람을 TENANT 의 viewer 로 넣고 로그인해 받으므로
@@ -2011,6 +2039,72 @@ if [ "$AUTH_MODE" = local ]; then
   pass 11r "rules on $MS_NAME (Add: $AG_NAME only, a <= 100; Divide: developer and up) listed $AG_NAME as may restart; conditions recorded; $AG_NAME status hides Divide (not_named); chat Add(3,4) -> 7 and Add(500,1) -> '$REFUSAL'; at the proxy $AG_NAME's own and delegated tokens list Add alone and get 7, an unnamed Agent's service and delegation tokens get an empty list and a refused call; renaming Add to $RULES_RENAMED: $probes probes during the roll and one after refused both names to the unnamed Agent, $AG_NAME then lists $RULES_RENAMED alone -> 7; rules removed and redeployed"
 else
   cond_skip 11r "Tool rules are checked in local mode (make e2e-agent-local); header mode renders no caller rule, which e2e-gateway checks with its warning"
+fi
+
+# ---------- 11c. code mode 의 스크립트 (P56 6.5·6.6절, local) ----------
+# calculator WSDL 의 오퍼레이션은 표시가 없으면 쓰기라 code mode 를 켤 수 없다. 그래서 서버 주인이 Add·Divide 를 읽기로
+# 표시한 MCP Server 를 따로 띄워 게시하고, code mode 를 켠 Gateway 로 묶는다. 그 Gateway 의 규칙은 Divide 를 developer
+# 이상에게만 열고 Agent 를 이름 대지 않아 모든 Agent 에게서 숨긴다(P52 2절). Agent 의 메인은 Tool 을 고르지 않은 그
+# Gateway 노드로 스크립트를 들고(배포 때 핀이 스크립트를 포함한 이름 전부다), 서브에이전트의 다른 노드가 같은 Gateway 의
+# Add 에 승인을 둔다. 컴파일이 그 승인을 스크립트로 옮기므로 스크립트가 먼저 묻는다. 승인한 재개는 턴 위임 토큰으로 vMCP 를
+# 부르고, vMCP 는 스크립트 하나를 사람(sub)과 Agent(act)를 실은 감사 기록 하나로 남긴다. 스크립트 안의 호출도 같은 신원으로
+# Cedar 를 지나므로 규칙이 숨긴 Divide 는 스크립트 안에서 unknown tool 이다. 승인에는 체크포인터가 있어야 하므로 memory 가
+# 있을 때만 돈다
+# script_turn STEP SCRIPT: 11c 의 Agent 가 SCRIPT 를 부르게 한다. 스크립트가 승인을 먼저 묻는지 보고 승인한다. 재개의 SSE 는
+# $WORK/sse, 응답 머리는 $WORK/chat.hdr 이고 SCRIPT_SID 와 재개 앞뒤의 클러스터 시각 SCRIPT_BEFORE·SCRIPT_AFTER 를 남긴다
+script_turn() {
+  local step="$1" code
+  code="$(chat "/agents/$CODE_AG_ID/chat" "$(msg "$(stub_call "$SCRIPT_TOOL" "$(script_args "$2")")")")"
+  { [ "$code" = 200 ] && [ "$(sse_ 'names[-1]')" = interrupt ]; } \
+    || { cp "$WORK/sse" "$WORK/body"; die "$step" "the script did not ask first -> $code $(sse_ 'names')"; }
+  [ "$(sse_ 'first("interrupt")["action_requests"][0]["name"], first("interrupt")["review_configs"][0]["allowed_decisions"]')" \
+    = "$SCRIPT_TOOL ['approve', 'reject']" ] || die "$step" "the interrupt is not the script's with the Add approval: $(sse_ 'first("interrupt")')"
+  SCRIPT_SID="$(sse_ 'first("interrupt")["session_id"]')"
+  SCRIPT_BEFORE="$(cluster_now)" || die "$step" "reading the platform's clock failed"
+  code="$(chat "/agents/$CODE_AG_ID/sessions/$SCRIPT_SID/decisions" '{"decisions": [{"type": "approve"}]}' -D "$WORK/chat.hdr")"
+  SCRIPT_AFTER="$(cluster_now)" || die "$step" "reading the platform's clock failed"
+  { [ "$code" = 200 ] && [ "$(sse_ 'names[-1]')" = "done" ] && [ "$(sse_ 'first("tool_result")["name"]')" = "$SCRIPT_TOOL" ]; } \
+    || { cp "$WORK/sse" "$WORK/body"; die "$step" "the approved script -> $code $(sse_ 'names') $(sse_ 'first("tool_result")')"; }
+}
+if [ "$AUTH_MODE" = local ] && [ "$HAS_MEMORY" = 1 ]; then
+  save_doc 11c /mcp-servers "$CODE_MS_NAME" "$(code_read_body "$CODE_MS_NAME" "$BP_ID" "$BP_VER")"
+  CODE_MS_ID="$SAVED_ID"
+  deploy_ready 11c /mcp-servers "$CODE_MS_ID" "{\"cluster_id\": \"$HOME_ID\"}"
+  code="$(api POST "/mcp-servers/$CODE_MS_ID/publish" '{}')"
+  case "$code" in 200 | 201) ;; *) die 11c "publish $CODE_MS_NAME -> $code: $(cat "$WORK/body")" ;; esac
+  CODE_HUB_ID="$(jq_ 'd["id"]')"
+  CODE_RULES='{"Divide": {"callers": {"roles": ["developer"]}}}'
+  save_doc 11c /gateways "$CODE_GW_NAME" \
+    "{\"name\": \"$CODE_GW_NAME\", \"backends\": [{\"hub_item_id\": \"$CODE_HUB_ID\", \"tool_rules\": $CODE_RULES}], \"code_mode\": true}"
+  CODE_GW_ID="$SAVED_ID"
+  deploy_ready 11c /gateways "$CODE_GW_ID" "{\"cluster_id\": \"$HOME_ID\"}"
+  python3 "$HERE/lib/agent_body.py" "$WORK/templates.json" "$WORK/code-agent.json" --name "$CODE_AG_NAME" \
+    --display "$CODE_AG_DISPLAY" --provider "$STUB_PROVIDER" --source "gateway_instance:$CODE_GW_ID" --every-tool \
+    --ds-id "$DS_ID" --sub-name "$CODE_SUB" --sub-approval "gateway_instance:$CODE_GW_ID:Add"
+  save_doc 11c /agents "$CODE_AG_NAME" "$(cat "$WORK/code-agent.json")"
+  CODE_AG_ID="$SAVED_ID"
+  deploy_ready 11c /agents "$CODE_AG_ID" "{\"cluster_id\": \"$HOME_ID\"}"
+  wait_gateway_gate 11c "$HOME_ID"
+  script_turn 11c 'return Add(a=20, b=22)'
+  SCRIPT_RESULT="$(sse_ 'first("tool_result")["content"]')"
+  { [ "$(sse_ 'first("tool_result")["status"]')" = success ] && echo "$SCRIPT_RESULT" | grep -q 42; } \
+    || die 11c "the script's Add(20, 22): $(sse_ 'first("tool_result")')"
+  turn_window 11c "$CODE_AG_ID" "$SCRIPT_SID" "$(hdr x-daegam-turn-grant "$WORK/chat.hdr")" "$SCRIPT_BEFORE" "$SCRIPT_AFTER"
+  CODE_SINCE="$TURN_SINCE"; CODE_UNTIL="$TURN_UNTIL"
+  script_turn 11c 'return call_tool("Divide", numerator=8, denominator=2)'
+  HIDDEN="$(sse_ 'first("tool_result")["content"]')"
+  # ToolHive 의 call_tool 이 그 이름을 따옴표로 싸서 답한다(`call_tool: unknown tool "Divide"`). 스크립트 글에도 Divide 가
+  # 있으므로 이름만 찾지 않는다
+  { [ "$(sse_ 'first("tool_result")["status"]')" = error ] && echo "$HIDDEN" | grep -qF 'unknown tool "Divide"'; } \
+    || die 11c "a script calling Divide, which the rule hides from $CODE_AG_NAME: $(sse_ 'first("tool_result")')"
+  audit_expect 11c "$CODE_SINCE" \
+    "script|$CODE_SINCE|$CODE_UNTIL|$CODE_GW_ID|$SCRIPT_TOOL|$ADMIN_SUB|svc:agent:agent-$CODE_AG_NAME|1"
+  drop_code_mode 11c
+  pass 11c "Gateway $CODE_GW_NAME (code mode over $CODE_MS_NAME, Divide for developers and up) as the source of $CODE_AG_NAME: the script asked first for the Add approval set in its sub agent's node, then returned '$SCRIPT_RESULT', and the vMCP audit has $SCRIPT_TOOL with sub=$ADMIN_SUB act=svc:agent:agent-$CODE_AG_NAME; Divide inside a script -> '$HIDDEN'; agent, gateway and server removed"
+elif [ "$AUTH_MODE" = local ]; then
+  skip 11c "a script's approval needs the checkpointer (memory node); step 4 skipped"
+else
+  cond_skip 11c "code mode's scripts are checked in local mode, where the turn token names the person and the Agent at the vMCP; e2e-gateway checks the Gateway side"
 fi
 
 # ---------- 12. clone → delete → objects gone; 404 ----------

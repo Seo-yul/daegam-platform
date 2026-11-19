@@ -201,6 +201,10 @@ E2E_GRAPHS = {
         f"{GW} --sub-name calc --sub-tools --approval-for Add --ds-id ds-pg"
     ),
     "outside and rememberable": e2e_spec(f"{GW} --outside Lookup --rememberable Add --ds-id ds-pg"),
+    "every tool, the sub agent's own node asks": e2e_spec(
+        f"{GW} --every-tool --sub-name calc --ds-id ds-pg"
+        f" --sub-approval gateway_instance:{CALC}:Add"
+    ),
     "without memory": e2e_spec(GW),
 }
 

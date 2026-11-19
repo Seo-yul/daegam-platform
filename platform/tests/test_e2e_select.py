@@ -63,7 +63,7 @@ def test_all_picks_every_gate_and_every_picked_gate_blocks() -> None:
     assert shards["core"]["blocking_gates"] == ""
     assert shards["agent"]["blocking_gates"].split()[0] == "e2e-agent-redis:10"
     assert shards["agent"]["blocking_gates"].split()[-1] == "e2e-ui-full:20"
-    assert shards["auth"]["blocking_gates"].split()[-1] == "e2e-agent-local:20"
+    assert shards["auth"]["blocking_gates"].split()[-1] == "e2e-agent-local:24"
     # 막지 않는 게이트는 처음 통과를 기다리는 e2e-llm-gateway(P38)와 아직 한 번도 돌지 않은
     # e2e-sandbox(P40), e2e-provisioning(P44), e2e-oidc-platform(P53b), e2e-exchange(P57),
     # e2e-evaluation(P45)이다
@@ -97,7 +97,7 @@ def test_names_pick_their_shards_and_install_gates_in_run_order() -> None:
     shards = _shards(picked)
     # e2e-agent-local 은 mock-oidc 가 필요 없다
     assert (
-        shards["auth"]["blocking_gates"] == "e2e-agent-local:20" and not shards["auth"]["mock_oidc"]
+        shards["auth"]["blocking_gates"] == "e2e-agent-local:24" and not shards["auth"]["mock_oidc"]
     )
     assert shards["agent"]["blocking_gates"] == shards["agent"]["soft_gates"] == ""
     assert not shards["agent"]["ui"]

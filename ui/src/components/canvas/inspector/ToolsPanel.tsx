@@ -19,9 +19,10 @@ import { useT } from "@/i18n";
 import { DECISIONS, SOURCE_KINDS, type Decision, type ToolsData } from "@/lib/agentGraph";
 import { idpDataPlane, useAuthState } from "@/lib/auth";
 import { gatewayToolTimeout } from "@/lib/gateway";
+import { CODE_MODE_TOOL } from "@/lib/hub";
 import { displayName } from "@/lib/names";
 import { AGENT_TOOL_TIMEOUT_SECONDS } from "@/lib/timeouts";
-import { canvasMarkApplies } from "@/lib/toolSafety";
+import { ORIGIN_SCRIPT, canvasMarkApplies } from "@/lib/toolSafety";
 
 import { ResourceLink, Tabs } from "./fields";
 import { ApprovalBadge, OutsideSection, ReadOnlySection, without } from "./toolMarks";
@@ -88,7 +89,12 @@ export function ToolsPanel({
   // 표시도 서지 않는 Tool 만이다
   const markable = effects ? Object.keys(effects).filter((tool) => effects[tool] === "write" && !readOnly.includes(tool) && canvasMarkApplies(origins?.[tool], marked?.includes(tool))) : [];
   const showReadOnly = markable.length > 0 || readOnly.length > 0;
-  const known = useMemo(() => toolNamesOfSource(data.source.kind, data.source.id, options), [data.source.kind, data.source.id, options]);
+  // code mode Gateway 의 execute_tool_script 다 (P56 6.5절). 배포 스냅샷에는 없고 검사가 백엔드 종류 script 로 본다. 소스의 Tool 로 함께 보인다
+  const offersScript = origins?.[CODE_MODE_TOOL] === ORIGIN_SCRIPT;
+  const known = useMemo(() => {
+    const listed = toolNamesOfSource(data.source.kind, data.source.id, options);
+    return listed && offersScript && !listed.includes(CODE_MODE_TOOL) ? [...listed, CODE_MODE_TOOL] : listed;
+  }, [data.source.kind, data.source.id, options, offersScript]);
   const allow = data.allow_tools ?? [];
   // 승인 기억은 이름을 아는 노드에서만 효과가 있다(서버 ChoiceRules). 고른 Tool 이거나, 고른 것이 없으면 검사가 소스의 이름으로 본 Tool 이다
   const namesKnown = (tool: string) => allow.includes(tool) || (!allow.length && effects?.[tool] !== undefined);
@@ -218,6 +224,11 @@ export function ToolsPanel({
               </Button>
             </div>
           </div>
+          {offersScript ? (
+            <p className="text-xs text-muted" data-testid="tools-code-mode-hint">
+              {text.codeModeHint}
+            </p>
+          ) : null}
           {effects ? null : (
             <p className="text-xs text-muted" data-testid="tools-effects-unknown">
               {text.effectsUnknown}

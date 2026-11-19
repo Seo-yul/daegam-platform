@@ -96,9 +96,9 @@ mcp() {
 #   mcp 가 남긴 $WORK/mcp.json 을 json_of 로 읽는다
 mcp_json() { json_of "$WORK/mcp.json" "$1"; }
 
-# adds_to_7 OUTPUT
-#   mcp_client.py 의 call Add(3,4) 출력이 7 을 돌려줬는가
-adds_to_7() { [ "$(json_of - 'd["call"]["structuredContent"] == {"result": 7}' <<<"$1")" = True ]; }
+# call_result_is N OUTPUT
+#   mcp_client.py 의 call 출력이 구조화된 결과 {"result": N} 을 돌려줬는가 (Add(3,4) 면 7). 4 와 4.0 은 같다
+call_result_is() { [ "$(json_of - "d['call']['structuredContent'] == {'result': $1}" <<<"$2")" = True ]; }
 
 # mcp_admits STEP TOKEN WHAT URL
 #   그 토큰으로 tools/list 에 Add 가 보이고 Add(3,4) 가 7 이어야 한다. 아니면 die STEP 이다. 부른 Tool 이름(vMCP 는 백엔드

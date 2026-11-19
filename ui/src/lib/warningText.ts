@@ -15,8 +15,8 @@
  */
 import { ApiError } from "@/api/client";
 import type { Messages } from "@/i18n";
-import type { HiddenCause, PausedSources } from "@/i18n/ko/warnings";
-import { gateReason, type GateReason } from "@/lib/codeExecution";
+import type { CodeModeCause, HiddenCause, PausedSources } from "@/i18n/ko/warnings";
+import { GATE_REASONS } from "@/lib/codeExecution";
 import { isCodeShape } from "@/lib/errorText";
 import { ownValue } from "@/lib/utils";
 
@@ -55,14 +55,32 @@ const DETAIL_OF: Record<string, (raw: string) => string | null> = {
   published_names_unknown: trailingNames,
   // `tools_source_newer: … (tools-billing: agent)` 의 노드와 종류다(platform/daegam/services/agent_status.py newer_source_warning)
   tools_source_newer: trailingNames,
+  // `code_mode_closed: … (cause: tools; tools: a, b)` 의 Tool 이름이나 `(cause: unknown_names; backends: x)` 의 허브 항목 이름이다
+  // (platform/daegam/services/gateway_code_mode.py closed_warning)
+  code_mode_closed: (raw) => /(?:tools|backends): ([^)]+)\)/.exec(raw)?.[1] ?? null,
+  code_mode_tools_hidden: trailingNames,
 };
 
-/** 규칙이 Agent 의 Tool 을 숨기는 원인. 서버 문장의 `cause: <원인>` 이고 모르는 원인이면 null 이다. */
-const HIDDEN_CAUSES: readonly HiddenCause[] = ["not_named", "item", "oidc", "reissue"];
-function causeOf(raw: string): HiddenCause | null {
-  const cause = /cause: ([a-z_]+)/.exec(raw)?.[1];
-  return HIDDEN_CAUSES.find((c) => c === cause) ?? null;
+/** 서버 문장의 `<key>: <값>` 가운데 values 에 있는 것. 모르는 값이면 null 이다. */
+function valueIn<C extends string>(raw: string, key: string, values: readonly C[]): C | null {
+  const value = new RegExp(`${key}: ([a-z_]+)`).exec(raw)?.[1];
+  return values.find((c) => c === value) ?? null;
 }
+
+/** 규칙이 Agent 의 Tool 을 숨기는 원인 (platform/daegam/services/agent_status.py HIDDEN_CAUSES). */
+const HIDDEN_CAUSES: readonly HiddenCause[] = ["not_named", "item", "oidc", "reissue"];
+/** Code mode 를 끈 까닭 (platform/daegam/services/gateway_code_mode.py CLOSED_CAUSES, CAUSE_TOOLHIVE). */
+const CODE_MODE_CAUSES: readonly CodeModeCause[] = ["tools", "unknown_names", "reserved_name", "exposed", "owner_cedar", "toolhive"];
+
+/**
+ * 서버 문장의 `(<이름>: <까닭>)` 으로 사전 문장 하나를 고르는 코드. 값은 읽을 이름과 아는 까닭이다. 코드 실행 게이트는 `reason:`
+ * (platform/daegam/services/sandboxes.py `gate_warnings`), Code mode 는 `cause:` 다(platform/daegam/services/gateway_code_mode.py
+ * `closed_warning`).
+ */
+const CHOSEN_BY: Record<string, { key: string; values: readonly string[] }> = {
+  sandbox_gate_closed: { key: "reason", values: GATE_REASONS },
+  code_mode_closed: { key: "cause", values: CODE_MODE_CAUSES },
+};
 
 /**
  * 사전 문장에 수가 들어가는 코드. 값은 서버 원문에서 수를 뽑는다. runs_paused_by_deploy 는 `this deploy paused 2 schedule(s) and
@@ -76,23 +94,24 @@ const COUNTS_OF: Record<string, (raw: string) => PausedSources | null> = {
   },
 };
 
-/** 표의 한 줄. 까닭을 받는 줄(코드 실행 게이트)은 text 대신 까닭마다의 문장을 든다. */
+/** 표의 한 줄. 까닭을 받는 줄(코드 실행 게이트, Code mode)은 text 대신 까닭마다의 문장을 든다. */
 type WarningEntry =
   | { text: string | ((counts: PausedSources) => string); causes?: Record<HiddenCause, string> }
-  | { reasons: Record<GateReason, string> };
+  | { choices: Record<string, string> };
 
 /**
  * 표의 한 줄을 문장으로. 수를 받는 문장은 원문에서 수를 읽고, 읽지 못하면 null 이라 부르는 쪽이 원문을 보인다. 원인을 받는
- * 문장은 원문의 원인 문장을 잇고, 원인을 읽지 못하면 앞 문장만이다. 까닭을 받는 줄은 원문의 `(reason: <까닭>)` 의 문장이고, 까닭을
- * 읽지 못하면 null 이다(platform/daegam/services/sandboxes.py `gate_warnings`).
+ * 문장은 원문의 원인 문장을 잇고, 원인을 읽지 못하면 앞 문장만이다. 까닭을 받는 줄은 CHOSEN_BY 가 그 코드에 정한 이름
+ * (`reason:`·`cause:`)으로 원문의 까닭을 읽어 그 문장을 고르고, 까닭을 읽지 못하면 null 이다.
  */
 function entryText(entry: WarningEntry, code: string, raw: string | null): string | null {
-  if ("reasons" in entry) {
-    const reason = raw === null ? null : gateReason(/reason: ([a-z_]+)/.exec(raw)?.[1]);
-    return reason ? entry.reasons[reason] : null;
+  if ("choices" in entry) {
+    const by = ownValue(CHOSEN_BY, code);
+    const chosen = raw === null || by === undefined ? null : valueIn(raw, by.key, by.values);
+    return chosen ? (ownValue(entry.choices, chosen) ?? null) : null;
   }
   if (typeof entry.text === "string") {
-    const cause = entry.causes && raw !== null ? causeOf(raw) : null;
+    const cause = entry.causes && raw !== null ? valueIn(raw, "cause", HIDDEN_CAUSES) : null;
     return cause && entry.causes ? `${entry.text} ${entry.causes[cause]}` : entry.text;
   }
   const counts = raw === null ? null : (ownValue(COUNTS_OF, code)?.(raw) ?? null);

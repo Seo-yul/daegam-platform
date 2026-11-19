@@ -322,6 +322,9 @@ export const canvas = {
     blockDomainsHint: "web_fetch 가 접속하지 않는 도메인입니다. 쉼표로 구분합니다.",
     webHint: "web_search 와 web_fetch 는 플랫폼 Tool 입니다. Gateway 에 넣어 사용합니다.",
     webHintLink: "웹 Tool 로 Gateway 만들기",
+    /** code mode Gateway 의 execute_tool_script 안내 (P56 6.5절). 검사가 그 Tool 을 스크립트로 본 노드에 선다. */
+    codeModeHint:
+      "execute_tool_script 는 스크립트 안에서 이 Gateway 가 이 Agent 에게 허용하는 모든 Tool 을 부릅니다. 이 Agent 의 어느 노드에서든 이 Gateway 의 Tool 에 승인을 하나라도 설정했으면 스크립트도 승인을 받고, 스크립트 결과는 외부 내용으로 다룹니다.",
     notInSource: "소스에 없음",
     listUnknown: "소스의 Tool 목록을 알 수 없습니다. 이름을 직접 적어 주세요.",
     pickSource: "소스를 선택하면 Tool 목록이 나옵니다.",
@@ -488,6 +491,11 @@ export const canvas = {
       /** Skill 화면의 검사와 같은 code 이고 같은 문장이다. */
       skill_scripts_inert: skills.issues.skill_scripts_inert,
       skill_behind: "고정한 리비전보다 새 리비전이 있습니다. 새 리비전을 쓰려면 '최신으로' 를 누르고 저장한 뒤 재배포해 주세요.",
+      // code mode Gateway 의 스크립트를 든 tools 노드 (P56 6.5절, platform/daegam/services/agent_code_mode.py)
+      code_mode_partial_selection:
+        "execute_tool_script 는 이 Gateway 의 모든 Tool 을 부를 수 있어, Tool 을 일부만 선택한 노드에서는 사용할 수 없습니다. 선택을 모두 비워 전체 Tool 을 사용하거나 선택에서 execute_tool_script 를 빼 주세요.",
+      code_mode_duplicate_script:
+        "한 에이전트에는 execute_tool_script 를 Gateway 하나에서만 붙일 수 있습니다. 승인 설정과 Tool 이름이 Gateway 를 구별하지 않기 때문입니다. 다른 Gateway 의 노드에서는 execute_tool_script 를 뺀 Tool 을 선택해 주세요.",
     } satisfies Record<string, string | ((at: IssueAt) => string)>,
     providerRole,
     redisCheckpointerHint,

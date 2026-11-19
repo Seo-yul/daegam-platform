@@ -105,6 +105,27 @@ describe("tools 노드의 외부 내용 표시", () => {
     expect(screen.getByTestId("tool-outside-Add")).not.toBeDisabled();
   });
 
+  it("검사가 code mode 스크립트로 본 execute_tool_script 는 소스의 Tool 로 보이고 안내가 선다 (P56 6.5절)", () => {
+    const gw = gatewayFixture();
+    function Script({ origin }: { origin?: ToolOrigin }) {
+      const [data] = useState<ToolsData>({ ...defaultNodeData("tools"), source: { kind: "gateway_instance", id: gw.id } } as ToolsData);
+      const effects: Record<string, ToolEffect> = origin ? { Add: "read", execute_tool_script: "read" } : { Add: "read" };
+      const origins: Record<string, ToolOrigin> = origin ? { Add: "internal", execute_tool_script: origin } : { Add: "internal" };
+      const options = inspectorOptions({ gateways: [gw], toolEffects: { [NODE]: effects }, toolOrigins: { [NODE]: origins } });
+      return <ToolsPanel nodeId={NODE} data={data} update={() => undefined} options={options} hasMemory />;
+    }
+    const { unmount } = renderWithProviders(<Script origin="script" />);
+    expect(screen.getByTestId("tools-code-mode-hint")).toHaveTextContent(text.codeModeHint);
+    const row = screen.getByTestId("tool-allow-execute_tool_script").closest("li") as HTMLElement;
+    expect(row).not.toHaveTextContent(text.notInSource);
+    expect(within(row).getByTestId("tool-effect-execute_tool_script")).toHaveTextContent(text.effect.read);
+    unmount();
+    // code mode 가 아닌 Gateway 에는 안내가 없다
+    renderWithProviders(<Script />);
+    expect(screen.queryByTestId("tools-code-mode-hint")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("tool-allow-execute_tool_script")).not.toBeInTheDocument();
+  });
+
   it("승인 설정이 없는 쓰기 Tool 은 memory 노드가 있으면 승인, 없으면 거절 배지다", () => {
     const { unmount } = renderWithProviders(<Harness start={{ approval: { send_mail: ["approve"] } }} />);
     expect(screen.getByTestId("tool-outside-approval-create_order")).toHaveTextContent(text.outsideApproval);

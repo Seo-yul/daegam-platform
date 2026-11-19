@@ -292,6 +292,18 @@ export const errors = {
       "proxy 모드로 게시된 Gateway 는 백엔드로 사용할 수 없습니다. 원래 Gateway 를 관리하는 사람에게 entry 모드로도 게시해 달라고 요청한 뒤 그 항목을 선택하거나, 다른 백엔드를 선택해 주세요.",
     tools_list_failed:
       "백엔드에서 Tool 목록을 가져오지 못했습니다. 항목이 Ready 인지 확인한 뒤에 Tool 목록을 새로 고쳐 주세요.",
+    // Code mode 를 켠 Gateway 의 저장·미리보기·배포 검사 (P56 6.2절, services/gateway_code_mode.py). toolhive_old 는 배포만 낸다
+    code_mode_not_read_only:
+      "이 Gateway 가 제공하는 Tool 가운데 읽기 전용이 아닌 Tool 이 있어 Code mode 를 켤 수 없습니다. 그 Tool 을 백엔드의 Tool 선택에서 빼거나 서버나 허브 항목에서 읽기 전용으로 표시해 주세요. 웹 Tool 과 remote·entry 항목의 Tool 은 읽기 전용으로 표시할 수 없으므로 빼야 합니다.",
+    code_mode_unknown_names:
+      "Tool 이름을 알 수 없는 백엔드가 있어 Code mode 를 켤 수 없습니다. 그 허브 항목에서 Tool 새로고침을 실행하거나 그 백엔드의 Tool 을 직접 선택해 주세요.",
+    code_mode_reserved_name:
+      "이 Gateway 가 제공하는 Tool 가운데 이름이 execute_tool_script 인 Tool 이 있어 Code mode 를 켤 수 없습니다. 그 백엔드에서 이 Tool 을 뺀 나머지 Tool 을 선택하거나 Conflict resolution 을 prefix 로 바꿔 주세요.",
+    code_mode_exposed: "외부에 노출한 Gateway 에서는 Code mode 를 켤 수 없습니다. 노출을 끄거나 Code mode 를 끈 뒤 다시 저장해 주세요.",
+    code_mode_owner_cedar:
+      "이 Gateway 는 Advanced 탭에 저장한 Cedar 정책을 그대로 사용하고 있어 Code mode 를 켤 수 없습니다. Advanced 탭에서 그 정책을 지운 뒤 다시 저장해 주세요.",
+    code_mode_toolhive_old:
+      "이 클러스터의 ToolHive 가 Code mode 를 지원하지 않아 Code mode 를 켠 Gateway 를 배포할 수 없습니다. 플랫폼 관리자에게 ToolHive 업그레이드를 요청해 주세요.",
 
     // -- LLM provider --------------------------------------------------------------
     no_provider:

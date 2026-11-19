@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router";
 
 import { ApiError } from "@/api/client";
@@ -49,6 +49,8 @@ interface FormState {
   replicas: string;
   resources: ResourcesDraft;
   surface: SurfaceSel;
+  /** Gateway 가 execute_tool_script 를 함께 내는가 (P56 6.2절). 서버가 저장할 때 읽기 전용인지 검사한다 */
+  codeMode: boolean;
 }
 
 // 새 Gateway 는 둘 다 끈 채로 시작한다(서버의 POST 기본값과 같다)
@@ -61,6 +63,7 @@ const EMPTY: FormState = {
   replicas: "1",
   resources: EMPTY_DRAFT,
   surface: { resources: false, prompts: false },
+  codeMode: false,
 };
 
 /** 인가 정책 칸의 보기. Cedar 문장이라 번역하지 않는다. */
@@ -77,6 +80,7 @@ function fromGateway(p: Gateway): FormState {
     resources: draftFromResources(p.runtime.resources),
     // 표면을 정하기 전 리비전(null)은 둘 다 열려 있다. 저장하면 그대로 정한 것이 된다
     surface: p.surface ? { resources: p.surface.resources, prompts: p.surface.prompts } : { resources: true, prompts: true },
+    codeMode: p.code_mode,
   };
 }
 
@@ -120,7 +124,8 @@ export function GatewayFormPage() {
       setLoaded(true);
     }
   }, [existing.data, loaded]);
-  const { names, backends, conflict, failureMode, authz, replicas, resources, surface } = form;
+  const { names, backends, conflict, failureMode, authz, replicas, resources, surface, codeMode } = form;
+  const codeModeHintId = useId();
   // 플랫폼 웹 Tool 을 맨 앞에 둔다 (P39b 15절). 캔버스의 안내가 `?backend=<이름>` 으로 미리 골라 보낸다
   const pickerItems = useMemo(() => [...(hub.data ?? [])].sort((a, b) => Number(isPlatformHubItem(b.kind)) - Number(isPlatformHubItem(a.kind))), [hub.data]);
   const [params] = useSearchParams();
@@ -187,6 +192,7 @@ export function GatewayFormPage() {
       authz_policy: authz.trim() || null,
       runtime: { replicas: Number(replicas) || 1, resources: res.value },
       surface,
+      code_mode: codeMode,
     });
   }
 
@@ -377,6 +383,20 @@ export function GatewayFormPage() {
                   </label>
                 ))}
                 <span className="text-xs text-muted">{text.surfaceHint}</span>
+              </div>
+              <div className="flex flex-col gap-1">
+                <label className="flex items-center gap-2 text-sm">
+                  <input type="checkbox" data-testid="gp-code-mode" aria-describedby={codeModeHintId} checked={codeMode} onChange={(e) => set({ codeMode: e.target.checked })} />
+                  {text.codeMode}
+                </label>
+                <span id={codeModeHintId} className="text-xs text-muted">
+                  {text.codeModeHint}
+                </span>
+                {codeMode ? (
+                  <Alert variant="info" data-testid="gp-code-mode-audit">
+                    {t.gateways.codeModeAudit}
+                  </Alert>
+                ) : null}
               </div>
               <Field label={text.authz} htmlFor="gp-authz" hint={text.authzHint}>
                 <Input id="gp-authz" data-testid="gp-authz" className="font-mono text-xs" placeholder={CEDAR_EXAMPLE} value={authz} onChange={(e) => set({ authz: e.target.value })} />

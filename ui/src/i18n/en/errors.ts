@@ -219,6 +219,15 @@ export const errors: Messages["errors"] = {
     published_proxy_unsupported:
       "A Gateway published in proxy mode cannot be a backend. Ask whoever manages the original Gateway to publish it in entry mode as well and select that item, or select a different backend.",
     tools_list_failed: "Could not get the Tool list from the backend. Check that the item is Ready, then refresh the Tools again.",
+    code_mode_not_read_only:
+      "Some Tools this Gateway offers are not read-only, so Code mode cannot be turned on. Remove them from the backend's Tool selection, or mark them read-only on their server or hub item. Web Tools and the Tools of remote and entry items cannot be marked read-only and must be removed.",
+    code_mode_unknown_names: "A backend's Tool names are unknown, so Code mode cannot be turned on. Refresh the Tools of that hub item, or select that backend's Tools.",
+    code_mode_reserved_name:
+      "A Tool this Gateway offers is named execute_tool_script, so Code mode cannot be turned on. Select that backend's other Tools, or set Conflict resolution to prefix.",
+    code_mode_exposed: "Code mode cannot be turned on for an exposed Gateway. Turn off exposure or Code mode and save again.",
+    code_mode_owner_cedar: "This Gateway runs Cedar saved in the Advanced tab, so Code mode cannot be turned on. Remove that policy in the Advanced tab and save again.",
+    code_mode_toolhive_old:
+      "This cluster's ToolHive does not support Code mode, so a Gateway with Code mode on cannot be deployed. Ask a platform admin to upgrade ToolHive.",
 
     // -- LLM provider --------------------------------------------------------------
     no_provider: "No LLM provider is registered. Ask an admin to register a provider in Platform Settings.",
