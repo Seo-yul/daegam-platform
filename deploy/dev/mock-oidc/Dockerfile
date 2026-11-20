@@ -1,5 +1,5 @@
 # Daegam mock OIDC provider (dev/e2e only). Never deploy to production.
-FROM python:3.12-slim-trixie@sha256:4840d514c583a4d3d8cad3940e68dee6f0f6f3635c12fcd0a3d74c21a5b93a54 AS build
+FROM python:3.12-slim-trixie@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b AS build
 # 사내 방화벽 CA (선택). make 의 DAEGAM_CA_FILE 이 빌드 비밀 daegam_ca 로 오면, 받기 단계만 시스템 CA 묶음에 그 CA 를
 # 더한 묶음을 tmpfs 에 만들어 믿는다. 이미지 층에는 CA 도 묶음도 남지 않는다. 비밀이 없으면 받기는 그대로다
 # (docs/guide/images.md 3절)
@@ -26,7 +26,7 @@ RUN --mount=type=secret,id=daegam_ca,required=false --mount=type=tmpfs,target=/r
 # 프로젝트 자체는 깔지 않는다. 깔면 빌드 백엔드(hatchling)를 해시 없이 받는다. 소스는 PYTHONPATH 로 읽는다
 COPY mock_oidc ./mock_oidc
 
-FROM python:3.12-slim-trixie@sha256:4840d514c583a4d3d8cad3940e68dee6f0f6f3635c12fcd0a3d74c21a5b93a54
+FROM python:3.12-slim-trixie@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b
 # 베이스 태그가 다시 구워지기 전에 Debian 이 낸 보안 판을 받는다. 런타임은 uv 가 만든 venv 로 돌고 pip 를 부르지
 # 않는다. 베이스 이미지의 pip 는 고칠 수 있는 취약점으로 잡히므로 뺀다(D55)
 # push-images 가 OS_PATCH_DATE 에 그날 날짜를 넘겨 아래 층의 빌드 캐시를 하루에 한 번 버린다. 바탕 digest 는
