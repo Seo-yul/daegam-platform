@@ -398,6 +398,16 @@ code="$(mcp_ingress "$EXT_URL" "$EXPOSE_HOST:80:$LB_IP" tools/call '{"name": "Ad
 RULE_DENIED="$code"
 # 서버는 그룹 절을 짓지 않는다. 서비스 토큰의 그룹은 테넌트 그룹이라 그룹 절이 있었다면 열렸을 것이다 (2절)
 SVC_TOKEN="$(svc_token "$MX_ID")" || die 7r "svc_token.py failed"
+# 다시 배포가 서버의 파드를 바꿨다. STEP 7 이 연 kubectl 은 내려간 파드에 붙은 채 포트를 쥐고 있으므로 새 파드로 다시
+# 열고(lib/e2e_pf.sh restart_pf), 토큰 없는 요청이 401 로 답할 때까지 기다린다
+restart_pf "$PROXY_PORT"
+code=""
+for ((i = 0; i < 60; i++)); do
+  code="$(mcp_status "http://127.0.0.1:${PROXY_PORT}/mcp" 2>/dev/null || true)"
+  [ "$code" = 401 ] && break
+  sleep 1
+done
+[ "$code" = 401 ] || die 7r "the internal proxy did not answer 401 without a token after the redeploy: $code"
 rc="$(mcp --token "$SVC_TOKEN" list "http://127.0.0.1:${PROXY_PORT}/mcp")"
 [ "$rc" = 0 ] || die 7r "internal proxy tools/list with a service token rc=$rc: $(cat "$WORK/mcp.err")"
 [ "$(mcp_json '[t for t in d["tools"] if t.endswith("Add")]')" = "[]" ] \

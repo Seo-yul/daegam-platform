@@ -103,6 +103,8 @@ API_PORT="${E2E_API_PORT:-$PORT_INSTALL_API}"
 UI_PORT="${E2E_UI_PORT:-$PORT_INSTALL_UI}"
 # STEP 2 가 제어면 컨테이너의 requests·limits 를 요구하는가 (설치 값 파일의 E2E_REQUIRE_LIMITS)
 REQUIRE_LIMITS="$(install_flag E2E_REQUIRE_LIMITS false)" || exit 1
+# 테넌트 컨테이너에도 requests·limits 를 요구하는가. STEP 3 이 home 의 기본 자원을 보고 정한다
+TENANT_LIMITS=false
 BASE="http://127.0.0.1:${API_PORT}"
 API="$BASE/api"
 CURL_IMAGE="curlimages/curl:8.14.1"
@@ -199,6 +201,15 @@ if missing:
     print("MISSING " + "; ".join(missing))
     sys.exit(1)
 '
+}
+
+# tenant_resources STEP -> 테넌트 네임스페이스의 컨테이너를 check_resources 로 보고 한 줄 요약을 out 에 남긴다. home 에
+# 기본 자원이 있는 설치(TENANT_LIMITS, STEP 3 이 정한다)에서는 빠진 컨테이너가 실패다
+tenant_resources() {
+  out="$(check_resources "$TENANT_NS")" && return 0
+  [ "$TENANT_LIMITS" = true ] && { echo "$out"; die "$1" "$TENANT_NS 에 자원이 빠진 컨테이너가 있다"; }
+  echo "$out"
+  out="${out%%$'\n'*}; requests·limits missing in some containers, not required (home has no default resources)"
 }
 
 # 만든 것을 거꾸로 지운다. STEP 10 과 실패 뒤의 트랩이 함께 쓴다. 이미 없으면(404) 넘어간다
@@ -431,6 +442,9 @@ for ((i = 0; i < 30; i++)); do
 done
 [ -n "$HOME_ID" ] || die 3 "cluster home missing"
 code="$(api GET "/clusters/$HOME_ID")"; [ "$code" = "200" ] || die 3 "GET /clusters/$HOME_ID -> $code"
+# 테넌트 컨테이너의 requests·limits 는 home 의 기본 자원(DAEGAM_HOME_RESOURCES)에서 온다. 설치가 그것을 두지 않았으면
+# 플랫폼이 지은 컨테이너에 자원이 없는 것이 맞으므로 tenant_resources 가 빠진 것을 찍고 지나간다
+[ "$(jq_ 'bool((d.get("scheduling") or {}).get("resources"))')" = True ] && TENANT_LIMITS=true
 # 샌드박스 이미지(P40 10절)는 DAEGAM_HOME_IMAGES 밖의 따로인 env 이고 home 의 sandbox.image 로 간다. ConfigMap 을 한 번
 # 읽어 맞댄다. 없는 키는 맞대지 않고, 있는데 빈 키는 실패이며, 샌드박스 이미지는 늘 있어야 한다. 맞댄 필드를 COMPARED 에 남긴다
 "${K[@]}" -n "$NS" get configmap "$AUTH_MODE_CONFIGMAP" -o json >"$WORK/home-config.json" \
@@ -543,7 +557,7 @@ code="$(api POST "/mcp-servers/$MS_ID/publish" '{}')"
 case "$code" in 200|201) HMS="$(jq_ 'd["id"]')" ;; *) die 5 "publish $MS_NAME -> $code" ;; esac
 hub_tools "$HMS" 5; MS_TOOLS="$HUB_TOOLS"
 [ "$MS_TOOLS" = "$TOOLS_WANT" ] || die 5 "tools/list $MS_TOOLS (want $TOOLS_WANT)"
-out="$(check_resources "$TENANT_NS")" || { echo "$out"; die 5 "$TENANT_NS 에 자원이 빠진 컨테이너가 있다"; }
+tenant_resources 5
 pass 5 "MCP Server $MS_NAME Ready in $TENANT_NS, 허브 게시 $HMS, 플랫폼 경유 tools/list == $MS_TOOLS; $out"
 
 # ---------- 5n. MCP 백엔드 파드에는 프록시만 들어온다 (T67) ----------
@@ -626,7 +640,7 @@ code="$(api POST "/gateways/$GW_ID/publish" '{}')"
 case "$code" in 200|201) GWPUB="$(jq_ 'd["id"]')" ;; *) die 6 "publish $GW_NAME -> $code" ;; esac
 hub_tools "$GWPUB" 6; GW_TOOLS="$HUB_TOOLS"
 [ "$GW_TOOLS" = "$TOOLS_WANT" ] || die 6 "vMCP tools/list $GW_TOOLS (want $TOOLS_WANT)"
-out="$(check_resources "$TENANT_NS")" || { echo "$out"; die 6 "$TENANT_NS 에 자원이 빠진 컨테이너가 있다"; }
+tenant_resources 6
 pass 6 "Gateway $GW_NAME Ready, 게시 $GWPUB, vMCP 경유 tools/list == $GW_TOOLS; $out"
 
 # ---------- 7. 노출 (edge) ----------
@@ -652,7 +666,7 @@ else
   [ "$backend" = "vmcp-front-$MS_K8S:4483" ] || die 7 "Ingress $MS_K8S backend $backend (want vmcp-front-$MS_K8S:4483)"
   old="$("${K[@]}" -n "$TENANT_NS" get mcpremoteproxy "expose-$MS_K8S" -o name --ignore-not-found)" || die 7 "listing MCPRemoteProxy expose-$MS_K8S failed"
   [ -z "$old" ] || die 7 "a new exposure rendered the old front $old"
-  out="$(check_resources "$TENANT_NS")" || { echo "$out"; die 7 "$TENANT_NS 에 자원이 빠진 컨테이너가 있다"; }
+  tenant_resources 7
   code="$(api PATCH "/mcp-servers/$MS_ID" '{"exposure": {"enabled": false}}')"
   [ "$code" = "200" ] || die 7 "PATCH exposure off -> $code"
   pass 7 "edge 노출: vMCP 앞단 front-$MS_K8S Ready, Ingress -> $backend, 옛 앞단 없음, external_url=$EXT; 끔; $out"
@@ -673,10 +687,11 @@ if [ "$(jq_ "any(p['name']=='$PROVIDER' for p in d['llm_providers'])")" != True 
 fi
 code="$(api GET /agents/templates)"; [ "$code" = "200" ] || die 8 "GET /agents/templates -> $code"
 cp "$WORK/body" "$WORK/templates.json"
-# Tool 은 STEP 5 의 MCP Server 이고 memory 는 STEP 4 의 Redis 다. 그 Redis 가 없으면 memory 노드를 뺀다(lib/agent_body.py)
-if [ -n "$RDS_ID" ]; then MEMORY_ARGS=(--ds-id "$RDS_ID"); MEMORY_NOTE="memory Redis $RDS_NAME"; else MEMORY_ARGS=(); MEMORY_NOTE="no memory"; fi
+# Tool 은 STEP 5 의 MCP Server 이고 memory 는 STEP 4 의 Redis 다. 그 Redis 가 없으면 memory 노드와, memory 가 있어야 하는
+# 분당 한도(memory_required)를 뺀다(lib/agent_body.py)
+if [ -n "$RDS_ID" ]; then MEMORY_ARGS=(--ds-id "$RDS_ID" --rate-limit); MEMORY_NOTE="memory Redis $RDS_NAME"; else MEMORY_ARGS=(); MEMORY_NOTE="no memory"; fi
 python3 "$HERE/lib/agent_body.py" "$WORK/templates.json" "$WORK/agent.json" --name "$AG_NAME" --display "설치본 에이전트" \
-  --provider "$PROVIDER" --source "mcp_instance:$MS_ID" --rate-limit ${MEMORY_ARGS[@]+"${MEMORY_ARGS[@]}"}
+  --provider "$PROVIDER" --source "mcp_instance:$MS_ID" ${MEMORY_ARGS[@]+"${MEMORY_ARGS[@]}"}
 save_doc 8 /agents "$AG_NAME" "$(cat "$WORK/agent.json")"
 AG_ID="$SAVED_ID"
 code="$(api POST /agents/validate "$(python3 -c 'import json,sys; b=json.load(open(sys.argv[1])); print(json.dumps({"graph": b["graph"], "service": b["service"]}, ensure_ascii=False))' "$WORK/agent.json")")"
@@ -693,7 +708,7 @@ AG_SHA="$(template_annotation "$WORK/agent-deploy.json" "$CONFIG_SHA_ANNOTATION"
 case "$AG_SHA" in '' | 0) die 8 "pod template lacks $CONFIG_SHA_ANNOTATION: '$AG_SHA'" ;; esac
 [ "$(json_of "$WORK/agent-deploy.json" '[c["image"] for c in d["spec"]["template"]["spec"]["initContainers"]] == [c["image"] for c in d["spec"]["template"]["spec"]["containers"] if c["name"] == "agent"]')" = True ] \
   || die 8 "the init container does not run the runtime image of $AG_K8S"
-out="$(check_resources "$TENANT_NS")" || { echo "$out"; die 8 "$TENANT_NS 에 자원이 빠진 컨테이너가 있다"; }
+tenant_resources 8
 summary="provider $PROVIDER(openai, 가짜 키) + Agent $AG_NAME ($AG_K8S) Ready, $MEMORY_NOTE; env $PROVIDER_ENV, no OPENAI_*,"
 pass 8 "$summary $CONFIG_SHA_ANNOTATION $AG_SHA, init runs the runtime image; $out"
 
@@ -782,6 +797,7 @@ else
   TT_STARTED=1
   echo ">> ConfigMap $AUTH_MODE_CONFIGMAP turns minting and stub providers on for STEP 8t (restored on exit). If this run dies, $CONFIG_RESTORE_HINT"
   config_window_apply || die 8t "patching ConfigMap $AUTH_MODE_CONFIGMAP failed"
+  TT_ROLLED_AT="$(date -u +%Y-%m-%dT%H:%M:%S)"
   roll_platform_pf || die 8t "the platform did not come back after turning turn tokens on"
   turn_member_developer 8t
   ensure_stub_provider 8t "$TT_STUB"
@@ -811,6 +827,9 @@ else
   fi
   # MongoDB 레플리카가 하나인 설치에도 상태 API 의 훑기를 몰지 않게 15초마다 본다. 재적용은 네임스페이스마다 분당 세 문서를 다시 렌더한다
   TURN_GATE_TIMEOUT="${E2E_INSTALL_TURN_GATE_TIMEOUT:-600}" TURN_GATE_POLL=15 wait_gateway_gate 8t "$HOME_ID"
+  # 문이 열려도 Gateway 의 재렌더가 남아 있을 수 있다. 턴 뒤에 vMCP 파드가 바뀌면 수집 전의 감사 줄을 잃으므로
+  # (services/audit_collector.py) 굴린 뒤의 틱이 남은 재렌더 없음을 말할 때까지 기다린다
+  wait_auth_reapplied "${AUTH[1]#Authorization: Bearer }" "$TT_ROLLED_AT" || die 8t "the data plane still shows pending re-renders after turn tokens were turned on"
   TURN_MSG="$(stub_call get_pets '{}')"
   turn_with_target 8t "$TT_GW_AG_ID" gateway_instance "$GW_ID"
   GW_SINCE="$TURN_SINCE"; GW_UNTIL="$TURN_UNTIL"; GW_TRIES="$TURN_TRIES"
@@ -882,7 +901,7 @@ if [ "${E2E_INSTALL_REBOOT:-0}" = 1 ]; then
 fi
 
 # ---------- 9. 테넌트 네임스페이스 자원 ----------
-out="$(check_resources "$TENANT_NS")" || { echo "$out"; die 9 "$TENANT_NS 에 자원이 빠진 컨테이너가 있다"; }
+tenant_resources 9
 pass 9 "$TENANT_NS: $out"
 
 # ---------- 10. 정리 ----------

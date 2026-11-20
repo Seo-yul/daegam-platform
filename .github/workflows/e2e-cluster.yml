@@ -50,6 +50,14 @@ on:
       release:
         type: string
         required: true
+  # 손으로 돌린다. 태그 없이 고른 브랜치의 커밋에서 돌고, 게이트는 e2e 입력이 태그 메시지의 e2e: 줄처럼 고른다.
+  # 후보를 찍기 전에 e2e 를 고칠 때 쓴다(실패할 때마다 후보 번호를 쓰지 않는다). 이미지는 만들지 않는다
+  workflow_dispatch:
+    inputs:
+      # 고를 게이트의 이름들(쉼표로 가른다)이나 all. 비우면 늘 도는 게이트만 돈다
+      e2e:
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -79,7 +87,7 @@ env:
 
 jobs:
   # 태그 메시지의 e2e: 줄을 조각 matrix 로 바꾼다. 태그가 서명된 annotated 태그가 아니면 실패한다(릴리스
-  # 절차가 그렇게 만든다). 고른 것은 잡 요약에 남는다
+  # 절차가 그렇게 만든다). 손으로 돌린 실행은 태그가 없으므로 e2e 입력으로 같은 줄을 짓는다. 고른 것은 잡 요약에 남는다
   plan:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -95,10 +103,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE: ${{ inputs.release }}
+          PICKED: ${{ inputs.e2e }}
         run: |
-          object="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE" --jq '.object.type + " " + .object.sha')"
-          [ "${object%% *}" = tag ] || { echo "::error::$RELEASE is not an annotated tag ($object)"; exit 1; }
-          gh api "repos/$GITHUB_REPOSITORY/git/tags/${object#* }" --jq .message >"$RUNNER_TEMP/message"
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            RELEASE="$GITHUB_REF_NAME (manual run)"
+            { echo manual; [ -z "$PICKED" ] || printf '\ne2e: %s\n' "$PICKED"; } >"$RUNNER_TEMP/message"
+          else
+            object="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE" --jq '.object.type + " " + .object.sha')"
+            [ "${object%% *}" = tag ] || { echo "::error::$RELEASE is not an annotated tag ($object)"; exit 1; }
+            gh api "repos/$GITHUB_REPOSITORY/git/tags/${object#* }" --jq .message >"$RUNNER_TEMP/message"
+          fi
           { echo "#### e2e gates of $RELEASE"; echo; echo '```'
             python3 scripts/lib/e2e_select.py check <"$RUNNER_TEMP/message"
             echo '```'; } | tee -a "$GITHUB_STEP_SUMMARY"
