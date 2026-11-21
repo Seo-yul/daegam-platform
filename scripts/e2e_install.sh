@@ -830,6 +830,8 @@ else
   # 문이 열려도 Gateway 의 재렌더가 남아 있을 수 있다. 턴 뒤에 vMCP 파드가 바뀌면 수집 전의 감사 줄을 잃으므로
   # (services/audit_collector.py) 굴린 뒤의 틱이 남은 재렌더 없음을 말할 때까지 기다린다
   wait_auth_reapplied "${AUTH[1]#Authorization: Bearer }" "$TT_ROLLED_AT" || die 8t "the data plane still shows pending re-renders after turn tokens were turned on"
+  # 재적용이 끝났다는 틱 뒤에도 오퍼레이터가 vMCP 를 굴리는 중일 수 있고, 그동안의 호출은 곧 지워질 옛 파드가 받는다
+  wait_workloads_rolled "$TENANT_NS" || die 8t "workloads in $TENANT_NS were still rolling 300s after the re-render"
   TURN_MSG="$(stub_call get_pets '{}')"
   turn_with_target 8t "$TT_GW_AG_ID" gateway_instance "$GW_ID"
   GW_SINCE="$TURN_SINCE"; GW_UNTIL="$TURN_UNTIL"; GW_TRIES="$TURN_TRIES"
