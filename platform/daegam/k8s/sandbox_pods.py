@@ -58,10 +58,16 @@ FailReason = Literal[
 ]
 
 
+# 기록에 옮기는 종료 메시지의 길이. 샌드박스가 쓰는 메시지는 4000 바이트까지다
+TERMINATED_MESSAGE_LIMIT = 1000
+
+
 @dataclass(frozen=True)
 class PodView:
     """샌드박스 컨테이너 하나의 지금 모습. exit_code 는 지금 끝난 상태나 바로 앞에 끝난 상태의 끝
-    코드이고, terminated_reason 은 그 까닭(`OOMKilled` 같은)이다."""
+    코드이고, terminated_reason 은 그 까닭(`OOMKilled` 같은)이다. terminated_message 는 그
+    컨테이너가 남긴 종료 메시지다. 자기 점검이 무엇으로 실패했는지를 보이려는 것이고 아무것도
+    정하지 않는다."""
 
     exists: bool
     phase: str | None = None
@@ -71,6 +77,7 @@ class PodView:
     restarts: int = 0
     exit_code: int | None = None
     terminated_reason: str | None = None
+    terminated_message: str | None = None
     waiting_reason: str | None = None
     image_id: str | None = None
     pod_ip: str | None = None
@@ -105,6 +112,8 @@ def pod_view(pod: dict[str, Any] | None) -> PodView:
         restarts=int(cs.get("restartCount") or 0),
         exit_code=exit_code if isinstance(exit_code, int) else None,
         terminated_reason=terminated.get("reason"),
+        terminated_message=(terminated.get("message") or "").strip()[:TERMINATED_MESSAGE_LIMIT]
+        or None,
         waiting_reason=(state.get("waiting") or {}).get("reason"),
         image_id=cs.get("imageID") or None,
         pod_ip=status.get("podIP") or None,

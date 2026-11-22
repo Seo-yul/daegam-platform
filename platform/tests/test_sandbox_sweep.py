@@ -5,12 +5,14 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import timedelta
 from typing import Any
 
 import pytest
 
 from daegam.k8s.labels import LABEL_PLATFORM_ID
+from daegam.k8s.sandbox_pods import pod_view
 from daegam.k8s.templates.sandbox import LABEL_PROBE
 from daegam.store.base import utcnow
 from daegam.store.clusters import SandboxScheduling
@@ -104,6 +106,23 @@ def test_exit_87_voids_and_exit_88_only_ends_that_pod(client, mongo, fake, opene
     assert _rec(mongo, "s2")["state"] == "closed"
     check = _check(mongo, c.id)
     assert check["passed"] is False and check["void_reason"] == "self_check"
+
+
+def test_the_message_of_a_pod_that_failed_its_first_check_is_logged(
+    client, mongo, fake, opened, caplog
+):
+    """87 로 끝난 파드는 곧 지워진다. 무엇이 닿았는지는 그 종료 메시지뿐이라 기록에 남긴다."""
+    _, pod = opened
+    set_status(fake, pod, ready=False, running=False, waiting="CrashLoopBackOff", exit_code=87)
+    key = ("v1", "Pod", pod["metadata"]["namespace"], pod["metadata"]["name"])
+    said = '{"check": "first", "result": "reached", "reached": ["tcp:10.43.0.1:443"]}'
+    status = fake.objects[key]["status"]["containerStatuses"][0]
+    terminated = (status.get("state") or {}).get("terminated") or status["lastState"]["terminated"]
+    terminated["message"] = said + "\n"
+    assert pod_view(fake.objects[key]).terminated_message == said
+    with caplog.at_level(logging.WARNING, logger="daegam"):
+        _sweep(client)
+    assert any(said in r.getMessage() for r in caplog.records)
 
 
 def test_idle_sandboxes_are_reclaimed_after_30_minutes(client, mongo, fake, opened):

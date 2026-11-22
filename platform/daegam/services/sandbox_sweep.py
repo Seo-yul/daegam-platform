@@ -160,7 +160,7 @@ class SandboxSweep:
                 kept.append(rec)
                 continue
             if reason == "void":
-                await self.sandboxes.void(cluster, "self_check")
+                await self.sandboxes.void(cluster, "self_check", view)
             if reason == "later_failed":
                 await self.sandboxes.settle(rec, reason, cluster, client)
             elif reason == "idle":

@@ -414,7 +414,7 @@ class SandboxService:
             return {"sandbox_id": rec.id, "generation": rec.generation, "ready": False}
         action = judge_open_record(view)
         if action != "keep":
-            await self.settle(rec, action, cluster, client)
+            await self.settle(rec, action, cluster, client, view)
             raise await self._not_found(agent.id, session_id)
         return self._answer(rec, view)
 
@@ -636,7 +636,7 @@ class SandboxService:
             if rec.ready:
                 action = judge_open_record(view)
                 if action != "keep":
-                    await self.settle(rec, action, cluster, client)
+                    await self.settle(rec, action, cluster, client, view)
                     raise await self._not_found(rec.agent_id, rec.session_id)
                 if view.pod_ip:
                     return self._answer(rec, view)
@@ -646,7 +646,7 @@ class SandboxService:
                     return await self._ready(rec, cluster, client, view)
                 if judgement.fail is not None:
                     if judgement.void:
-                        await self.void(cluster, "self_check")
+                        await self.void(cluster, "self_check", view)
                     await self.close(rec, f"failed_{judgement.fail}", client=client)
                     raise open_failed(judgement.fail)
             if anyio.current_time() >= deadline:
@@ -764,19 +764,34 @@ class SandboxService:
                 logger.warning("cluster %s: a sandbox pod runs an unchecked image", cluster.name)
             cluster.sandbox.check.seen_image_id = cluster.sandbox.check.seen_image_id or image_id
 
-    async def void(self, cluster: Cluster, reason: SandboxVoidReason) -> None:
-        """판정을 쓰기로 무효로 한다 (8절). 87 로 끝난 첫 점검과 실패한 플랫폼 프로브만 부른다."""
+    async def void(
+        self, cluster: Cluster, reason: SandboxVoidReason, view: PodView | None = None
+    ) -> None:
+        """판정을 쓰기로 무효로 한다 (8절). 87 로 끝난 첫 점검과 실패한 플랫폼 프로브만 부른다.
+        view 는 87 로 끝난 파드다. 파드는 곧 지워지므로 그 종료 메시지(무엇이 닿았는지)를 기록에
+        남긴다."""
         if await self.clusters.void_sandbox_check(cluster.id, reason):
             logger.warning("cluster %s: sandbox verdict voided (%s)", cluster.name, reason)
+        if view is not None and view.terminated_message:
+            logger.warning(
+                "cluster %s: the sandbox that failed its first check said: %s",
+                cluster.name,
+                view.terminated_message,
+            )
 
     async def settle(
-        self, rec: SandboxRecord, action: str, cluster: Cluster, client: KubeClient
+        self,
+        rec: SandboxRecord,
+        action: str,
+        cluster: Cluster,
+        client: KubeClient,
+        view: PodView | None = None,
     ) -> None:
         """준비됐던 샌드박스를 스윕의 판단대로 닫는다. 87 은 판정을 무효로 하고, 88 은 그 노드에
         사용자 코드 없는 프로브를 바란다(8절). 88 은 명령이 닿을 수 있던 프로세스가 낸 것일 수
         있어 판정을 무효로 하지 않는다."""
         if action == "void":
-            await self.void(cluster, "self_check")
+            await self.void(cluster, "self_check", view)
             await self.close(rec, "self_check_failed", client=client)
         elif action == "later_failed":
             await self.close(rec, "later_check_failed", client=client)
