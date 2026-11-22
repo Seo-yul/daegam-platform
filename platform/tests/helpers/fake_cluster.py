@@ -152,6 +152,19 @@ class FakeClusterClient:
         self.scales: list[tuple[str, str, int]] = []
         self.pod_logs: dict[tuple[str, str], list[tuple[Any, str]]] = {}
         self.log_reads: list[tuple[str, str, int | None]] = []
+        # 다시 뜨기 전 컨테이너의 로그와 그것을 읽은 기록 (pods/log 의 previous)
+        self.previous_pod_logs: dict[tuple[str, str], list[tuple[Any, str]]] = {}
+        self.previous_log_reads: list[tuple[str, str, int | None]] = []
+        # 켜면 앞 컨테이너의 로그 읽기가 400 이 아닌 실패로 끝난다
+        self.previous_log_fails = False
+        # 이 이름의 파드는 로그 읽기가 실패한다 (죽은 노드의 파드)
+        self.failing_pod_logs: set[str] = set()
+        # 그 실패가 이만큼(초) 걸린 뒤에 온다 (시한까지 답이 없는 노드)
+        self.pod_log_failure_delay = 0.0
+        # 파드 metadata 나열 기록: (네임스페이스, 라벨, cached, timeout)
+        self.pod_metadata_lists: list[tuple[str | None, dict[str, str], bool, float | None]] = []
+        # 파드 metadata 나열이 이만큼(초) 걸린다 (답이 느린 클러스터)
+        self.slow_pod_lists = 0.0
         self.k8s_version = k8s_version
         self.toolhive_resources = (
             toolhive_resources
@@ -473,10 +486,18 @@ class FakeClusterClient:
         *,
         field_selector: str | None = None,
         labels: dict[str, str] | None = None,
+        cached: bool = False,
+        timeout: float | None = None,
     ) -> list[dict[str, Any]]:
         """metadata 만. field selector 는 `type=`·`metadata.name=` 을 지원한다. denied 에
         ("", "secrets", "list") 처럼 list 가 있으면 AccessDenied 다 (403 시뮬레이션)."""
         self._check()
+        if kind == "Pod":
+            self.pod_metadata_lists.append((namespace, dict(labels or {}), cached, timeout))
+            if self.slow_pod_lists:
+                import time
+
+                time.sleep(self.slow_pod_lists)
         self._deny(api_version, kind, "list", namespace)
         wanted: dict[str, str] = {}
         for part in (field_selector or "").split(","):
@@ -539,10 +560,25 @@ class FakeClusterClient:
         since_seconds: int | None = None,
         container: str | None = None,
         limit_bytes: int | None = None,
+        previous: bool = False,
+        timeout: float | None = None,
     ) -> str:
-        """add_pod_log 로 넣은 (ts, line) 중 since_seconds 안의 줄. 파드가 없으면 빈 문자열."""
+        """add_pod_log 로 넣은 (ts, line) 중 since_seconds 안의 줄. 파드가 없으면 빈 문자열.
+        previous 면 앞 컨테이너의 줄이고, 넣은 것이 없으면 (kubelet 의 400) 빈 문자열이다."""
         self._check()
-        lines = self.pod_logs.get((namespace, name), [])
+        if name in self.failing_pod_logs:
+            self.log_reads.append((namespace, name, since_seconds))
+            if self.pod_log_failure_delay:
+                import time
+
+                time.sleep(self.pod_log_failure_delay)
+            raise ClusterUnreachable(f"pods/log {namespace}/{name}: timed out")
+        if previous:
+            if self.previous_log_fails:
+                raise ClusterUnreachable(f"pods/log {namespace}/{name}: HTTP 500")
+            self.previous_log_reads.append((namespace, name, since_seconds))
+        logs = self.previous_pod_logs if previous else self.pod_logs
+        lines = logs.get((namespace, name), [])
         if since_seconds is not None:
             from datetime import timedelta
 
@@ -553,7 +589,8 @@ class FakeClusterClient:
         text = "\n".join(line for _ts, line in lines)
         if limit_bytes is not None:
             text = text[:limit_bytes]
-        self.log_reads.append((namespace, name, since_seconds))
+        if not previous:
+            self.log_reads.append((namespace, name, since_seconds))
         return text
 
     def service_route(
@@ -642,6 +679,14 @@ class FakeClusterClient:
         from daegam.store.base import utcnow
 
         self.pod_logs.setdefault((namespace, name), []).append((ts or utcnow(), line))
+
+    def restart_pod_container(self, namespace: str, name: str) -> None:
+        """컨테이너가 다시 뜬 것을 흉내 낸다. 지금까지의 줄은 앞 컨테이너의 로그가 되고 (그 앞의
+        것은 kubelet 처럼 버린다) restartCount 가 하나 는다."""
+        self.previous_pod_logs[(namespace, name)] = self.pod_logs.pop((namespace, name), [])
+        status = self.objects[("v1", "Pod", namespace, name)]["status"]
+        statuses = status.setdefault("containerStatuses", [{"name": "main", "restartCount": 0}])
+        statuses[0]["restartCount"] += 1
 
     def set_status(
         self, api_version: str, kind: str, name: str, namespace: str | None, status: dict[str, Any]
