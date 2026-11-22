@@ -58,7 +58,7 @@ RUN --mount=type=secret,id=daegam_ca,required=false --mount=type=tmpfs,target=/r
 
 # --- 2. runtime -----------------------------------------------------------------
 # 셸도 패키지 관리자도 없는 베이스다. 바탕은 digest 로 고정하고 OS 보안 판은 make base-pins 가 고정을 옮길 때 따라온다(D55)
-FROM gcr.io/distroless/cc-debian13:latest@sha256:809d04afa1be033c441f76bb0051878c342fb76d0ea236bc6dc94b655fa0fbd6
+FROM gcr.io/distroless/cc-debian13:latest@sha256:dac90a25ffe03ebaace90cda886b081e61ab6cd77ac47eda51f7bcc15c320765
 WORKDIR /app
 # 베이스에는 C.UTF-8 로캘 데이터가 없다. LANG 이 없는 로캘을 가리키면 setlocale(LC_ALL, "") 이 실패하므로 빌드 단계의
 # libc-bin 에서 가져온다
