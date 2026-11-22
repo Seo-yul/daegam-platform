@@ -260,11 +260,13 @@ jobs:
           # 플랫폼의 기본 샌드박스 이미지다(platform/daegam/k8s/templates/sandbox.py DEFAULT_SANDBOX_IMAGE)
           if [ "$SANDBOX_IMAGE" = true ]; then images+=(daegam-sandbox:0.1.0); fi
           # k3d 가 성공이라 찍고도 노드에 이미지가 빠진 적이 있다(1.1.0-rc7 core 하나, rc8 auth 다섯). 빠진
-          # 것만 한 번 더 넣고 다시 본다
+          # 것만 한 번 더 넣고 다시 본다. k3d 가 넣다가 실패로 끝나도(도커 소켓이 닫힌 적이 있다) 같은
+          # 길로 한 번 더 넣는다. 통과는 아래에서 노드에 있는 이미지로만 정한다
           missing=("${images[@]}")
           for attempt in 1 2; do
             [ "$attempt" = 1 ] || echo "::warning::not in the k3d node after import, importing again: ${missing[*]}"
-            k3d image import -c "$CLUSTER" --mode direct "${missing[@]}"
+            k3d image import -c "$CLUSTER" --mode direct "${missing[@]}" ||
+              echo "::warning::k3d image import failed on attempt $attempt"
             have="$(docker exec "k3d-$CLUSTER-server-0" crictl images -o json)"
             left=()
             for i in "${missing[@]}"; do
