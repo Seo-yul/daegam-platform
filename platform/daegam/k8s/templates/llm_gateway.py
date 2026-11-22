@@ -82,7 +82,9 @@ SMALL_RESOURCES = {
     "requests": {"cpu": "20m", "memory": "32Mi"},
     "limits": {"cpu": "500m", "memory": "128Mi"},
 }
-# 공인 주소로만 나간다. 사설·CGNAT·링크로컬·루프백을 뺀다 (10절)
+# 공인 주소로만 나간다. 사설·CGNAT·링크로컬·루프백을 뺀다 (10절). IPv6 는 전역 유니캐스트
+# (`GLOBAL_V6_BLOCK`)만 열어서 뺄 것이 없다. ULA(fc00::/7)와 링크로컬(fe80::/10)은 그 밖이고,
+# NetworkPolicy 는 `cidr` 밖의 `except` 를 422 로 거절한다
 PRIVATE_V4 = [
     "10.0.0.0/8",
     "172.16.0.0/12",
@@ -91,7 +93,6 @@ PRIVATE_V4 = [
     "169.254.0.0/16",
     "127.0.0.0/8",
 ]
-PUBLIC_V6_EXCEPT = ["fc00::/7", "fe80::/10"]
 
 
 def gateway_labels(resource: str, install_id: str) -> dict[str, str]:
@@ -387,7 +388,7 @@ def public_egress(port: int) -> dict[str, Any]:
     return {
         "to": [
             {"ipBlock": {"cidr": "0.0.0.0/0", "except": list(PRIVATE_V4)}},
-            {"ipBlock": {"cidr": GLOBAL_V6_BLOCK, "except": list(PUBLIC_V6_EXCEPT)}},
+            {"ipBlock": {"cidr": GLOBAL_V6_BLOCK}},
         ],
         "ports": _tcp(port),
     }
