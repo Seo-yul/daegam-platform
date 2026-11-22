@@ -746,6 +746,18 @@ fi
 # 기다린다. TURN_TARGET_WAIT 초를 넘기면 마지막 위임 기록을 찍고 die STEP 이다. 그 대상의 토큰을 실은 위임의
 # opened_at·ended_at 을 앞뒤 5초 넓혀 TURN_SINCE·TURN_UNTIL 에 남긴다. 감사 기록과 같은 클러스터의 시계라 이 맥과 노드의
 # 시계가 어긋나도 창이 맞는다. 연 턴 수는 TURN_TRIES 다
+# turn_report: 위임 턴이 서버에 닿지 못했을 때 정리 앞에 $TENANT_NS 의 파드와 최근 이벤트, 파드마다 로그의 끝을 찍는다.
+# 턴의 error 이벤트는 예외의 이름만 싣고, 정리가 Agent 와 Gateway 를 지우면 그 까닭이 사라진다
+turn_report() {
+  local pod
+  echo "--- turn diagnostics (namespace $TENANT_NS)"
+  "${K[@]}" -n "$TENANT_NS" get pods -o wide 2>&1 || true
+  "${K[@]}" -n "$TENANT_NS" get events --sort-by=.lastTimestamp 2>/dev/null | tail -n 30 || true
+  for pod in $("${K[@]}" -n "$TENANT_NS" get pods -o name 2>/dev/null); do
+    echo "--- $pod"
+    "${K[@]}" -n "$TENANT_NS" logs "$pod" --all-containers --tail=40 2>&1 || true
+  done
+} >&2
 turn_with_target() {
   local step="$1" agent="$2" target="$3:$4" code sid note="" result window deadline=$((SECONDS + TURN_TARGET_WAIT))
   TURN_TRIES=0
@@ -761,7 +773,7 @@ turn_with_target() {
     result="$(sse_ 'json.dumps(first("tool_result"), ensure_ascii=False)')"
     { [ "$code" = 200 ] && [ "$(sse_ 'names[-1]')" = "done" ] \
       && [ "$(sse_ '(lambda r: r is not None and r["name"] == "get_pets" and (r["status"] == "success" or "'"$TURN_BACKEND_ERROR"'" in r["content"]))(first("tool_result"))')" = True ]; } \
-      || { cp "$WORK/sse" "$WORK/body"; die "$step" "POST /agents/$agent/chat -> $code $(sse_ 'names'): get_pets did not reach the server, tool_result=$result"; }
+      || { cp "$WORK/sse" "$WORK/body"; turn_report; die "$step" "POST /agents/$agent/chat -> $code $(sse_ 'names'): get_pets did not reach the server, tool_result=$result"; }
     sid="$(sse_ 'first("done")["session_id"]')"
     turn_grants_of "$agent" "$sid" "$WORK/grants.json" || die "$step" "reading the turn grants of session $sid failed"
     note="$(json_of "$WORK/grants.json" 'json.dumps([{k: g.get(k) for k in ("sub", "targets", "end_reason")} for g in d])')"

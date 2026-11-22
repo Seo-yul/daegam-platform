@@ -455,8 +455,16 @@ step_9() {
   code="$(api DELETE "/hub/$P_ITEM")"
   [ "$code" = 200 ] || die 9 "DELETE /hub/$P_ITEM (unpublish P) -> $code: $(cat "$WORK/body")"
   P_ITEM=""
-  # 게시를 거두면 P 의 판이 바뀌지 않는다(소비자 집합은 이미 비었다). 재적용 틱 하나를 지나도 거절이 남는지 본다
+  # P1 이 사라지면 P 의 소비자 집합이 비어 다음 재적용 틱이 P 를 다시 렌더하고 P 의 파드가 바뀐다. 틱 하나를 지난 뒤
+  # 새 파드로 포워드를 다시 열고, 그 파드가 답할 때까지 기다렸다가 거절이 남는지 본다. 옛 kubectl 은 내려간 파드에
+  # 붙어 있어 요청이 답 없이 끊긴다(lib/e2e_pf.sh restart_pf)
   sleep "$REAPPLY_GAP"
+  start=$SECONDS
+  until refused_at "$copy" "$AUX_URL"; do
+    [ $((SECONDS - start)) -lt 120 ] || break
+    restart_pf "$AUX_PORT"; sleep 5
+    wait_port "$AUX_PORT" || true
+  done
   mcp_refuses 9 "$copy" "a copy of C's token after P was unpublished, at P" "$AUX_URL"
   pass 9 "C's bound token: refused at P1, admitted at P while C used P; after C dropped P the copy was refused after ${WAITED}s, and still after P was unpublished"
 }

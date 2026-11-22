@@ -59,6 +59,7 @@ DS_NAME="pg-llm-gw-e2e"; KB_NAME="faq-llm-gw-e2e"
 # 2분 안에 닿아야 하는 것(키, 회수)을 기다리는 한도다. 한 틱(60초)과 kubelet 의 Secret 동기화를 넘는다
 APPLY_WAIT=150
 UNREACHABLE_WITHIN=10
+GONE_WAIT=60 # 지운 게이트웨이 파드의 컨테이너와 서비스 규칙이 사라지기를 기다리는 초
 PAUSE_ANNOTATION="daegam.devops.ai.kr/llm-gateway-paused"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/daegam-e2e-llm-gateway.XXXXXX")"
 K=(kubectl --context "$CTX")
@@ -398,14 +399,33 @@ SCALED=1
 # 파드가 preStop 동안 남고 kube-proxy 가 그리로 보낸다
 deleted="$("${K[@]}" -n "$GW_NS" delete pod -l app.kubernetes.io/name=llm-gateway --grace-period=0 --force -o name 2>/dev/null || true)"
 [ -n "$deleted" ] || die 8 "no gateway pod was deleted (selector app.kubernetes.io/name=llm-gateway)"
-start_ms="$(now_ms)"
-unreachable="$(turn_error "$B_ID" "게이트웨이 없음")"
-took=$(( ($(now_ms) - start_ms) / 1000 ))
-[ "$unreachable" = llm_gateway_unreachable ] || die 8 "a turn without gateway pods ended with '$unreachable'"
+# 유예 없는 삭제는 API 의 파드 객체만 곧바로 지운다. 컨테이너는 kubelet 이 멈출 때까지, 서비스의 규칙은 kube-proxy 가
+# 따라올 때까지 남아서 그사이의 턴은 게이트웨이를 거쳐 끝나거나 끊긴 연결의 오류로 끝난다. 그런 턴은 다시 보내고, 시간은
+# 마지막 턴만 잰다
+for ((i = 0; i < GONE_WAIT / 2; i++)); do
+  start_ms="$(now_ms)"
+  unreachable="$(turn_error "$B_ID" "게이트웨이 없음")"
+  took=$(( ($(now_ms) - start_ms) / 1000 ))
+  [ "$unreachable" != llm_gateway_unreachable ] || break
+  sleep 2
+done
+[ "$unreachable" = llm_gateway_unreachable ] || {
+  cp "$WORK/sse" "$WORK/body"
+  die 8 "a turn without gateway pods ended with '$unreachable' (events $(sse_ 'names'))"
+}
 [ "$took" -le "$UNREACHABLE_WITHIN" ] || die 8 "llm_gateway_unreachable came after ${took}s (want ${UNREACHABLE_WITHIN}s)"
 "${K[@]}" annotate namespace "$GW_NS" "$PAUSE_ANNOTATION-" >/dev/null
 PAUSED=0
-"${K[@]}" -n "$GW_NS" rollout status deploy/llm-gateway --timeout=180s >/dev/null || die 8 "the sync did not bring the gateway back"
+# 0 으로 줄인 Deployment 는 동기화가 레플리카를 되돌리기 전에도 rollout status 가 곧바로 성공이다. 동기화가 되돌린
+# 레플리카가 모두 준비될 때까지 본다
+back=""
+for ((i = 0; i < 36; i++)); do
+  back="$("${K[@]}" -n "$GW_NS" get deploy/llm-gateway -o jsonpath='{.spec.replicas} {.status.readyReplicas}' 2>/dev/null || true)"
+  read -r gw_want gw_ready <<<"$back"
+  [ "${gw_want:-0}" -ge 1 ] && [ "${gw_ready:-0}" = "$gw_want" ] && break
+  sleep 5
+done
+{ [ "${gw_want:-0}" -ge 1 ] && [ "${gw_ready:-0}" = "$gw_want" ]; } || die 8 "the sync did not bring the gateway back within 180s (replicas and ready: '$back')"
 SCALED=0
 turn 8 "$B_ID" "다시 됨"
 pass 8 "llm_gateway_unreachable in ${took}s without pods; the sync restored them"
