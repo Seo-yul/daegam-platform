@@ -7,12 +7,12 @@
 # STEP 0 이 플랫폼 ConfigMap 을 local 모드로 바꾸고 제어면을 굴린다. EXIT trap 이 성공, 실패, 끊김 어느 쪽이든 만든 것을 지운
 # 뒤 모드를 되돌리고 제어면을 굴린다. 모드를 바꾸므로 다른 게이트와 클러스터를 나누지 않는다(scripts/lib/e2e_select.py 의
 # exchange 조각). 같은 테넌트의 사람 둘(developer DEV, viewer VIEW)과 다른 테넌트의 사람 FAR 의 개인 토큰으로 본다.
-# calculator 의 Add(규칙 없음)와 Divide(P 의 Gateway 규칙)가 대상 Tool 이고, Multiply 는 C 자신의 백엔드다. 단계는 다음과 같다:
+# calculator 의 Add(규칙 없음)와 Divide(P 의 Gateway 규칙)가 대상 Tool 이고, lab petstore 의 getPetById 는 C 자신의 백엔드다. 단계는 다음과 같다:
 #   STEP 0  ConfigMap 이 header 모드다(앞 실행이 남긴 값이면 바꾸기 전에 멈춘다). local 모드로 바꾸고 제어면을 굴린다
-#   STEP 1  관리자 로그인, 사람 셋과 개인 토큰, JWKS 캐시를 기다린 뒤 calculator MCP Server 둘(Add·Divide, Multiply)의
-#           배포와 게시
+#   STEP 1  관리자 로그인, 사람 셋과 개인 토큰, JWKS 캐시를 기다린 뒤 MCP Server 둘(calculator 의 Add·Divide, petstore 의
+#           getPetById)의 배포와 게시
 #   STEP 2  Gateway P(calculator, Divide 는 developer 이상)를 배포해 entry 모드로 게시하고, Gateway C(P 의 항목과
-#           Multiply, 소유자 Cedar 가 FAR 의 테넌트 그룹을 받는다)를 배포한다. C 의 Entry 토큰은 P 에 묶이고(bound_to
+#           getPetById, 소유자 Cedar 가 FAR 의 테넌트 그룹을 받는다)를 배포한다. C 의 Entry 토큰은 P 에 묶이고(bound_to
 #           gateway:<P>, groups·cid·act 없음) P 의 렌더가 C 를 이름 대면 DEV 가 C 를 거쳐 Add 와 Divide 를 부른다. P 의 감사는
 #           C 의 vMCP 를, C 의 감사는 DEV 를 남긴다
 #   STEP 3  VIEW 는 C 에서 Add 를 부르고, Divide 는 목록에 없고 부르지 못한다(P 의 규칙이 C 에서 선다)
@@ -20,7 +20,7 @@
 #           부르고 VIEW 는 부르지 못한다
 #   STEP 5  P 의 규칙을 viewer 이상으로 바꿔 P 를 다시 배포하면, 재적용이 C 와 C2 를 차례로 다시 렌더한 뒤 VIEW 가 둘에서
 #           Divide 를 부른다. 사슬은 재적용 틱 하나에 한 층씩 따라온다
-#   STEP 6  C 의 소유자 Cedar 가 받는 FAR 의 토큰은 C 의 Multiply 를 부르지만 P 의 Tool 은 목록에 없고 부르지 못한다
+#   STEP 6  C 의 소유자 Cedar 가 받는 FAR 의 토큰은 C 의 getPetById 를 부르지만 P 의 Tool 은 목록에 없고 부르지 못한다
 #   STEP 7  P 에 소유자 forbid 를 저장하면 답의 consumer_notice 가 C·P1·C2 를 이름 대고, P 를 다시 배포하면 C 를 거친 호출이
 #           거절되며 C 는 published_backend_closed, P 는 published_owner_forbid 를 경고한다. 그 P 를 백엔드로 저장하면 422
 #           published_owner_forbid 다. forbid 를 걷고 다시 배포하면 C 가 다시 부른다
@@ -66,20 +66,24 @@ TOKEN_DAYS=7
 REAPPLY_GAP=90
 STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%S)"
 
-BP_NAME="exch-calc"; MS_NAME="exch-calc-ms"; MUL_NAME="exch-mul-ms"
+BP_NAME="exch-calc"; MS_NAME="exch-calc-ms"; PET_BP_NAME="exch-pets"; PET_NAME="exch-pets-ms"
 P_NAME="exch-p"; C_NAME="exch-c"; P1_NAME="exch-p1"; C2_NAME="exch-c2"; C3_NAME="exch-c3"
 P_PUB="exch-p-pub"; P1_PUB="exch-p1-pub"
 DEV="exch-dev-e2e"; VIEW="exch-view-e2e"; FAR="exch-far-e2e"
 NAMED_FORBID='forbid(principal, action, resource) when { principal has claim_sub && principal.claim_sub == "e2e-nobody" };'
 # 본문과 인자는 늘 변수에 먼저 둔다. bash 3.2 는 겹친 "$(…"$(…)"…)" 안의 {…, …} 를 중괄호 확장으로 쪼갠다
 # (lib/e2e_api.sh ensure_stub_provider 와 같은 까닭이다)
-ADD_ARGS='{"a": 3, "b": 4}'; DIV_ARGS='{"a": 8, "b": 2}'
+# Divide 의 인자 이름은 calculator 의 WSDL 을 따른다(numerator·denominator). 다른 이름이면 도구 오류라 refused 로 읽힌다
+ADD_ARGS='{"a": 3, "b": 4}'; DIV_ARGS='{"numerator": 8, "denominator": 2}'; PET_ARGS='{"petId": 1}'
+# C 자신의 백엔드인 lab petstore(make lab-up 의 mock-petstore)다. calculator 의 WSDL 에는 Add 와 Divide 뿐이다
+PET_SPEC="$ROOT/platform/tests/fixtures/petstore-swagger2.json"
+PET_ENDPOINT="http://mock-petstore.${SPIKE_NS}.svc:18081/v2"
 OTHER_PERMIT="permit(principal in THVGroup::\"daegam-$OTHER\", action, resource);"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/daegam-e2e-exchange.XXXXXX")"
 K=(kubectl --context "$CTX")
 AUTH=(); ADMIN_TOKEN=""
 PF_API=""; PF_VMCP=""; PF_AUX=""
-HOME_ID=""; MS_ID=""; MUL_ID=""; CALC_ITEM=""; MUL_ITEM=""; ITEM_ID=""; BOUND_TOKEN=""; WAITED=0; GW_UP_ID=""
+HOME_ID=""; MS_ID=""; PET_ID=""; CALC_ITEM=""; PET_ITEM=""; ITEM_ID=""; BOUND_TOKEN=""; WAITED=0; GW_UP_ID=""
 P_ID=""; C_ID=""; P1_ID=""; C2_ID=""; C3_ID=""; P_ITEM=""; P1_ITEM=""
 DEV_ID=""; VIEW_ID=""; FAR_ID=""; TOK_DEV=""; TOK_VIEW=""; TOK_FAR=""
 C_URL="http://127.0.0.1:${VMCP_PORT}/mcp"; AUX_URL="http://127.0.0.1:${AUX_PORT}/mcp"
@@ -118,7 +122,7 @@ cleanup() {
   [ -z "$P1_ID" ] || api_delete "/gateways/$P1_ID"
   [ -z "$P_ITEM" ] || api_delete "/hub/$P_ITEM"
   [ -z "$P_ID" ] || api_delete "/gateways/$P_ID"
-  for id in "$MS_ID" "$MUL_ID"; do
+  for id in "$MS_ID" "$PET_ID"; do
     [ -z "$id" ] || api_delete "/mcp-servers/$id"
   done
   for id in "$DEV_ID" "$VIEW_ID" "$FAR_ID"; do
@@ -294,13 +298,16 @@ step_1() {
     "{\"name\": \"$MS_NAME\", \"backend_profile_id\": \"$CALC_BP_ID\", \"spec_version\": 1, \"tools\": [\"Add\", \"Divide\"]}"
   MS_ID="$SAVED_ID"
   deploy_ready 1 /mcp-servers "$MS_ID" "{\"cluster_id\": \"$HOME_ID\"}"
-  save_doc 1 /mcp-servers "$MUL_NAME" \
-    "{\"name\": \"$MUL_NAME\", \"backend_profile_id\": \"$CALC_BP_ID\", \"spec_version\": 1, \"tools\": [\"Multiply\"]}"
-  MUL_ID="$SAVED_ID"
-  deploy_ready 1 /mcp-servers "$MUL_ID" "{\"cluster_id\": \"$HOME_ID\"}"
+  upload_backend_api 1 "$PET_BP_NAME" "$PET_SPEC"
+  code="$(api PATCH "/backend-apis/$BACKEND_API_ID" "{\"endpoint\": \"$PET_ENDPOINT\"}")"
+  [ "$code" = 200 ] || die 1 "PATCH /backend-apis/$BACKEND_API_ID endpoint -> $code"
+  save_doc 1 /mcp-servers "$PET_NAME" \
+    "{\"name\": \"$PET_NAME\", \"backend_profile_id\": \"$BACKEND_API_ID\", \"spec_version\": $BACKEND_API_VERSION, \"tools\": [\"getPetById\"]}"
+  PET_ID="$SAVED_ID"
+  deploy_ready 1 /mcp-servers "$PET_ID" "{\"cluster_id\": \"$HOME_ID\"}"
   publish 1 /mcp-servers "$MS_ID" '{}'; CALC_ITEM="$ITEM_ID"
-  publish 1 /mcp-servers "$MUL_ID" '{}'; MUL_ITEM="$ITEM_ID"
-  pass 1 "$DEV (developer) and $VIEW (viewer) of $TENANT, $FAR of $OTHER hold personal tokens; MCP Servers $MS_NAME (Add, Divide) and $MUL_NAME (Multiply) deployed and published after the ${JWKS_CACHE_WAIT}s JWKS cache"
+  publish 1 /mcp-servers "$PET_ID" '{}'; PET_ITEM="$ITEM_ID"
+  pass 1 "$DEV (developer) and $VIEW (viewer) of $TENANT, $FAR of $OTHER hold personal tokens; MCP Servers $MS_NAME (Add, Divide) and $PET_NAME (getPetById) deployed and published after the ${JWKS_CACHE_WAIT}s JWKS cache"
 }
 
 step_2() {
@@ -311,7 +318,7 @@ step_2() {
   P_ID="$GW_UP_ID"
   pub="$(printf '{"name": "%s", "mode": "entry"}' "$P_PUB")"
   publish 2 /gateways "$P_ID" "$pub"; P_ITEM="$ITEM_ID"
-  backends="$(items_json "$P_ITEM" "$MUL_ITEM")"
+  backends="$(items_json "$P_ITEM" "$PET_ITEM")"
   body="$(gateway_body "$C_NAME" "$backends" "$OTHER_PERMIT")"
   gateway_up 2 "$C_NAME" "$body"
   C_ID="$GW_UP_ID"
@@ -325,7 +332,9 @@ step_2() {
   wait_warning 2 "$C_ID" published_consumer_pending 0
   since="$(cluster_now)"
   wait_outcome 2 "$SETTLE_WAIT" "$TOK_DEV" "$C_URL" Add "$ADD_ARGS" called "$DEV through C"
-  [ "$(outcome "$TOK_DEV" "$C_URL" Divide "$DIV_ARGS")" = called ] || die 2 "$DEV through C: Divide refused: $(cat "$WORK/mcp.err")"
+  # P 가 C 를 이름 댄 렌더에서 규칙 지문이 처음 생긴다. C 는 다음 재적용 틱에 그 규칙을 컴파일하고 지문을 토큰에 실으며,
+  # 그때까지 규칙 있는 Divide 는 C 에 없다(rules_digest_behind). 규칙 없는 Add 가 한 틱 먼저 열린다
+  wait_outcome 2 "$SETTLE_WAIT" "$TOK_DEV" "$C_URL" Divide "$DIV_ARGS" called "$DEV through C after C applied P's rule"
   until="$(cluster_now)"
   audit_expect 2 "$since" \
     "p|$since|$until|$P_ID|Add|svc:vmcp:gw-$C_NAME|*|1" \
@@ -334,10 +343,10 @@ step_2() {
 }
 
 step_3() {
-  expect_list 3 "$TOK_VIEW" "$C_URL" "Add Multiply" "Divide" "$VIEW at C"
+  expect_list 3 "$TOK_VIEW" "$C_URL" "Add getPetById" "Divide" "$VIEW at C"
   [ "$(outcome "$TOK_VIEW" "$C_URL" Divide "$DIV_ARGS")" = refused ] || die 3 "$VIEW called Divide through C"
-  [ "$(outcome "$TOK_VIEW" "$C_URL" Add "$ADD_ARGS")" = called ] || die 3 "$VIEW through C: Add refused: $(cat "$WORK/mcp.err")"
-  pass 3 "$VIEW sees Add and Multiply at C, not Divide, and its Divide call is refused: P's rule holds at C"
+  [ "$(outcome "$TOK_VIEW" "$C_URL" Add "$ADD_ARGS")" = called ] || die 3 "$VIEW through C: Add refused: $(cat "$WORK/mcp.json" "$WORK/mcp.err" 2>/dev/null)"
+  pass 3 "$VIEW sees Add and getPetById at C, not Divide, and its Divide call is refused: P's rule holds at C"
 }
 
 step_4() {
@@ -375,10 +384,10 @@ step_5() {
 }
 
 step_6() {
-  expect_list 6 "$TOK_FAR" "$C_URL" "Multiply" "Add Divide" "$FAR ($OTHER) at C"
-  [ "$(outcome "$TOK_FAR" "$C_URL" Multiply "$ADD_ARGS")" = called ] || die 6 "$FAR through C: Multiply refused: $(cat "$WORK/mcp.err")"
+  expect_list 6 "$TOK_FAR" "$C_URL" "getPetById" "Add Divide" "$FAR ($OTHER) at C"
+  [ "$(outcome "$TOK_FAR" "$C_URL" getPetById "$PET_ARGS")" = called ] || die 6 "$FAR through C: getPetById refused: $(cat "$WORK/mcp.json" "$WORK/mcp.err" 2>/dev/null)"
   [ "$(outcome "$TOK_FAR" "$C_URL" Add "$ADD_ARGS")" = refused ] || die 6 "$FAR called P's Add through C"
-  pass 6 "C's owner Cedar admits $FAR of $OTHER: Multiply called, P's Add and Divide neither listed nor callable (C's tenant fence)"
+  pass 6 "C's owner Cedar admits $FAR of $OTHER: getPetById called, P's Add and Divide neither listed nor callable (C's tenant fence)"
 }
 
 step_7() {
@@ -425,9 +434,9 @@ step_9() {
   mcp_refuses 9 "$copy" "C's token bound to P, at P1" "$AUX_URL"
   stop_pf "$PF_AUX" "$AUX_PORT"
   vmcp_forward 9 "$P_ID" "$AUX_PORT"; PF_AUX="$PF_PID"
-  [ "$(outcome "$copy" "$AUX_URL" Add "$ADD_ARGS")" = called ] || die 9 "P refused C's live bound token: $(cat "$WORK/mcp.err")"
+  [ "$(outcome "$copy" "$AUX_URL" Add "$ADD_ARGS")" = called ] || die 9 "P refused C's live bound token: $(cat "$WORK/mcp.json" "$WORK/mcp.err" 2>/dev/null)"
   # C 가 P 를 빼면 P 의 다음 렌더가 그 사본을 닫는다
-  body="$(items_json "$MUL_ITEM")"
+  body="$(items_json "$PET_ITEM")"
   body="$(gateway_body "$C_NAME" "$body" "$OTHER_PERMIT")"
   code="$(api PUT "/gateways/$C_ID" "$body")"
   [ "$code" = 200 ] || die 9 "PUT /gateways/$C_ID without P -> $code"

@@ -80,8 +80,10 @@ def test_the_token_decides_the_instance_and_resends_count_once(client, fake_clus
     assert "/api" + EVENTS not in client.get("/openapi.json").json()["paths"]
 
 
-def test_wrong_tokens_and_revisions_are_one_401(client, fake_clusters, mongo):
+def test_wrong_tokens_and_revisions_are_one_401(client, fake_clusters, mongo, monkeypatch):
     agent = deployed_agent(client, fake_clusters, mongo, runtime=False)
+    # 느린 러너에서는 요청 사이에 버킷이 다시 차 429 가 오지 않는다. 다시 차지 않는 버킷으로 본다
+    monkeypatch.setattr(client.app.state.telemetry_ingest._requests, "rate", 0.0)
     body = envelope(_revision(agent), [_event("turn_start")])
     assert detail_code(client.post(EVENTS, json=body, headers=bearer("nope"))) == (
         401,

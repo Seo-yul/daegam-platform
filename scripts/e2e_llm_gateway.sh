@@ -78,8 +78,18 @@ kill_stale_pf "$API_PORT" "$GW_PORT"
 # 메아리 서버와 그 provider(echo_up·echo_provider·echo_down, ECHO_NS·ECHO_URL)는 여기에 있다
 . "$HERE/lib/e2e_llm_echo.sh"
 
+failure_report() { # 실패한 게이트가 정리 앞에 남기는 진단. 정리가 플랫폼을 굴리면 동기화의 로그가 사라진다
+  echo "--- llm gateway diagnostics (namespace $GW_NS)"
+  "${K[@]}" -n "$GW_NS" get deploy,pods,svc,networkpolicy,configmap,secret,role,rolebinding -o wide 2>&1 | head -n 80
+  "${K[@]}" -n "$GW_NS" get events --sort-by=.lastTimestamp 2>&1 | tail -n 40
+  echo "--- platform log without the access lines (every pod, last 200 lines)"
+  "${K[@]}" -n "$PLATFORM_NS" logs -l app=daegam-platform --all-containers --prefix --tail=-1 --max-log-requests=10 2>&1 \
+    | grep -v 'HTTP/1\.1" ' | tail -n 200
+  echo "--- end of llm gateway diagnostics"
+}
 cleanup() {
   bg_stop
+  [ "${1:-0}" != 1 ] || failure_report >&2 || true
   if [ "$PAUSED" = 1 ]; then
     "${K[@]}" annotate namespace "$GW_NS" "$PAUSE_ANNOTATION-" >/dev/null 2>&1 || true
   fi
@@ -344,9 +354,12 @@ for ((i = 0; i < 6; i++)); do
   sleep 5
 done
 [ "$limited" = llm_gateway_rate_limited ] || die 6 "a turn over the tenant limit ended with '$limited'"
+limited_rev="$(api GET /settings/llm-gateway >/dev/null; jq_ 'd["limits_rev"] or ""')"
 code="$(api PATCH /settings "@$LIMITS_SAVED")"
 [ "$code" = 200 ] || die 6 "restoring the limits -> $code"
 LIMITS_SAVED=""
+# 되돌린 한도도 게이트웨이에 닿아야 다음 단계가 429 를 받지 않는다. 한도 서비스가 다시 읽기까지 약 60초다(STEP 7 이 기다린다)
+wait_gateway 6 "$APPLY_WAIT" "(d['limits_rev'] or '') != '$limited_rev'" "the restored limit config"
 pass 6 "a turn over a 1-token tenant limit is llm_gateway_rate_limited"
 
 # ---------- 7. 회수 ----------
@@ -354,7 +367,13 @@ start_pf "$GW_NS" svc/llm-gateway "${GW_PORT}:8080"
 PF_GW=$PF_PID
 wait_port "$GW_PORT" || die 7 "port-forward to svc/llm-gateway did not open :$GW_PORT"
 A_TOKEN="$(secret_field "$A_NS" "$A_SECRET" llm_token)"
-code="$(gw_call "$A_TOKEN")"
+# STEP 6 의 한도가 풀릴 때까지 429 다. 한도 서비스가 되돌린 설정을 다시 읽고(약 60초) 분 단위 통이 비어야 한다
+code=""
+for ((i = 0; i < 36; i++)); do
+  code="$(gw_call "$A_TOKEN")"
+  [ "$code" = 429 ] || break
+  sleep 5
+done
 [ "$code" = 200 ] || die 7 "a live agent token answers $code: $(cat "$WORK/gw-body")"
 new_agent 7 "$AG_B" "$OPENAI"
 B_ID="$SAVED_ID"; B_NS="$(jq_ 'd["k8s"]["namespace"]')"; B_K8S="$(jq_ 'd["k8s"]["name"]')"; B_SECRET="$(jq_ 'd["k8s"]["token_secret"]')"

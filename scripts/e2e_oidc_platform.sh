@@ -615,12 +615,14 @@ wait_auth_reapplied "$ADMIN_TOKEN" "$(date -u +%Y-%m-%dT%H:%M:%S)" || die 12 "da
 IDP_SECONDS="$SWITCH_SECONDS"; IDP_CHAT_DOWN="${CHAT_DOWN:-none}"
 [ "$(api GET /auth/config)" = 200 ] && [ "$(jq_ 'd["data_plane_issuer"], d["oauth"]["dormant"]')" = "idp True" ] \
   || die 12 "auth config after switching back: $(cat "$WORK/body")"
+# 되돌려도 회수되지 않았는지를 본다. k3d 에서는 서명 키 슬롯이 STEP 0 에서 만들어져 그 20분의 데우기(ready_at)가 끝나기
+# 전이라 상태가 pending 이다. pending 은 회수가 아니고 시각으로만 정해지므로 active 와 함께 받는다
 [ "$(api_as "$BOB_CP" GET /me/tokens)" = 200 ] \
-  && [ "$(jq_ "next((t['status'] for t in d if t['token_id'] == '$BOB_PAT_ID'), '')")" = active ] \
+  && case "$(jq_ "next((t['status'] for t in d if t['token_id'] == '$BOB_PAT_ID'), '')")" in active|pending) true ;; *) false ;; esac \
   || die 12 "bob's personal token after switching back: $(cat "$WORK/body")"
 [ "$(api_as "$BOB_CP" GET /me/oauth-grants)" = 200 ] && [ "$(jq_ "[g['status'] for g in d]")" = "['active']" ] \
   || die 12 "bob's login connection after switching back: $(cat "$WORK/body")"
-pass 12 "switching to idp converged in ${IDP_SECONDS}s (bar ${SWITCH_BAR}s): IdP tokens open $GW_URL, platform tokens get 401 at the vMCP, the front and the exposed Agent, the Agent's chat calls Add again (down ${IDP_CHAT_DOWN}); the OAuth server is dormant; bob's personal token and login connection stay active"
+pass 12 "switching to idp converged in ${IDP_SECONDS}s (bar ${SWITCH_BAR}s): IdP tokens open $GW_URL, platform tokens get 401 at the vMCP, the front and the exposed Agent, the Agent's chat calls Add again (down ${IDP_CHAT_DOWN}); the OAuth server is dormant; bob's personal token is not revoked and his login connection stays active"
 
 SWITCHED_AT="$(cluster_now)"
 timed_switch 13 platform "401 list list 200 ok"
