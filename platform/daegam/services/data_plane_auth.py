@@ -520,6 +520,15 @@ def named_rev(base: str | None, named: bool) -> str | None:
     return marked_rev(base, agent_id="named") if named else base
 
 
+def idp_alone_rev(base: str | None, alone: bool) -> str | None:
+    """플랫폼을 믿는 oidc 모드에서 IdP 하나만 렌더된 노출 Agent(P53b 6.8절)의 판 첫
+    절반(`marked_rev`). 그 이미지가 `two_issuers` 를 알린 기록이 아직 없을 때다(첫 배포, 이미지를
+    바꾼 배포, 옛 이미지). 새 파드의 init 이 그 이름을 알리면 표시가 사라져 다음 틱이 두 발급자로
+    다시 렌더한다. 표시가 없으면 그 Agent 는 다시 배포할 때까지 플랫폼의 토큰을 받지 못한다.
+    두 발급자로 렌더된 Agent 의 판은 base 그대로다."""
+    return marked_rev(base, exposure="idp_alone") if alone else base
+
+
 def redis_tls_rev(base: str | None, ca_mark: str | None) -> str | None:
     """Redis 의 TLS 끝점으로 붙는 소비자(P61 3절)의 판 첫 절반(`marked_rev`). ca_mark 는 그
     소비자가 믿는 CA 들의 지문이고(`templates/common.py` `redis_ca_mark`), 없으면 base 그대로다.

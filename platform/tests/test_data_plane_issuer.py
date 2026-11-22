@@ -56,7 +56,7 @@ from daegam.services.data_plane_auth import (
 from daegam.services.jwks_heal import platform_config_names
 from daegam.services.rule_compile import RuleScope, caller_clauses, roles_claimed
 from daegam.services.tenancy import OIDC_CONFIG_NAME, TOOLHIVE_API, oidc_kwargs
-from daegam.store.agents import AgentRevision, AgentSpec
+from daegam.store.agents import AgentRevision, AgentRuntime, AgentSpec
 from daegam.store.auth_reapply import ConsumerAuthState
 from daegam.store.base import utcnow
 from daegam.store.exposure import AgentExposure
@@ -71,6 +71,7 @@ from tests.helpers.agent_runtime import (
 from tests.helpers.agents import compile_spec, make_ctx, template_spec
 from tests.helpers.consts import (
     DEFAULT_NS,
+    IMAGE,
     ISSUER,
     OIDC_AUDIENCE,
     OIDC_ISSUER,
@@ -700,6 +701,38 @@ def test_a_two_issuer_exposed_agent_renders_both_verifiers(
     assert env["DAEGAM_AGENT_CLIENT_IDS"] == ""
     assert env["DAEGAM_IDP_ISSUER"] == OIDC_ISSUER and env["DAEGAM_IDP_ALLOWED_GROUPS"] == "eng"
     assert "DAEGAM_IDP_JWKS_URL" not in env
+
+
+def test_a_first_deploy_moves_to_two_issuers_once_the_image_reports_them(
+    client, settings, fake_clusters, fake_secrets, mongo
+):
+    """첫 배포에는 이미지의 기록이 없어 IdP 하나로 렌더된다. 새 파드의 init 이 `two_issuers` 를
+    알리면 판의 표시가 사라져 다음 틱이 두 발급자로 다시 렌더한다. 표시가 없으면 그 Agent 는 다시
+    배포할 때까지 플랫폼의 토큰을 `issuer mismatch` 로 막는다."""
+    agent = deployed_agent(client, fake_clusters, mongo, runtime=False)
+    mongo["gateways"].delete_one({"_id": agent.gw["id"]})
+    exposure = {"enabled": True, "host": "a.e2e.local", "allowed_groups": []}
+    mongo["agents"].update_one(
+        {"_id": agent.id}, {"$set": {f"exposure.{k}": v for k, v in exposure.items()}}
+    )
+    fake, k8s = agent.fake, agent.doc["k8s"]
+
+    def env() -> dict[str, str]:
+        dep = fake.get("apps/v1", "Deployment", k8s["name"], k8s["namespace"])
+        return env_map(dep["spec"]["template"]["spec"]["containers"][0])
+
+    with api_client(_oidc_app(settings, fake_clusters, fake_secrets, "platform")) as app:
+        skip_start_check(app.app)
+        assert agent.id in run_data_plane_auth(app)["reapplied"]
+        alone = env()
+        assert alone["DAEGAM_OIDC_ISSUER"] == OIDC_ISSUER and "DAEGAM_IDP_ISSUER" not in alone
+        assert agent.id not in run_data_plane_auth(app)["reapplied"]
+        record = AgentRuntime(image=IMAGE, features=[TWO_ISSUERS])
+        assert app.portal.call(app.app.state.agents.record_runtime, agent.id, record)
+        assert agent.id in run_data_plane_auth(app)["reapplied"]
+        both = env()
+        assert both["DAEGAM_OIDC_ISSUER"] == ISSUER and both["DAEGAM_IDP_ISSUER"] == OIDC_ISSUER
+        assert agent.id not in run_data_plane_auth(app)["reapplied"]
 
 
 # -- 전환을 막는 mcp_group (6.10절) ----------------------------------------------------------------

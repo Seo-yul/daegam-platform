@@ -463,7 +463,16 @@ rules_put 9 "{\"callers\": {\"agents\": [\"$AG_ID\"]}}"
 wait_ready "/gateways/$RULES_ID" 9
 AG_EXPOSE="{\"exposure\": {\"enabled\": true, \"host\": \"$AG_HOST\", \"ingress_class\": \"$INGRESS_CLASS\", \"tls\": {\"mode\": \"none\"}, \"cors_origins\": [], \"allowed_groups\": []}}"
 deploy_ready 9 /agents "$AG_ID" "$AG_EXPOSE"
-AG_K8S="$(jq_ 'd["k8s"]["name"]')"; AG_CLUSTER="$(jq_ 'd["cluster_id"]')"
+AG_K8S="$(jq_ 'd["k8s"]["name"]')"; AG_CLUSTER="$(jq_ 'd["cluster_id"]')"; AG_NS="$(jq_ 'd["k8s"]["namespace"]')"
+# 첫 배포는 이미지의 기록이 없어 IdP 하나로 렌더되고, 파드의 init 이 two_issuers 를 알린 뒤의 재적용이 두 발급자로 다시
+# 렌더해 파드를 굴린다. 그 교체가 끝난 뒤에 부른다. 아니면 채팅과 실행이 교체 중인 파드에 걸리고 STEP 10 이 옛 렌더를 본다
+idp_env=""
+for ((i = 0; i < 48; i++)); do
+  idp_env="$("${K[@]}" -n "$AG_NS" get deploy "$AG_K8S" -o jsonpath='{..env[?(@.name=="DAEGAM_IDP_ISSUER")].value}' 2>/dev/null || true)"
+  [ -n "$idp_env" ] && break; sleep 5
+done
+[ -n "$idp_env" ] || die 9 "the reapply did not render $AG_NS/$AG_K8S with the IdP beside the platform (no DAEGAM_IDP_ISSUER) within 240s"
+"${K[@]}" -n "$AG_NS" rollout status "deploy/$AG_K8S" --timeout=180s >/dev/null || die 9 "the two-issuer rollout of $AG_NS/$AG_K8S did not finish"
 wait_gateway_gate 9 "$AG_CLUSTER"
 BEFORE="$(cluster_now)"
 code="$(as_person "$ALICE_CP" chat "/agents/$AG_ID/chat" "$(msg "$(stub_call "$TOOL" "$TOOL_ARGS")")")"
@@ -597,6 +606,9 @@ OAUTH_BODY='{"mcp_group": null, "agent_client_ids": ["agent-dev"], "agent_oauth"
 [ "$(api PUT "/gateways/$RULES_ID" "$(rules_body)")" = 200 ] || die 12 "clearing the rules of $RULES_NAME failed: $(cat "$WORK/body")"
 [ "$(api POST "/gateways/$RULES_ID/redeploy" '{}')" = 200 ] || die 12 "redeploying $RULES_NAME without rules failed"
 wait_ready "/gateways/$RULES_ID" 12
+# Ready 는 오퍼레이터가 vMCP 를 교체하기 전에도 나온다. Tenant Settings 와 규칙을 잇달아 바꿔 렌더가 두 번 나가므로, 교체가
+# 끝난 뒤에 부른다. 아니면 Agent 의 Add 가 지워지는 옛 파드에 걸려 MCPError 로 끝난다
+wait_gateway_gate 12 "$AG_CLUSTER"
 [ "$(chat_once)" = ok ] || die 12 "the Agent's chat before switching back: $(cat "$WORK/timing.sse")"
 timed_switch 12 idp "list 401 401 401 ok"
 wait_auth_reapplied "$ADMIN_TOKEN" "$(date -u +%Y-%m-%dT%H:%M:%S)" || die 12 "data-plane auth was not re-applied under idp"

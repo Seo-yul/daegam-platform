@@ -116,6 +116,7 @@ from daegam.services.clusters import ClusterService
 from daegam.services.data_plane_auth import (
     KIND_AGENT,
     ConsumerAuth,
+    idp_alone_rev,
     llm_rev,
     named_rev,
     redis_tls_rev,
@@ -755,8 +756,17 @@ class AgentService(ExposureValidationMixin, AgentRollbackMixin, BaseInstanceServ
         return redis_tls_rev(base, await self._redis_ca(doc))
 
     async def _auth_base(self, doc: Agent, ts: Any) -> str | None:
-        """판의 인증 절반에 LLM 경로의 몫을 얹은 것 (P38 6절, `AgentLlm.rev_inputs`)."""
-        return llm_rev(await super().want_rev(doc, ts), await self.llm.rev_inputs(doc))
+        """판의 인증 절반에 LLM 경로의 몫을 얹은 것 (P38 6절, `AgentLlm.rev_inputs`). 플랫폼을
+        믿는 oidc 모드에서 IdP 하나로 렌더되는 노출 Agent 는 표시를 하나 더 얹는다
+        (`idp_alone_rev`, `exposure_verifiers` 와 같은 조건). 그래서 첫 배포의 파드가 `two_issuers`
+        를 알리면 다음 틱이 두 발급자로 다시 렌더한다."""
+        base = llm_rev(await super().want_rev(doc, ts), await self.llm.rev_inputs(doc))
+        alone = (
+            self.cluster_service.settings.oidc_trusts_platform
+            and doc.exposure.enabled
+            and not doc.image_reports(TWO_ISSUERS)
+        )
+        return idp_alone_rev(base, alone)
 
     async def paced_revs(self, doc: Agent, ts: Any) -> frozenset[str | None]:
         """Redis 표시와 규칙의 이름 표시만 다른 판. 둘 다 회수가 아니라서 네임스페이스마다의 속도로
