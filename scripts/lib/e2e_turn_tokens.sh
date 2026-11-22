@@ -169,11 +169,25 @@ wait_gateway_gate() { # STEP CLUSTER_ID
     code="$(api GET /settings/data-plane-auth)"
     if [ "$code" = 200 ]; then
       row="$(jq_ "json.dumps($gate)")"
-      [ "$(jq_ "(lambda g: g.get('gateway_gate_open') is True and g.get('verdict_fresh') is True)($gate or {})")" = True ] && return 0
+      if [ "$(jq_ "(lambda g: g.get('gateway_gate_open') is True and g.get('verdict_fresh') is True)($gate or {})")" = True ]; then
+        proxies_rolled
+        return 0
+      fi
     fi
     sleep "${TURN_GATE_POLL:-5}"
   done
   die "$1" "the Gateway gate of cluster $2 did not open within ${TURN_GATE_TIMEOUT:-300}s (GET /settings/data-plane-auth -> $code): $row"
+}
+
+# proxies_rolled: 프록시 파드가 있는 네임스페이스마다 워크로드 교체가 끝나기를 기다린다(lib/e2e_control_plane.sh
+# wait_workloads_rolled). 문이 열린 뒤에도 오퍼레이터가 프록시를 교체하는 중일 수 있고, 그동안의 호출은 곧 지워질 옛
+# 파드가 받아 그 감사 줄을 수집기가 읽지 못한다. 일부러 준비되지 않게 둔 워크로드가 있을 수 있으므로 120초 뒤에는
+# 알리고 넘어간다
+proxies_rolled() {
+  local ns
+  for ns in $("${K[@]}" get pods -A -l toolhive=true --no-headers -o custom-columns=NS:.metadata.namespace 2>/dev/null | sort -u); do
+    wait_workloads_rolled "$ns" 120 || echo "!! workloads in $ns were still rolling after 120s; an audit line of the next calls may be lost"
+  done
 }
 
 audit_expect() { # STEP SINCE SPEC...
