@@ -463,7 +463,16 @@ rules_put 9 "{\"callers\": {\"agents\": [\"$AG_ID\"]}}"
 wait_ready "/gateways/$RULES_ID" 9
 AG_EXPOSE="{\"exposure\": {\"enabled\": true, \"host\": \"$AG_HOST\", \"ingress_class\": \"$INGRESS_CLASS\", \"tls\": {\"mode\": \"none\"}, \"cors_origins\": [], \"allowed_groups\": []}}"
 deploy_ready 9 /agents "$AG_ID" "$AG_EXPOSE"
-AG_K8S="$(jq_ 'd["k8s"]["name"]')"; AG_CLUSTER="$(jq_ 'd["cluster_id"]')"
+AG_K8S="$(jq_ 'd["k8s"]["name"]')"; AG_CLUSTER="$(jq_ 'd["cluster_id"]')"; AG_NS="$(jq_ 'd["k8s"]["namespace"]')"
+# 첫 배포는 이미지의 기록이 없어 IdP 하나로 렌더되고, 파드의 init 이 two_issuers 를 알린 뒤의 재적용이 두 발급자로 다시
+# 렌더해 파드를 굴린다. 그 교체가 끝난 뒤에 부른다. 아니면 채팅과 실행이 교체 중인 파드에 걸리고 STEP 10 이 옛 렌더를 본다
+idp_env=""
+for ((i = 0; i < 48; i++)); do
+  idp_env="$("${K[@]}" -n "$AG_NS" get deploy "$AG_K8S" -o jsonpath='{..env[?(@.name=="DAEGAM_IDP_ISSUER")].value}' 2>/dev/null || true)"
+  [ -n "$idp_env" ] && break; sleep 5
+done
+[ -n "$idp_env" ] || die 9 "the reapply did not render $AG_NS/$AG_K8S with the IdP beside the platform (no DAEGAM_IDP_ISSUER) within 240s"
+"${K[@]}" -n "$AG_NS" rollout status "deploy/$AG_K8S" --timeout=180s >/dev/null || die 9 "the two-issuer rollout of $AG_NS/$AG_K8S did not finish"
 wait_gateway_gate 9 "$AG_CLUSTER"
 BEFORE="$(cluster_now)"
 code="$(as_person "$ALICE_CP" chat "/agents/$AG_ID/chat" "$(msg "$(stub_call "$TOOL" "$TOOL_ARGS")")")"
@@ -549,6 +558,22 @@ chat_once() { # -> ok 이면 관리자의 채팅이 Add 결과 7 을 받았다
     echo "fail:$code"
   fi
 }
+# 수렴하지 못했을 때 정리 앞에 남긴다. 정리가 파드를 지우므로 워크플로의 진단 단계는 이것을 보지 못한다. 테넌트
+# 네임스페이스의 파드와, 준비되지 않은 Agent 파드마다 init 이 받은 Tool 소스의 인증 종류, init 과 메인 컨테이너가 끝난
+# 까닭과 마지막 로그다. 값(토큰, 비밀)은 찍지 않는다
+switch_report() {
+  local pod
+  echo "--- pods in $AG_NS (switch did not converge)"
+  "${K[@]}" -n "$AG_NS" get pods -o wide 2>&1 || true
+  for pod in $("${K[@]}" -n "$AG_NS" get pods -l daegam.devops.ai.kr/resource=agent-instance \
+    -o jsonpath='{range .items[?(@.status.containerStatuses[0].ready==false)]}{.metadata.name}{"\n"}{end}' 2>/dev/null); do
+    echo "--- $AG_NS/$pod"
+    "${K[@]}" -n "$AG_NS" get pod "$pod" -o jsonpath='{range .status.initContainerStatuses[*]}init {.name} restarts={.restartCount} {.lastState.terminated.message}{"\n"}{end}{range .status.containerStatuses[*]}{.name} restarts={.restartCount} last={.lastState.terminated.reason}/{.lastState.terminated.exitCode} {.lastState.terminated.message}{"\n"}{end}' 2>&1 || true
+    "${K[@]}" -n "$AG_NS" get pod "$pod" -o jsonpath='{range .spec.initContainers[*].env[?(@.name=="DAEGAM_AGENT_CONFIG_URL")]}init url {.value}{"\n"}{end}' 2>&1 || true
+    "${K[@]}" -n "$AG_NS" logs "$pod" -c agent --previous --tail=40 2>&1 || "${K[@]}" -n "$AG_NS" logs "$pod" -c agent --tail=40 2>&1 || true
+  done
+}
+
 # timed_switch STEP VALUE WANT -> 발급자를 VALUE 로 바꾸고 수렴까지 잰다. WANT 는 "idp_gw pat_gw pat_front pat_agent chat"
 # 의 기대값이다. 수렴의 초는 SWITCH_SECONDS, 채팅이 끊긴 초는 CHAT_DOWN 에 남는다
 timed_switch() {
@@ -575,7 +600,7 @@ timed_switch() {
   echo "  timeline ($value; seconds idp_gw pat_gw pat_front pat_agent chat pending):"
   sed 's/^/    /' "$WORK/timeline-$value"
   CHAT_DOWN="${first_fail:+${first_fail}s..${last_fail}s}"
-  [ -n "$SWITCH_SECONDS" ] || die "$step" "switching to $value did not converge to '$want' within $((SWITCH_BAR + 120))s"
+  [ -n "$SWITCH_SECONDS" ] || { switch_report; die "$step" "switching to $value did not converge to '$want' within $((SWITCH_BAR + 120))s"; }
   [ "$SWITCH_SECONDS" -le "$SWITCH_BAR" ] || die "$step" "switching to $value converged after ${SWITCH_SECONDS}s, over the bar of ${SWITCH_BAR}s"
 }
 
@@ -597,6 +622,9 @@ OAUTH_BODY='{"mcp_group": null, "agent_client_ids": ["agent-dev"], "agent_oauth"
 [ "$(api PUT "/gateways/$RULES_ID" "$(rules_body)")" = 200 ] || die 12 "clearing the rules of $RULES_NAME failed: $(cat "$WORK/body")"
 [ "$(api POST "/gateways/$RULES_ID/redeploy" '{}')" = 200 ] || die 12 "redeploying $RULES_NAME without rules failed"
 wait_ready "/gateways/$RULES_ID" 12
+# Ready 는 오퍼레이터가 vMCP 를 교체하기 전에도 나온다. Tenant Settings 와 규칙을 잇달아 바꿔 렌더가 두 번 나가므로, 교체가
+# 끝난 뒤에 부른다. 아니면 Agent 의 Add 가 지워지는 옛 파드에 걸려 MCPError 로 끝난다
+wait_gateway_gate 12 "$AG_CLUSTER"
 [ "$(chat_once)" = ok ] || die 12 "the Agent's chat before switching back: $(cat "$WORK/timing.sse")"
 timed_switch 12 idp "list 401 401 401 ok"
 wait_auth_reapplied "$ADMIN_TOKEN" "$(date -u +%Y-%m-%dT%H:%M:%S)" || die 12 "data-plane auth was not re-applied under idp"

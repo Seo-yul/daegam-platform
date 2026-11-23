@@ -171,7 +171,8 @@ RENDER_EPOCHS: dict[str, int] = {
     # 3: overrides 가 파드 템플릿에 단 app.kubernetes.io/name: mcpserver 를 뺀다 (T67)
     # 4: 준비 검사가 첫 1초부터 2초마다이고 실패 문턱이 15다. 깨운 파드가 곧 Service 에 든다
     #    (P44 8절)
-    KIND_AGENT: 4,
+    # 5: Gateway 소스가 있는 Agent 의 init 주소가 파드가 실은 Gateway 인증 방식을 싣는다
+    KIND_AGENT: 5,
     # 1: 원격 프록시의 역할 없는 ServiceAccount (P50 10절)
     # 2: 0.52 클러스터에서 image 항목의 테넌트 울타리 (P50 11절)
     # 3: image 항목의 백엔드 파드의 라벨 (T67)
@@ -518,6 +519,15 @@ def named_rev(base: str | None, named: bool) -> str | None:
     """Tool 규칙이 이름 댄 Agent(P52 3절)의 판 첫 절반(`marked_rev`). 표시가 생기면 다음 재적용이
     그 Agent 를 다시 렌더하고, 그 렌더가 자기 id 를 싣지 않은 서비스 토큰을 새로 낸다."""
     return marked_rev(base, agent_id="named") if named else base
+
+
+def idp_alone_rev(base: str | None, alone: bool) -> str | None:
+    """플랫폼을 믿는 oidc 모드에서 IdP 하나만 렌더된 노출 Agent(P53b 6.8절)의 판 첫
+    절반(`marked_rev`). 그 이미지가 `two_issuers` 를 알린 기록이 아직 없을 때다(첫 배포, 이미지를
+    바꾼 배포, 옛 이미지). 새 파드의 init 이 그 이름을 알리면 표시가 사라져 다음 틱이 두 발급자로
+    다시 렌더한다. 표시가 없으면 그 Agent 는 다시 배포할 때까지 플랫폼의 토큰을 받지 못한다.
+    두 발급자로 렌더된 Agent 의 판은 base 그대로다."""
+    return marked_rev(base, exposure="idp_alone") if alone else base
 
 
 def redis_tls_rev(base: str | None, ca_mark: str | None) -> str | None:

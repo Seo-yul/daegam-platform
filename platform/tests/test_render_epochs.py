@@ -46,7 +46,7 @@ from tests.helpers.mcp_servers import two_backend_server
 GOLDEN: dict[str, tuple[int, str]] = {
     KIND_MCP_SERVER: (6, "52d8697d724aff82"),
     KIND_GATEWAY: (3, "433f0bb4c6397530"),
-    KIND_AGENT: (4, "d88bdfb68dceff83"),
+    KIND_AGENT: (5, "d88bdfb68dceff83"),
     KIND_HUB_ITEM: (3, "e2e9ebe0740774b3"),
     KIND_CLONE: (3, "81dc8cfebb3f71dd"),
 }

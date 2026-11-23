@@ -572,6 +572,9 @@ class GraphContext:
     # 데이터 플레인이 플랫폼을 믿는가 (P53b 6.1절). 참인 oidc 모드는 Gateway 를 local 처럼 플랫폼이
     # 낸 토큰으로 부르고 agent_oauth 를 요구하지 않는다
     trusts_platform: bool = False
+    # 컴파일을 받는 파드의 템플릿이 env 로 실은 Gateway 소스 인증(bearer | oauth). init 받기만
+    # 채우고, None 이면 모드가 정한다 (`gateway_auth_kind`)
+    gateway_auth: str | None = None
     gateway_instances: dict[str, Gateway] = field(default_factory=dict)  # 배포 쪽 문서
     mcp_instances: dict[str, MCPServer] = field(default_factory=dict)
     data_services: dict[str, DataService] = field(default_factory=dict)
@@ -1624,7 +1627,11 @@ def _compaction(data: AgentData) -> dict[str, Any]:
 
 def gateway_auth_kind(ctx: GraphContext) -> str:
     """Gateway(vMCP) 소스에 붙는 인증. oauth(IdP 를 믿는 oidc 모드) | bearer(local 모드와 플랫폼을
-    믿는 oidc 모드) | none(header 모드)."""
+    믿는 oidc 모드) | none(header 모드). 받는 파드가 자기 템플릿의 종류를 알렸으면
+    (`GraphContext.gateway_auth`) 그것이다. 믿는 발급자를 바꾸는 동안에는 옛 모드의 플랫폼 파드도
+    받기에 답하는데, 그 파드의 env 에 없는 비밀을 가리키는 문서를 받은 런타임은 뜨지 못한다."""
+    if ctx.gateway_auth is not None:
+        return ctx.gateway_auth
     mode = ctx.auth_mode
     if mode is None:
         return "oauth" if ctx.token_auth else "none"

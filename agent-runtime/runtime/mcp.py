@@ -25,6 +25,12 @@
   Tool 오류로 바꾼다(P52 5절, 능력 `tool_refusals`). 규칙이 이 Agent 에게 숨긴 Tool 은 목록에
   없으므로 거절은 드물다(목록을 읽은 뒤 바뀐 규칙, 조건 때문에 닫힌 Tool, 지문이 뒤처진 Gateway).
   둘은 fastmcp 클라이언트와 LangChain Tool 이 똑같이 올리는 `MCPError` 의 메시지로 가른다(F0 4번).
+- 도구 소스가 방금 연 세션을 모른다고 답한 호출(404)은 그 Tool 의 제한 시간 안에서 새 세션으로 다시
+  보낸다. 막 교체된 Gateway 의 vMCP 는 백엔드에 붙기 전까지 여는 세션마다 곧바로 끝내고, 다음 건강
+  검사(30초 간격) 뒤에야 받는다. 404 는 호출이 백엔드에 닿기 전의 답이라 다시 보내도 두 번 실행되지
+  않는다. 한 소스에 겹쳐 나간 호출들은 세션 하나를 함께 쓰므로(클라이언트가 재진입이다), 끝난 세션을
+  오래 걸리는 다른 호출이 쥐고 있는 동안에는 다시 보내도 받아들여지지 않고 제한 시간에 Tool 오류가
+  된다.
 """
 
 from __future__ import annotations
@@ -80,6 +86,12 @@ DEFAULT_TOKEN_TTL_SECONDS = 3600.0
 REFUSED_MESSAGE = "Unauthorized"
 LIMITED_MESSAGE = "Rate limit exceeded"
 REFUSALS_MEASURED_ON = "0.53.0"
+
+# 세션이 있는 연결에서 요청이 404 를 받으면 MCP 클라이언트(mcp/client/streamable_http.py)가 올리는
+# `MCPError` 의 메시지다. 서버가 그 세션을 모른다는 뜻이고, 그 요청은 처리되지 않았다
+SESSION_GONE_MESSAGE = "Session terminated"
+# 세션이 끝난 호출을 다시 보내기 전에 쉬는 시간이다. 다시 보내기는 그 Tool 의 제한 시간까지만 한다
+SESSION_RETRY_PAUSE_SECONDS = 2.0
 
 
 class _ToolTimeout(ToolException):
@@ -281,6 +293,7 @@ class ToolSources:
         *,
         default_timeout: float = DEFAULT_TOOL_TIMEOUT_SECONDS,
         list_timeout: float = TOOLS_LIST_TIMEOUT_SECONDS,
+        session_retry_pause: float = SESSION_RETRY_PAUSE_SECONDS,
         grants: TurnGrants | None = None,
     ) -> None:
         self._sources = {source["ref"]: source for source in config.tools}
@@ -296,6 +309,7 @@ class ToolSources:
             for name, seconds in config.timeouts_for(list(self._sources)).items()
         }
         self._default_timeout = default_timeout
+        self._session_retry_pause = session_retry_pause
         # 소스마다 클라이언트 하나다. 한 클라이언트에 여러 서버를 넣으면
         # 툴 이름이 프리픽스된다(모듈 docstring). client credentials 인증은 토큰 조회
         # 클라이언트를 스스로 만들므로 들고 있다가 close 에서 닫는다
@@ -399,12 +413,40 @@ class ToolSources:
 
         async def run(*args: Any, **kwargs: Any) -> Any:
             call = await self._route(ref, definition, inner)
+            # 도구 소스가 세션을 끝낸 횟수와, 지금 다시 보내기를 기다리는 중인지다
+            gone, pausing = 0, False
             try:
                 async with asyncio.timeout(seconds):
-                    return await call(*args, **kwargs)
+                    while True:
+                        try:
+                            return await call(*args, **kwargs)
+                        except MCPError as e:
+                            # 도구 소스가 방금 연 세션을 모른다(모듈 docstring). 같은 호출을 새
+                            # 세션으로 다시 보낸다
+                            if e.message != SESSION_GONE_MESSAGE:
+                                raise
+                        gone += 1
+                        if gone == 1:
+                            log.warning(
+                                "tools[%s] %s 호출의 세션을 도구 소스가 끝냈다. 다시 보낸다",
+                                ref,
+                                tool.name,
+                            )
+                        pausing = True
+                        await asyncio.sleep(self._session_retry_pause)
+                        # 쉬는 동안 턴의 위임 토큰이 끝났을 수 있으므로 보낼 곳을 다시 고른다
+                        call = await self._route(ref, definition, inner)
+                        pausing = False
             except TimeoutError:
                 # ToolMessage 로 접히면 종류를 잃으므로 트레이서에 먼저 알린다(P37)
                 await signal(TOOL_TIMEOUT, {"tool": tool.name})
+                if pausing:
+                    # 받아들여진 시도가 없다. 시도 도중에 시간이 다 됐으면 Tool 이 실행 중일 수
+                    # 있으므로 이 문장을 쓰지 않는다
+                    raise _ToolTimeout(
+                        f"tool {tool.name} 의 도구 소스가 {seconds:g}초 동안 호출을 받지 않았다. "
+                        "도구 소스가 다시 뜨는 중일 수 있다"
+                    ) from None
                 raise _ToolTimeout(
                     f"tool {tool.name} 가 {seconds:g}초 안에 답하지 않았다"
                 ) from None

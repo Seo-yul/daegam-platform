@@ -116,6 +116,7 @@ from daegam.services.clusters import ClusterService
 from daegam.services.data_plane_auth import (
     KIND_AGENT,
     ConsumerAuth,
+    idp_alone_rev,
     llm_rev,
     named_rev,
     redis_tls_rev,
@@ -755,8 +756,17 @@ class AgentService(ExposureValidationMixin, AgentRollbackMixin, BaseInstanceServ
         return redis_tls_rev(base, await self._redis_ca(doc))
 
     async def _auth_base(self, doc: Agent, ts: Any) -> str | None:
-        """판의 인증 절반에 LLM 경로의 몫을 얹은 것 (P38 6절, `AgentLlm.rev_inputs`)."""
-        return llm_rev(await super().want_rev(doc, ts), await self.llm.rev_inputs(doc))
+        """판의 인증 절반에 LLM 경로의 몫을 얹은 것 (P38 6절, `AgentLlm.rev_inputs`). 플랫폼을
+        믿는 oidc 모드에서 IdP 하나로 렌더되는 노출 Agent 는 표시를 하나 더 얹는다
+        (`idp_alone_rev`, `exposure_verifiers` 와 같은 조건). 그래서 첫 배포의 파드가 `two_issuers`
+        를 알리면 다음 틱이 두 발급자로 다시 렌더한다."""
+        base = llm_rev(await super().want_rev(doc, ts), await self.llm.rev_inputs(doc))
+        alone = (
+            self.cluster_service.settings.oidc_trusts_platform
+            and doc.exposure.enabled
+            and not doc.image_reports(TWO_ISSUERS)
+        )
+        return idp_alone_rev(base, alone)
 
     async def paced_revs(self, doc: Agent, ts: Any) -> frozenset[str | None]:
         """Redis 표시와 규칙의 이름 표시만 다른 판. 둘 다 회수가 아니라서 네임스페이스마다의 속도로
@@ -1719,17 +1729,20 @@ class AgentService(ExposureValidationMixin, AgentRollbackMixin, BaseInstanceServ
         allowed: frozenset[str] | None = None,
         token_envs: dict[str, str] | None,
         gateway: bool | None = None,
+        gateway_auth: str | None = None,
     ) -> dict[str, Any]:
         """핀된 리비전을 지금의 플랫폼 상태로 펼친다. 그래프가 지금 상태에서 어긋나면(provider 삭제
         등) 422 invalid_graph 다. `allowed` 는 이미지가 아는 이름으로 허락된 문서 기능이고(D65)
         없으면 요구 기능 전부다. `token_envs` 는 컴파일을 받는 파드의 MCP Server 토큰 env 표이고
         None 이면 옛 단일 토큰이다 (P50 9절). gateway 는 받는 파드의 경로이고 없으면 저장된 경로다
-        (P38 6절). 기능 칸을 얹은 최종 문서를 여기서 한 번 검사한다. 평가 미리 보기는 핀 뒤에 쓰기
+        (P38 6절). gateway_auth 는 받는 파드의 템플릿이 실은 Gateway 소스 인증이고 없으면 모드가
+        정한다. 기능 칸을 얹은 최종 문서를 여기서 한 번 검사한다. 평가 미리 보기는 핀 뒤에 쓰기
         Tool 을 잡는다. 이름을 모르는 소스가 있으면 409 `evaluation_tools_unknown` 이다 (P45
         10절)."""
         rev = self._pinned(doc)
         ctx = await self._doc_context(doc, rev)
         ctx.mcp_token_envs = token_envs
+        ctx.gateway_auth = gateway_auth
         ctx.tool_pins = valid_pins(doc)
         gateway = doc.llm_route.gateway if gateway is None else gateway
         ctx.llm_gateway_url = self.settings.llm_gateway_url if gateway else None
@@ -1751,12 +1764,19 @@ class AgentService(ExposureValidationMixin, AgentRollbackMixin, BaseInstanceServ
             raise AgentError(e.status, e.code, str(e), errors=e.messages) from e
 
     async def fetch_config(
-        self, doc: Agent, headers: Mapping[str, str], *, gateway: bool = False
+        self,
+        doc: Agent,
+        headers: Mapping[str, str],
+        *,
+        gateway: bool = False,
+        gateway_auth: str | None = None,
     ) -> dict[str, Any]:
         """init 받기다(D65). 머리의 이름을 기록에 먼저 적고 그다음 `required` 를 판정하므로 409 로
         끝나도 그 파드가 알린 기록은 남는다. `attached` 가 빠지면 빼고 기록의 경고로 남긴다. MCP
         Server 소스의 토큰 env 는 그 파드가 보낸 표 지문의 표로 고른다 (P50 9절,
-        `agent_tokens.asking_envs`). gateway 는 그 파드의 템플릿이 실은 `?llm=gateway` 다."""
+        `agent_tokens.asking_envs`). gateway 는 그 파드의 템플릿이 실은 `?llm=gateway` 이고,
+        gateway_auth 는 그 템플릿이 env 로 실은 Gateway 소스 인증이다. 믿는 발급자를 바꾸는 동안
+        다른 모드의 플랫폼 파드가 답해도 그 파드의 env 에 맞는 문서를 낸다."""
         reported = agent_features.parse_reported(headers)
         wanted = await self._wanted_features(doc, gateway=gateway)
         check = agent_features.check_features(wanted, reported.names)
@@ -1770,7 +1790,11 @@ class AgentService(ExposureValidationMixin, AgentRollbackMixin, BaseInstanceServ
         token_envs = asking_envs(doc, headers.get(MCP_TOKEN_TABLE_HEADER))
         try:
             return await self.compile(
-                doc, allowed=check.allowed, token_envs=token_envs, gateway=gateway
+                doc,
+                allowed=check.allowed,
+                token_envs=token_envs,
+                gateway=gateway,
+                gateway_auth=gateway_auth,
             )
         except AgentError as e:
             if e.code in (REDEPLOY_REQUIRED, EVALUATION_TOOLS_UNKNOWN):

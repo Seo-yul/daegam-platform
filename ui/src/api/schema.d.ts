@@ -2161,7 +2161,8 @@ export interface paths {
          * @description initContainer 용. 응답은 agent-runtime/schema/agent.schema.json 을 따르는 compile 결과다.
          *     이미지가 모르는 `required` 기능이 있으면 409 runtime_image_too_old 다(D65). init 이 실은 이름
          *     헤더(D65)는 인증된 뒤에 서비스가 읽는다. `llm` 은 그 파드 템플릿의 LLM 경로이고 없으면 직접
-         *     경로다(P38 6절). 다른 값은 422 다.
+         *     경로다(P38 6절). `gateway_auth` 는 그 템플릿이 env 로 실은 Gateway 소스 인증이고 없으면 지금의
+         *     모드가 정한다. 다른 값은 422 다.
          */
         get: operations["read_agent_json_api_agents__agent_id__agent_json_get"];
         put?: never;
@@ -27875,6 +27876,7 @@ export interface operations {
         parameters: {
             query?: {
                 llm?: "gateway" | null;
+                gateway_auth?: ("bearer" | "oauth") | null;
             };
             header?: never;
             path: {
