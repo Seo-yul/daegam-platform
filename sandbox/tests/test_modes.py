@@ -52,10 +52,15 @@ def test_probe_exits_like_the_first_check(tmp_path: Path) -> None:
     targets = targets_env(
         {"kind": "tcp", "host": "127.0.0.1", "port": shut.getsockname()[1], "timeout": 0.5}
     )
-    args = ("--uid-map", str(uid_map), "--termination-log", str(tmp_path / "t"), "probe")
+    log = str(tmp_path / "t")
+    args = ("--uid-map", str(uid_map), "--termination-log", log, "--first-settle", "0", "probe")
     assert run_mode(*args, env={"SANDBOX_TARGETS": targets}).returncode == 0
     shut.listen(4)
     assert run_mode(*args, env={"SANDBOX_TARGETS": targets}).returncode == 87
+    # 프로브 모드도 닿은 첫 바퀴 뒤에 다시 돌고, 끝까지 닿으면 87 이다
+    retry = ("--uid-map", str(uid_map), "--termination-log", log, "--first-settle", "2.5", "probe")
+    assert run_mode(*retry, env={"SANDBOX_TARGETS": targets}).returncode == 87
+    assert json.loads(Path(log).read_text())["rounds"] >= 2
     shut.close()
     assert run_mode(*args).returncode == 86
 

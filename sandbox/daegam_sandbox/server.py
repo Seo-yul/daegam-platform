@@ -36,9 +36,11 @@ from daegam_sandbox.http import MAX_LINE, HttpError, Request, read_request, resp
 from daegam_sandbox.paths import Resolver
 from daegam_sandbox.procs import Refused, Runner, SpawnFailed, clamp_timeout
 from daegam_sandbox.selfcheck import (
+    FIRST_SETTLE,
     Verdict,
     exit_code,
     run_check,
+    run_first_check,
     write_termination,
 )
 
@@ -74,6 +76,7 @@ class Settings:
     port: int
     port_file: Path | None = None
     check_interval: float = CHECK_INTERVAL
+    first_settle: float = FIRST_SETTLE
     nproc_limit: int = 256
     font_cache: Path | None = None
     sweep_pause: float = 0.0
@@ -133,9 +136,18 @@ class Server:
     async def check(self, *, first: bool) -> bool:
         """점검 한 번. 실패면 개발용 점검 생략이 아닌 한 끝 코드로 끝난다. 통과면 참이다."""
         name = "first" if first else "later"
-        verdict = await run_check(self.s.uid_map, self.s.targets, self.s.targets_error)
+        if first:
+            # 개발용 점검 생략은 결과로 아무것도 막지 않으므로 다시 돌며 기다리지 않는다
+            settle = 0.0 if self.s.unchecked else self.s.first_settle
+            verdict = await run_first_check(
+                self.s.uid_map, self.s.targets, self.s.targets_error, settle=settle
+            )
+        else:
+            verdict = await run_check(self.s.uid_map, self.s.targets, self.s.targets_error)
         code = exit_code(verdict, first=first)
         if code is None:
+            if verdict.rounds > 1:
+                log.warning("self-check first passed on round %d", verdict.rounds)
             return True
         if self.s.unchecked:
             # 개발용 점검 생략(P40 8절): 끝내지 않고 알리기만 한다
