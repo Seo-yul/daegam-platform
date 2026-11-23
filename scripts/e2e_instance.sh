@@ -154,7 +154,7 @@ K8S_NS="$(jq_ '(d.get("k8s") or {}).get("namespace") or "daegam-'"$TENANT"'"')"
 "${K[@]}" -n "$K8S_NS" get mcpserver "$K8S_NAME" -o name >/dev/null || die 6 "MCPServer $K8S_NS/$K8S_NAME missing"
 pass 6 "deployed $MS_NAME ($(jq_ 'd["display_name"]')) id=$MS_ID state=deployed Ready url=$INST_URL cr=$K8S_NS/$K8S_NAME"
 
-# ---------- 7. tools/list == [Add], Add(3,4)=7, Divide unknown ----------
+# ---------- 7. tools/list == [Add], Add(3,4)=7, Divide refused ----------
 # status.url is http://<svc>.<ns>.svc.cluster.local:8080/mcp -> port-forward that Service
 svc_host="$(python3 -c 'import sys; from urllib.parse import urlparse; print(urlparse(sys.argv[1]).hostname or "")' "$INST_URL")"
 svc="${svc_host%%.*}"; svc_ns="$(echo "$svc_host" | cut -d. -f2)"
@@ -177,9 +177,10 @@ echo "  tools/call: $call_out"
 call_result_is 7 "$call_out" || die 7 "Add(3,4) != 7"
 div_out="$(mcp call "$MCP_URL" Divide '{"numerator": 1, "denominator": 2}' 2>&1)" && { echo "$div_out"; die 7 "Divide must be rejected"; }
 echo "  tools/call: $div_out"
-echo "$div_out" | python3 -c 'import json,sys; c=json.load(sys.stdin)["call"]; sys.exit(0 if (c["isError"] and "unknown tool" in " ".join(x or "" for x in c["content"]).lower()) else 1)' \
-  || die 7 "Divide not rejected as unknown tool"
-pass 7 "no-token 401; with the service token: tools/list == [Add], Add(3,4)=7, Divide -> unknown tool"
+# 서버가 모르는 이름은 내부 프록시의 정책이 먼저 거절한다(Unauthorized). 정책을 렌더하지 않는 서버에서는 런타임이 unknown tool 로 답한다
+echo "$div_out" | grep -qE 'MCPError: Unauthorized|unknown tool' \
+  || die 7 "Divide not refused by the proxy or the runtime"
+pass 7 "no-token 401; with the service token: tools/list == [Add], Add(3,4)=7, Divide refused"
 
 # ---------- 8. pod env has CACHE_URL ----------
 env_names="$("${K[@]}" -n "$K8S_NS" get pod "${K8S_NAME}-0" -o jsonpath='{.spec.containers[?(@.name=="mcp")].env[*].name}' 2>/dev/null || true)"

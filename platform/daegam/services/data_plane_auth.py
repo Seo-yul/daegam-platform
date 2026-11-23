@@ -159,7 +159,8 @@ RENDER_EPOCHS: dict[str, int] = {
     # 5: 백엔드 파드의 라벨 (T67)
     # 6: 노출 앞단이 백엔드 하나의 vMCP 이고, 옛 앞단이 도는 서버는 vMCP 앞단이 그 자리를
     #    넘겨받는다. 노출 NetworkPolicy 가 두 종류의 앞단 파드를 고른다 (P54 5·6절)
-    KIND_MCP_SERVER: 6,
+    # 7: 그 리비전이 아는 Tool 이름 밖의 것을 닫는 forbid 를 모든 내부 서버가 싣는다 (P52 2절)
+    KIND_MCP_SERVER: 7,
     # 1: 감사, 이름 바꾼 툴의 필터, resources·prompts 표면, 백엔드마다의 호출 타임아웃, Cedar 참조,
     # 정적 백엔드 인증, Entry 마다의 토큰 (P50 4·6·7·8·9·12·13절)
     # 2: authz_policy 를 문장마다 정책 원소 하나로 (T63)

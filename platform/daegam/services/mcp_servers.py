@@ -31,7 +31,7 @@ from starlette.concurrency import run_in_threadpool
 from daegam.auth.hub_access import Access
 from daegam.auth.principal import Principal
 from daegam.auth.rbac import ROLES_CLAIM
-from daegam.auth.rule_cedar import closing_forbid
+from daegam.auth.rule_cedar import closing_forbid, known_forbid
 from daegam.config.resolve import EffectiveConfig, ProfileRuntime, resolve_effective
 from daegam.error_codes import status_of
 from daegam.errors import ServiceError
@@ -154,6 +154,7 @@ from daegam.services.rule_compile import (
     RuleScopes,
     closed_policies,
     earlier_names,
+    known_names,
     roles_claimed,
     ruled_names,
     rules_digest,
@@ -444,14 +445,17 @@ class MCPServerService(ExposureValidationMixin, BaseInstanceService[MCPServer]):
         거절되고 다시 렌더는 적용을 건너뛰지만, Advanced 저장이나 드리프트 되돌리기처럼 다른 길로
         렌더돼도 열리지 않게 한다. 이름을 바꾼 operationId 는 돌고 있는 백엔드 파드의 리비전이
         쓰던 이름도 닫는다."""
-        inputs = await self._rule_inputs(doc, rev, cluster, cached=cached)
-        if inputs is None or doc.k8s is None:
+        if doc.k8s is None:
             return []
+        known = await self._known_policy(doc, rev, cluster)
+        inputs = await self._rule_inputs(doc, rev, cluster, cached=cached)
+        if inputs is None:
+            return known
         scope, earlier = inputs
         spec = spec_of_revision(rev)
         if not rules_toolhive_ok(cluster):
             return closed_policies(server_rules_by_name(spec), scope, earlier=earlier)
-        return server_policies(
+        return known + server_policies(
             spec,
             scope,
             server_id=doc.id,
@@ -461,20 +465,47 @@ class MCPServerService(ExposureValidationMixin, BaseInstanceService[MCPServer]):
             conditions_known=conditions_enforced(doc),
         )
 
+    async def _known_policy(
+        self, doc: MCPServer, rev: MCPServerRevision, cluster: Cluster
+    ) -> list[str]:
+        """그 리비전이 아는 Tool 이름 밖의 것을 닫는 forbid 하나 (`known_forbid`, P52 2절). 규칙이
+        있든 없든 모든 내부 서버가 싣는다. 이름은 그 리비전이 내놓는 것과, 다른 리비전이 다른
+        이름을 내놓을 때는 돌고 있는 백엔드의 리비전이 내놓는 것이다(`known_names`). 0.53 아래나
+        모르는 판, 이름을 다 알 수 없는 리비전에는 싣지 않는다."""
+        if not rules_toolhive_ok(cluster):
+            return []
+        refs = {ref for r in doc.revisions for ref in version_refs_of(r)}
+        versions = await self.backend.get_versions(refs) if refs else {}
+        names = known_names(doc.revisions, rev, (), versions)
+        if names is None:
+            return []
+        if known_names(doc.revisions, rev, None, versions) != names:
+            # 다른 이름을 내놓는 리비전이 있을 때만 파드와 CR 을 읽는다
+            running = await self._running_revisions(doc, cluster)
+            names = known_names(doc.revisions, rev, running, versions)
+        return known_forbid(names)
+
     async def _running_revisions(self, doc: MCPServer, cluster: Cluster) -> set[int] | None:
-        """돌고 있는 백엔드 파드(Terminating 포함)의 리비전 라벨. 읽지 못하거나, 파드가 있는데 어느
-        것도 그 라벨을 싣지 않으면 None 이고(모른다), 그때는 모든 리비전의 이름을 닫는다.
-        ToolHive 가 podTemplateSpec 의 라벨을 백엔드 파드에 옮기는지는 클러스터에서 재지 않았다."""
+        """돌고 있는 백엔드 파드(Terminating 포함)의 리비전 라벨과, 클러스터의 MCPServer 가 지금
+        실은 백엔드 리비전. 그 CR 의 템플릿은 파드가 하나도 없을 때도 언제든 그 리비전의 파드를
+        띄운다. 읽지 못하거나, 파드가 있는데 어느 것도 그 라벨을 싣지 않으면 None 이고(모른다),
+        그때는 모든 리비전의 이름을 본다. ToolHive 가 podTemplateSpec 의 라벨을 백엔드 파드에
+        옮기는지는 클러스터에서 재지 않았다."""
         k8s = self._k8s(doc)
         try:
             client = await run_in_threadpool(self.cluster_service.client_for, cluster)
             pods = await run_in_threadpool(
                 client.list, "v1", "Pod", k8s.namespace, {LABEL_ID: doc.id}
             )
+            live = await run_in_threadpool(
+                client.get, TOOLHIVE_API, "MCPServer", k8s.name, k8s.namespace
+            )
         except Exception:  # noqa: BLE001 - 모르면 닫는 쪽이다
             logger.warning("could not read the pods of mcp server %s", doc.id, exc_info=True)
             return None
         out: set[int] = set()
+        if (carried := backend_revision(live)) is not None:
+            out.add(carried)
         labeled = False
         for pod in pods:
             labels = (pod.get("metadata") or {}).get("labels") or {}
@@ -1838,6 +1869,16 @@ def proxy_caught_up(deployment: dict[str, Any], generation: int) -> bool:
     if seen is not None and seen != str(generation):
         return False
     return rolled_out(deployment)
+
+
+def backend_revision(cr: dict[str, Any] | None) -> int | None:
+    """CR 의 백엔드 파드 템플릿이 실은 리비전(`LABEL_PROFILE_REVISION`). 없거나 못 읽으면 None."""
+    pod = ((cr or {}).get("spec") or {}).get("podTemplateSpec") or {}
+    value = ((pod.get("metadata") or {}).get("labels") or {}).get(LABEL_PROFILE_REVISION)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def map_cr_status(

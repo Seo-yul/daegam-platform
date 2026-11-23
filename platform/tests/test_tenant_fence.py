@@ -22,6 +22,9 @@ from tests.helpers.workers import fallbacks, run_data_plane_auth
 FENCE = "mcp-calc-1-authz"
 
 
+KNOWN_HEAD = 'forbid(principal, action == Action::"call_tool", resource)'
+
+
 def _old_cluster(fake_clusters) -> FakeClusterClient:
     """오퍼레이터가 0.51.2 인 가짜 클러스터를 등록 전에 둔다."""
     fake = FakeClusterClient(operator_image=operator_image("0.51.2"))
@@ -71,10 +74,11 @@ def test_a_cluster_moving_to_0_53_fences_its_servers(client, fake_clusters, mong
     spec = _spec(fake)
     assert spec["authzConfigRef"] == {"name": FENCE}
     # 울타리는 이 테넌트의 것이고 서버보다 먼저 적용된다
-    assert _fence(fake)["spec"] == {
-        "type": "cedarv1",
-        "config": {"policies": tenant_fence_policies("default")},
-    }
+    # 울타리 뒤에는 그 서버가 아는 Tool 이름 밖을 닫는 forbid 하나가 붙는다 (P52 2절)
+    fence = _fence(fake)["spec"]
+    assert fence["type"] == "cedarv1"
+    assert fence["config"]["policies"][:2] == tenant_fence_policies("default")
+    assert [p.split(" unless ")[0] for p in fence["config"]["policies"][2:]] == [KNOWN_HEAD]
     kinds = [o["kind"] for o in fake.applied[start:]]
     assert kinds.index(AUTHZ_CONFIG_KIND) < kinds.index("MCPServer")
     assert ("SPEC2OPENAPI_USERNAME", "username") in {
@@ -106,7 +110,10 @@ def test_without_the_g8_rights_the_fence_is_inline(client, fake_clusters, mongo)
     revoke_tenant_rights(mongo, cid)
     assert inst["id"] in run_data_plane_auth(client)["reapplied"]
     spec = _spec(fake)
-    assert spec["authzConfig"] == render_authz_inline(tenant_fence_policies("default"))
+    inline = spec["authzConfig"]["inline"]["policies"]
+    assert spec["authzConfig"] == render_authz_inline(inline)
+    assert inline[:2] == tenant_fence_policies("default")
+    assert [p.split(" unless ")[0] for p in inline[2:]] == [KNOWN_HEAD]
     assert "authzConfigRef" not in spec
     assert fallbacks(client, cid)["authz_ref"] == 1
 

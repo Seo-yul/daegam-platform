@@ -42,7 +42,9 @@ from daegam.auth.rule_cedar import (
     rule_forbids,
     vmcp_clause,
 )
+from daegam.services.advertised_names import exposed_pairs
 from daegam.services.toolnames import fastmcp_default_name
+from daegam.store.backend_apis import BackendAPIVersion
 from daegam.store.mcp_servers import BackendSelection, MCPServerRevision, MCPServerSpec
 from daegam.store.tool_rules import (
     QUALIFYING_ROLES,
@@ -333,6 +335,34 @@ def earlier_names(
             if seen:
                 out[name] = sorted(seen)
     return out
+
+
+def known_names(
+    revisions: Sequence[MCPServerRevision],
+    rev: MCPServerRevision,
+    running: Iterable[int] | None,
+    versions: Mapping[tuple[str, int], BackendAPIVersion],
+) -> list[str] | None:
+    """`known_forbid` 에 실을 이름. rev 가 내놓는 Tool 의 이름과, 돌고 있는 백엔드 파드의
+    리비전(running)이 내놓는 이름이다. 새 정책이 옛 컨테이너를 만나는 동안 옛 이름도 그대로 불리게
+    한다. running 을 모르면(None) 모든 리비전을 본다. 필터 없는 backend 의 버전 문서를 읽지 못해
+    rev 의 이름을 다 알 수 없으면 None 이고, 그때는 그 문장을 싣지 않는다. 다른 리비전의 읽지 못한
+    이름은 뺀다. 지문(`rules_digest`)에는 들지 않는다."""
+    keep = None if running is None else set(running)
+    others = [
+        r for r in revisions if r.revision != rev.revision and (keep is None or r.revision in keep)
+    ]
+    names: set[str] = set()
+    for r in [rev, *others]:
+        for sel in r.backends:
+            version = versions.get((sel.backend_profile_id, sel.spec_version))
+            if not sel.tools and version is None:
+                if r is rev:
+                    return None
+                continue
+            pairs = exposed_pairs(sel, version.tool_names if version else [])
+            names.update(name for name, _op in pairs)
+    return sorted(names)
 
 
 # -- 테넌트의 사실을 읽는 쪽 -------------------------------------------------------------------
