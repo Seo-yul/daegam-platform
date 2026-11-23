@@ -108,6 +108,21 @@ POLL_SECONDS = 0.5
 IDLE_RECLAIM = timedelta(minutes=30)
 # 노드 하나에 사용자 코드 없는 프로브는 10분에 하나다 (8절)
 PROBE_QUIET = timedelta(minutes=10)
+# 여는 중의 샌드박스가 낸 87 을 프로브가 확인할 때까지 기다리는 시간의 아래와 위. 프로브는 스윕
+# 한 번에 뜨고 다음 스윕이 끝 코드를 읽으므로 스윕 간격의 네 배를 주되, 이 둘 사이에 둔다. 넘으면
+# 판정을 무효로 한다
+FIRST_CHECK_CONFIRM_MIN = timedelta(minutes=5)
+FIRST_CHECK_CONFIRM_MAX = timedelta(minutes=60)
+FIRST_CHECK_SWEEPS = 4
+
+
+def first_check_confirm(sweep_seconds: float) -> timedelta:
+    """87 을 프로브가 확인하기를 기다리는 시간. 스윕 간격이 길어도 확인이 늘 시한을 넘기지 않게
+    간격을 따르고, `FIRST_CHECK_CONFIRM_MAX` 를 넘지 않는다."""
+    wanted = timedelta(seconds=FIRST_CHECK_SWEEPS * sweep_seconds)
+    return min(max(FIRST_CHECK_CONFIRM_MIN, wanted), FIRST_CHECK_CONFIRM_MAX)
+
+
 # 사람의 몫이 찼을 때 회수할 수 있는 샌드박스. 1분마다 touch 하므로 5분이면 어느 턴도 쥐지 않았다
 PERSON_RECLAIM_AFTER = timedelta(minutes=5)
 # 다른 레플리카가 같은 노드의 마지막 슬롯을 먼저 잡았을 때 다른 노드로 다시 하는 수
@@ -161,7 +176,8 @@ def limit_error(cap: CapName) -> SandboxError:
 
 
 def open_failed(reason: str, detail: str | None = None) -> SandboxError:
-    """503 `sandbox_open_failed`. 그 열기만 실패했고 아무것도 무효로 하지 않았다(87 은 따로)."""
+    """503 `sandbox_open_failed`. 그 열기만 실패했고 아무것도 무효로 하지 않았다(87 은 프로브가
+    확인한 뒤에 무효가 된다)."""
     return SandboxError(
         503, "sandbox_open_failed", detail or f"the sandbox did not start: {reason}", reason=reason
     )
@@ -646,7 +662,7 @@ class SandboxService:
                     return await self._ready(rec, cluster, client, view)
                 if judgement.fail is not None:
                     if judgement.void:
-                        await self.void(cluster, "self_check", view)
+                        await self.first_check_failed(rec, cluster, view)
                     await self.close(rec, f"failed_{judgement.fail}", client=client)
                     raise open_failed(judgement.fail)
             if anyio.current_time() >= deadline:
@@ -767,9 +783,9 @@ class SandboxService:
     async def void(
         self, cluster: Cluster, reason: SandboxVoidReason, view: PodView | None = None
     ) -> None:
-        """판정을 쓰기로 무효로 한다 (8절). 87 로 끝난 첫 점검과 실패한 플랫폼 프로브만 부른다.
-        view 는 87 로 끝난 파드다. 파드는 곧 지워지므로 그 종료 메시지(무엇이 닿았는지)를 기록에
-        남긴다."""
+        """판정을 쓰기로 무효로 한다 (8절). 준비됐던 샌드박스의 87, 프로브가 확인했거나 확인할 수
+        없던 여는 중의 87, 실패한 플랫폼 프로브만 부른다. view 는 87 로 끝난 파드다. 파드는 곧
+        지워지므로 그 종료 메시지(무엇이 닿았는지)를 기록에 남긴다."""
         if await self.clusters.void_sandbox_check(cluster.id, reason):
             logger.warning("cluster %s: sandbox verdict voided (%s)", cluster.name, reason)
         if view is not None and view.terminated_message:
@@ -779,6 +795,43 @@ class SandboxService:
                 view.terminated_message,
             )
 
+    async def first_check_failed(self, rec: SandboxRecord, cluster: Cluster, view: PodView) -> None:
+        """한 번도 준비되지 않은 샌드박스의 첫 점검이 87 로 끝났다 (8절). 새 파드는 노드의 정책
+        규칙이 그 IP 를 덮기 전에 점검할 수 있어, 그 하나로 판정을 무효로 하지 않고 같은 노드의
+        사용자 코드 없는 프로브가 확인하게 한다(`SandboxCheckService.probes_step`). 프로브가
+        확인할 수 없으면(노드를 모른다, 그 노드의 프로브가 10분 안에 이미 돌았다) 바로 무효로
+        한다. 파드는 곧 지워지므로 그 종료 메시지를 기록에 남긴다."""
+        logger.warning(
+            "cluster %s: a sandbox on node %s failed its first check and said: %s",
+            cluster.name,
+            rec.node or "(unknown)",
+            view.terminated_message or "(nothing)",
+        )
+        if rec.node and await self.store.confirm_first_check(
+            rec.cluster_id,
+            rec.node,
+            rec.namespace,
+            rec.tenant,
+            view.terminated_message,
+            quiet_since=utcnow() - PROBE_QUIET,
+        ):
+            return
+        await self.void(cluster, "self_check")
+
+    async def void_late_first_checks(self, cluster: Cluster, now: datetime) -> None:
+        """87 을 확인하는 프로브가 시한(`first_check_confirm`) 안에 끝나지 않은 클러스터의 판정을
+        무효로 한다. Mongo 만 쓰므로 스윕이 클러스터를 부르기 전에 돌고, 클러스터에 닿지 않아도
+        게이트를 연 채 더 기다리지 않는다."""
+        window = first_check_confirm(self.settings.sandbox_sweep_seconds)
+        late = await self.store.end_late_first_checks(cluster.id, now - window)
+        if late:
+            logger.warning(
+                "cluster %s: no probe confirmed a failed first check in time (nodes %s)",
+                cluster.name,
+                ", ".join(sorted(d.get("node") or "?" for d in late)),
+            )
+            await self.void(cluster, "self_check")
+
     async def settle(
         self,
         rec: SandboxRecord,
@@ -787,7 +840,8 @@ class SandboxService:
         client: KubeClient,
         view: PodView | None = None,
     ) -> None:
-        """준비됐던 샌드박스를 스윕의 판단대로 닫는다. 87 은 판정을 무효로 하고, 88 은 그 노드에
+        """준비됐던 샌드박스를 스윕의 판단대로 닫는다. 87 은 판정을 무효로 하고(제자리 재시작
+        뒤의 첫 점검이고 파드의 IP 가 오래된 것이라 프로브로 확인하지 않는다), 88 은 그 노드에
         사용자 코드 없는 프로브를 바란다(8절). 88 은 명령이 닿을 수 있던 프로세스가 낸 것일 수
         있어 판정을 무효로 하지 않는다."""
         if action == "void":

@@ -89,7 +89,7 @@ from daegam.store.agents import Agent, AgentK8s, AgentSpec
 from daegam.store.base import error_kind, utcnow
 from daegam.store.clusters import Cluster, MongoClusterStore, SandboxCheck, SandboxCheckRun
 from daegam.store.leases import Lease, lease_held, run_lease
-from daegam.store.sandboxes import SandboxRecord
+from daegam.store.sandboxes import ProbeEnd, SandboxRecord
 
 logger = logging.getLogger("daegam.sandbox_check")
 
@@ -541,38 +541,90 @@ class SandboxChecks:
                 await run_in_threadpool(client.delete, "v1", "Pod", name, PROBE_NAMESPACE)
 
     async def probes_step(self, cluster: Cluster, client: KubeClient, now: datetime) -> None:
-        """바라는 프로브를 띄우고 도는 프로브의 끝 코드를 읽는다."""
+        """바라는 프로브를 띄우고 도는 프로브의 끝 코드를 읽는다. 여는 중의 샌드박스가 낸 87 을
+        확인하는 프로브(`first_check`)의 결말은 끝낼 때의 문서로 정한다(`probe_end`). 시한을 넘긴
+        것은 스윕이 클러스터를 부르기 전에 이미 끝냈고(`SandboxService.void_late_first_checks`),
+        여기서는 그 파드를 지운다. 문서 하나의 실패가 다른 문서를 막지 않는다."""
         store = self.sandboxes.store
+        for doc in await store.orphan_probes(cluster.id):
+            try:
+                pod, ns = doc["orphan_pod"], doc["namespace"]
+                await run_in_threadpool(client.delete, "v1", "Pod", pod, ns)
+                await store.orphan_deleted(doc["_id"], pod)
+            except Exception as e:  # noqa: BLE001 - 다음 스윕이 다시 지운다
+                logger.warning("probe pod cleanup on %s failed: %s", cluster.name, error_kind(e))
         for doc in await store.probes_of(cluster.id):
-            key = doc["_id"]
-            if doc.get("state") == "wanted":
-                await self._start_probe(cluster, client, doc)
-                continue
-            pod_name = doc.get("pod")
-            found = None
-            if pod_name:
-                found = await run_in_threadpool(client.get, "v1", "Pod", pod_name, doc["namespace"])
-            view = pod_view(found)
-            if not view.exists:
-                await store.probe_retry(key)
-                continue
-            if view.phase in TERMINAL_PHASES:
-                if view.phase == "Succeeded" or view.exit_code == 0:
-                    result = "passed"
-                elif view.exit_code == EXIT_FIRST_FAILED:
-                    # 사용자 코드가 닿지 않은 파드의 실패라 판정을 쓰기로 무효로 한다
-                    result = "failed"
-                    await self.sandboxes.void(cluster, "probe")
-                else:
-                    result = "could_not_run"
-                await store.probe_done(key, result)
-                await run_in_threadpool(client.delete, "v1", "Pod", pod_name, doc["namespace"])
-                continue
-            started = doc.get("started_at")
-            if view.running_since is None and started and now - started > CREATE_WAIT:
-                # 시한 안에 뜨지 못했다. 다음 스윕이 다시 한다
-                await run_in_threadpool(client.delete, "v1", "Pod", pod_name, doc["namespace"])
-                await store.probe_retry(key)
+            try:
+                await self._probe_doc(cluster, client, doc, now)
+            except Exception as e:  # noqa: BLE001 - 한 프로브가 다른 프로브를 막지 않는다
+                logger.warning(
+                    "probe on node %s of %s failed: %s",
+                    doc.get("node"),
+                    cluster.name,
+                    error_kind(e),
+                )
+
+    async def _probe_doc(
+        self, cluster: Cluster, client: KubeClient, doc: dict[str, Any], now: datetime
+    ) -> None:
+        store = self.sandboxes.store
+        key = doc["_id"]
+        if doc.get("state") == "wanted":
+            await self._start_probe(cluster, client, doc)
+            return
+        pod_name = doc.get("pod")
+        found = None
+        if pod_name:
+            found = await run_in_threadpool(client.get, "v1", "Pod", pod_name, doc["namespace"])
+        view = pod_view(found)
+        if not view.exists:
+            await store.probe_retry(key)
+            return
+        if view.phase in TERMINAL_PHASES:
+            if view.phase == "Succeeded" or view.exit_code == 0:
+                result = "passed"
+            elif view.exit_code == EXIT_FIRST_FAILED:
+                result = "failed"
+            else:
+                result = "could_not_run"
+            end = await store.probe_end(key, result)
+            if end is not None:
+                await self._probe_ended(cluster, doc, result, end)
+            await run_in_threadpool(client.delete, "v1", "Pod", pod_name, doc["namespace"])
+            return
+        started = doc.get("started_at")
+        if view.running_since is None and started and now - started > CREATE_WAIT:
+            # 시한 안에 뜨지 못했다. 다음 스윕이 다시 한다
+            await run_in_threadpool(client.delete, "v1", "Pod", pod_name, doc["namespace"])
+            await store.probe_retry(key)
+
+    async def _probe_ended(
+        self, cluster: Cluster, doc: dict[str, Any], result: str, end: ProbeEnd
+    ) -> None:
+        """끝난 프로브가 판정에 하는 일. 87 은 사용자 코드가 닿지 않은 파드의 실패라 언제나
+        무효다. 87 을 확인하던 프로브는 돌지 못해도 무효이고(닫힌 쪽), 통과하면 판정을 그대로
+        둔다. 그 87 보다 먼저 시작한 프로브(`end.again`)는 답이 아니라 새 프로브가 확인한다."""
+        first = end.first_check
+        if result == "failed":
+            await self.sandboxes.void(cluster, "self_check" if first else "probe")
+        elif first and end.again:
+            logger.info(
+                "cluster %s: the probe on node %s started before a first check failed there; "
+                "a new probe confirms it",
+                cluster.name,
+                doc["node"],
+            )
+        elif first and result == "passed":
+            logger.warning(
+                "cluster %s: the probe on node %s passed, so the first check that "
+                "failed there is not confirmed; it said: %s",
+                cluster.name,
+                doc["node"],
+                first.get("message") or "(nothing)",
+            )
+        elif first:
+            # 87 을 확인하지 못했다. 닫힌 쪽으로 정한다
+            await self.sandboxes.void(cluster, "self_check")
 
     async def _start_probe(self, cluster: Cluster, client: KubeClient, doc: dict[str, Any]) -> None:
         svc = self.sandboxes

@@ -225,6 +225,25 @@ def test_a_stale_opening_record_closes(client, mongo, fake, opened):
     assert _rec(mongo)["close_reason"] == "open_stale"
 
 
+def test_the_sweep_asks_for_a_probe_when_an_opening_pod_exits_87(client, mongo, fake):
+    """열기가 기다리다 떠난 뒤에 87 로 끝난 여는 중의 파드도 판정을 바로 무효로 하지 않는다."""
+    c = seed_cluster(mongo, fake, cluster())
+    seed_agent(mongo, c)
+    kubelet(fake, ready=False, running=False, waiting="ContainerCreating")
+    r = client.post(
+        f"/agents/{AGENT_ID}/sandboxes",
+        json={"session_id": "s1", "wait_seconds": 0},
+        headers=auth(),
+    )
+    assert r.status_code == 503
+    [pod] = sandbox_pods(fake)
+    set_status(fake, pod, ready=False, running=False, waiting="CrashLoopBackOff", exit_code=87)
+    _sweep(client)
+    assert _rec(mongo)["close_reason"] == "failed_self_check"
+    assert _check(mongo, c.id)["passed"] is True
+    assert mongo["sandbox_probes"].find_one()["first_check"]["at"] is not None
+
+
 def test_undeploy_and_delete_close_the_agents_sandboxes(client, mongo, fake, opened):
     service = client.app.state.agent_service
     doc = client.portal.call(client.app.state.agents.get, AGENT_ID)
