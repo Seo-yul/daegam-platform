@@ -78,7 +78,7 @@ UI_CLIENT="daegam-ui-e2e"
 G_MEMBERS="oidcp-members"; G_DEVS="oidcp-devs"; G_CAROL="oidcp-carol"; G_ENG="oidcp-eng"; G_X="oidcp-x"
 ALICE="oidcp-alice"; BOB="oidcp-bob"; CAROL="oidcp-carol"; XAVIER="oidcp-xavier"; ADMIN_SUB="boot-admin"
 BP_NAME="oidcp-calc"; MS_NAME="oidcp-ms"; GW_NAME="oidcp-gw"; RULES_NAME="oidcp-rules"; AG_NAME="oidcp-agent"
-GW3_NAME="oidcp-gw3"; AG2_NAME="oidcp-agent2"
+GW3_NAME="oidcp-gw3"; AG2_NAME="oidcp-agent2"; DS_NAME="oidcp-redis"
 # 플랫폼을 믿는 동안 T 가 저장하는 사용자 정의 mcp_group. 렌더는 그것을 쓰지 않는다
 CUSTOM_GROUP="oidcp-team"
 MS_HOST="${E2E_OIDCP_MS_HOST:-oidcp-ms.e2e.local}"; GW_HOST="${E2E_OIDCP_GW_HOST:-oidcp-gw.e2e.local}"
@@ -96,7 +96,7 @@ K=(kubectl --context "$CTX")
 AUTH=()                 # 관리자 Bearer 헤더. STEP 1 이 넣는다 (lib/e2e_api.sh 의 api 가 싣는다)
 ADMIN_TOKEN=""; PF_API=""; PF_OIDC=""; PF_VMCP=""
 NS=""; GW_URL=""; GW_PIN=""; MS_URL=""; MS_PIN=""; VMCP_SEL=""; FRONT_SEL=""
-RULES_ID=""; AG_ID=""; SA_DEV_ID=""; SA_VIEW_ID=""; SCHEDULE_ID=""; GW3_ID=""; AG2_ID=""
+RULES_ID=""; AG_ID=""; DS_ID=""; HOME_ID=""; SA_DEV_ID=""; SA_VIEW_ID=""; SCHEDULE_ID=""; GW3_ID=""; AG2_ID=""
 TS_CHANGED=0; TARGETS_MADE=0
 
 . "$HERE/lib/e2e_pf.sh"
@@ -107,6 +107,8 @@ kill_stale_pf "$API_PORT" "$OIDC_PORT" "$VMCP_PORT"
 . "$HERE/lib/e2e_report.sh"
 . "$HERE/lib/e2e_api.sh"
 . "$HERE/lib/e2e_calc.sh"
+# lab Redis 를 Database 로 등록하는 lab_database 는 여기에 있다 (STEP 9 의 Agent 의 memory)
+. "$HERE/lib/e2e_lab.sh"
 . "$HERE/lib/e2e_sse.sh"
 . "$HERE/lib/e2e_group_mappings.sh"
 . "$HERE/lib/e2e_turn_tokens.sh"
@@ -126,6 +128,7 @@ teardown() {
   [ -z "$SCHEDULE_ID" ] || [ -z "$AG_ID" ] || api_delete "/agents/$AG_ID/schedules/$SCHEDULE_ID"
   [ -z "$AG_ID" ] || api_delete "/agents/$AG_ID"
   [ -z "$AG2_ID" ] || api_delete "/agents/$AG2_ID"
+  [ -z "$DS_ID" ] || api_delete "/data-services/$DS_ID"
   [ -z "$GW3_ID" ] || api_delete "/gateways/$GW3_ID"
   [ -z "$RULES_ID" ] || api_delete "/gateways/$RULES_ID"
   [ "$TARGETS_MADE" = 0 ] || calc_teardown
@@ -446,8 +449,13 @@ pass 8 "removing the mapping $G_CAROL revoked carol's personal token at once (me
 # ---------- 9. Agent 와 사람의 이름 ----------
 code="$(api GET /agents/templates)"; [ "$code" = 200 ] || die 9 "GET /agents/templates -> $code"
 cp "$WORK/body" "$WORK/templates.json"
+# 자동 실행은 memory 가 있는 Agent 만 받는다(409 runs_need_memory). lab Redis 를 체크포인터로 둔다
+code="$(api GET /clusters)"; [ "$code" = 200 ] || die 9 "GET /clusters -> $code"
+HOME_ID="$(find_id home)"; [ -n "$HOME_ID" ] || die 9 "no home cluster"
+lab_database 9 redis "$DS_NAME" "$DS_NAME"
+DS_ID="$DATA_SERVICE_ID"
 python3 "$HERE/lib/agent_body.py" "$WORK/templates.json" "$WORK/agent.json" --name "$AG_NAME" --display "발급자 전환 에이전트" \
-  --provider "$STUB" --source "gateway_instance:$RULES_ID" --allow "$TOOL"
+  --provider "$STUB" --source "gateway_instance:$RULES_ID" --allow "$TOOL" --ds-id "$DS_ID"
 save_doc 9 /agents "$AG_NAME" "$(cat "$WORK/agent.json")"
 AG_ID="$SAVED_ID"
 rules_put 9 "{\"callers\": {\"agents\": [\"$AG_ID\"]}}"

@@ -34,7 +34,9 @@ permissions:
   checks: read
 
 concurrency:
-  group: pr-check-${{ github.ref }}
+  # PR 번호로 묶는다. 합쳐진 뒤에 도는 PR 의 실행은 github.ref 가 base 브랜치가 되어, ref 로 묶으면 연달아 합친 두 PR 의
+  # 실행이 서로를 취소한다
+  group: pr-check-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 env:

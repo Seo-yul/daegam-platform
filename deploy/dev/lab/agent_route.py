@@ -30,7 +30,7 @@ from typing import Any
 import httpx2
 
 from daegam.k8s.client import ClusterClient
-from daegam.k8s.portforward import bearer_service_client
+from daegam.k8s.portforward import bearer_header, bearer_service_client
 from daegam.k8s.templates import AGENT_PORT
 from daegam.k8s.templates.agent import TOKEN_KEY
 from daegam.k8s.templates.svc_token import secret_value
@@ -104,7 +104,7 @@ class Route:
             self.namespace,
             self.service,
             AGENT_PORT,
-            bearer=self.token,
+            headers=bearer_header(self.token),
             timeout=TIMEOUT,
             read_timeout=read_timeout,
         )

@@ -13,7 +13,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: tree-check-${{ github.ref }}
+  # PR 의 실행은 PR 번호로 묶는다. 합칠 때 PR 브랜치에 민 squash 커밋의 실행은 PR 이 이미 합쳐진 뒤에 만들어져
+  # github.ref 가 base 브랜치(refs/heads/develop)가 되므로, ref 로 묶으면 같은 커밋의 develop push 실행을 취소한다
+  group: tree-check-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:

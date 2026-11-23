@@ -300,7 +300,7 @@ publish_inst() { # ID NAME -> hub item id
     [ "$code" = "200" ] || die 3 "re-publish $name -> $code (expected 200 idempotent)"
   fi
   [ "$(jq_ 'd["kind"], d["name"], d["source"]["instance_id"], d["scope"]')" = "internal $name $id tenant" ] || die 3 "published item shape: $(cat "$WORK/body")"
-  [ "$(jq_ 'd["permissions"]')" = "{'view': True, 'consume': True, 'manage': True}" ] || die 3 "permissions (header = platform-admin): $(jq_ 'd["permissions"]')"
+  [ "$(jq_ 'd["permissions"]')" = "{'view': True, 'consume': True, 'manage': True, 'replace_header': False, 'replace_secret_env': False}" ] || die 3 "permissions (header = platform-admin): $(jq_ 'd["permissions"]')"
   echo "$code" >"$WORK/pub-$name"   # pass 메시지용 (함수는 명령 치환 안에서 돈다)
   jq_ 'd["id"]'
 }
@@ -398,6 +398,18 @@ pass 5 "gateways A=$A (display_name=$A_DISPLAY; $URL_A; entries $A_CALC,$A_ORD) 
 pf() { # svc port-local [STEP]
   start_pf "$NS" "svc/$1" "$2:4483"; PFS+=("$PF_PID"); PFS_PORTS+=("$2")
   wait_port "$2" || die "${3:-6}" "port-forward $1 :$2 did not open"; }
+# list_redeployed PORT URL -> 다시 배포한 Gateway 의 tools/list. 다시 배포가 vMCP 파드를 바꾸면 먼저 연 kubectl 은 내려간
+# 파드에 붙은 채 포트를 쥐고 있어 요청이 끊긴다. 새 파드로 다시 열고(lib/e2e_pf.sh restart_pf) 답할 때까지 다시 부른다
+list_redeployed() {
+  local out i
+  restart_pf "$1"
+  for ((i = 0; i < 30; i++)); do
+    out="$($MCP list "$2" 2>"$WORK/list.err")" && { echo "$out"; return 0; }
+    sleep 2
+  done
+  cat "$WORK/list.err" >&2
+  return 1
+}
 PA=$PF_PORT_BASE; PB=$((PF_PORT_BASE + 1))
 pf "vmcp-$NA" "$PA"; pf "vmcp-$NB" "$PB"
 UA="http://127.0.0.1:$PA/mcp"; UB="http://127.0.0.1:$PB/mcp"
@@ -421,6 +433,7 @@ pass 6 "A tools == [Add, CreateOrder, GetOrder]; B tools == [Divide]; no remote 
 metrics_base 7 "/mcp-servers/$I1" "$WORK/m0-calc"
 metrics_base 7 "/gateways/$A" "$WORK/m0-a"
 metrics_base 7 "/gateways/$B" "$WORK/m0-b"
+CALLS_SINCE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"   # STEP 8r 이 B 의 감사 기록을 찾기 시작할 시각이다
 CA="$($MCP call "$UA" Add '{"a": 3, "b": 4}')" || die 7 "A Add failed: $CA"
 call_result_is 7 "$CA" || die 7 "A Add != 7: $CA"
 if CB="$($MCP call "$UB" Add '{"a": 3, "b": 4}' 2>&1)"; then die 7 "B Add must fail: $CB"; fi
@@ -445,7 +458,7 @@ RES_LABEL="$("${K[@]}" -n "$NS" get virtualmcpserver "$NA" -o jsonpath='{.metada
 code="$(api POST "/gateways/$A/redeploy")"; [ "$code" = "200" ] || die 8 "redeploy A -> $code"
 [ "$(jq_ 'd["k8s"]["name"]')" = "$NA" ] || die 8 "redeploy changed the CR name: $(jq_ 'd["k8s"]["name"]')"
 wait_ready "/gateways/$A" 8
-LA="$($MCP list "$UA")" || die 8 "tools/list A after redeploy failed: $LA"
+LA="$(list_redeployed "$PA" "$UA")" || die 8 "tools/list A after redeploy failed: $LA"
 [ "$(tools_sorted "$LA")" = "$A_TOOLS" ] || die 8 "A tools changed after redeploy: $LA"
 pass 8 "CRs named $NA, $NB with daegam.devops.ai.kr/id=$A (group, $n_entries entries, vMCP resource=$RES_LABEL); redeploy keeps the name"
 
@@ -459,13 +472,25 @@ b_rule_warnings() { # -> B 상태 경고 가운데 규칙 경고의 코드 목�
   api GET "/gateways/$B" >/dev/null
   jq_ '[w.split(":")[0] for w in (d.get("status") or {}).get("warnings", []) if w.startswith("rules_")]'
 }
+# 다시 배포는 B 의 vMCP 파드를 바꾼다. 수집기는 60초마다 파드 로그를 읽고 파드가 바뀌면 옛 파드의 읽지 않은 줄을 잃으므로
+# (services/audit_collector.py), STEP 16b 가 세는 STEP 7 의 B Add 가 감사 기록에 들어온 뒤에 다시 배포한다
+seen=0
+for ((i = 0; i < 18; i++)); do
+  code="$(API_OUT="$WORK/audit-b" api GET "/audit/mcp?type=mcp_tool_call&tool=Add&since=$CALLS_SINCE&limit=1000")"
+  if [ "$code" = 200 ] && [ "$(python3 -c 'import json, sys
+print(sum(1 for e in json.load(open(sys.argv[1])) if e.get("instance_id") == sys.argv[2]))' "$WORK/audit-b" "$B")" != 0 ]; then
+    seen=1; break
+  fi
+  sleep 10
+done
+[ "$seen" = 1 ] || die 8r "the audit record of STEP 7's Add at B was not collected within 180s (GET /audit/mcp -> $code)"
 code="$(api PUT "/gateways/$B" "$(b_body '{"Divide": {"callers": {"roles": ["developer"]}}}')")"
 [ "$code" = "200" ] || die 8r "PUT /gateways/$B with a rule on Divide -> $code: $(cat "$WORK/body")"
 code="$(api POST "/gateways/$B/redeploy")"; [ "$code" = "200" ] || die 8r "redeploy B -> $code"
 wait_ready "/gateways/$B" 8r
 warned="$(b_rule_warnings)"
 [ "$warned" = "['rules_not_enforced']" ] || die 8r "B rule warnings in header mode: $warned (want ['rules_not_enforced'])"
-LB="$($MCP list "$UB")" || die 8r "tools/list B after the rule failed: $LB"
+LB="$(list_redeployed "$PB" "$UB")" || die 8r "tools/list B after the rule failed: $LB"
 [ "$(tools_sorted "$LB")" = "$(tools_sorted '{"tools": ["Divide"]}')" ] || die 8r "B tools with an unenforced rule: $LB (want [Divide])"
 code="$(api PUT "/gateways/$B" "$(b_body '{}')")"
 [ "$code" = "200" ] || die 8r "PUT /gateways/$B without rules -> $code: $(cat "$WORK/body")"
@@ -569,8 +594,16 @@ HDR_ACCESS="{\"view\": {\"tenants\": [\"$TENANT_B\"]}, \"consume\": {\"tenants\"
 code="$(api POST /hub "{\"name\": \"e2e-header\", \"kind\": \"entry\", \"url\": \"$HDR_URL\", \"transport\": \"streamable-http\", \"access\": $HDR_ACCESS, \"auth\": {\"kind\": \"header\", \"header_name\": \"$HDR_NAME\", \"header_value\": \"$HDR_WRONG\"}}")"
 [ "$code" = "201" ] || die 9h "POST /hub header item -> $code: $(cat "$WORK/body")"
 ! grep -q "$HDR_WRONG" "$WORK/body" || die 9h "the answer carries the header value"
-[ "$(jq_ 'd["auth"]["check"]["outcome"]')" = header_refused ] || die 9h "a wrong value saved without header_refused: $(jq_ 'd["auth"]')"
 HID="$(jq_ 'd["id"]')"
+# 방금 뜬 파드는 Ready 여도 플랫폼에서 Service 로 아직 닿지 않을 수 있다(엔드포인트와 NetworkPolicy 가 따라오는 사이).
+# 그때의 판정은 unreachable 이므로 같은 틀린 값을 다시 저장해 판정을 다시 받는다
+for ((i = 0; i < 12; i++)); do
+  [ "$(jq_ 'd["auth"]["check"]["outcome"]')" = unreachable ] || break
+  sleep 5
+  code="$(api PUT "/hub/$HID/auth/header" "{\"value\": \"$HDR_WRONG\"}")"
+  [ "$code" = "200" ] || die 9h "PUT the wrong header value again -> $code: $(cat "$WORK/body")"
+done
+[ "$(jq_ 'd["auth"]["check"]["outcome"]')" = header_refused ] || die 9h "a wrong value saved without header_refused: $(jq_ 'd["auth"]')"
 code="$(api PUT "/hub/$HID/auth/header" "{\"value\": \"$HDR_V1\"}")"
 [ "$code" = "200" ] && [ "$(jq_ 'd["auth"]["check"]["outcome"]')" = ok ] || die 9h "PUT header value -> $code: $(jq_ 'd.get("auth")')"
 code="$(api POST "/hub/$HID/refresh-tools")"; [ "$code" = "200" ] || die 9h "refresh-tools -> $code"

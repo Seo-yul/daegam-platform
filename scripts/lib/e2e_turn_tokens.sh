@@ -221,5 +221,33 @@ PY
     fi
     sleep 10
   done
+  audit_pods || true
   die "$step" "MCP audit after ${AUDIT_TIMEOUT:-210}s (GET /audit/mcp -> $code): $out"
+}
+
+# audit_pods: 기대한 감사 기록이 없을 때 그 까닭을 가르게 프록시 파드마다 만든 시각과 재시작 수, 로그에 남은 Tool 호출 감사
+# 줄(시각, Tool, 결과, 행위자)을 찍는다. 수집기는 파드가 바뀌면 옛 파드의 마지막 폴링 뒤 줄을 잃는다(audit_collector.py)
+audit_pods() {
+  local ns pod made restarts
+  echo "  audit: proxy pods and the tool call lines in their logs"
+  "${K[@]}" get pods -A -l toolhive=true --no-headers \
+    -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name,MADE:.metadata.creationTimestamp,RESTARTS:.status.containerStatuses[0].restartCount 2>/dev/null |
+    while read -r ns pod made restarts; do
+      echo "  --- $ns/$pod made=$made restarts=$restarts"
+      "${K[@]}" -n "$ns" logs "$pod" --all-containers --tail=-1 </dev/null 2>/dev/null | python3 -c '
+import json, sys
+for line in sys.stdin:
+    if "audit_id" not in line:
+        continue
+    try:
+        e = json.loads(line)
+    except ValueError:
+        continue
+    if e.get("type") != "mcp_tool_call":
+        continue
+    chain = [a.get("sub") for a in (e.get("delegation") or {}).get("chain") or []]
+    print("     ", e.get("logged_at"), (e.get("target") or {}).get("name"), e.get("outcome"),
+          (e.get("subjects") or {}).get("user_id"), chain)
+' | tail -n 20 || true
+    done
 }
