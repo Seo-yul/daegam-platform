@@ -54,6 +54,7 @@ from fastmcp import (
     FastMCP,  # mcp 2.x 에서 mcp.server.fastmcp 가 없어졌다. mcp-runtime 과 같은 것을 쓴다 (T6)
 )
 from langchain_core.language_models import BaseChatModel
+from sse_starlette.sse import AppStatus
 
 from runtime import boot, error_codes
 from runtime.config import AgentConfig, parse_config
@@ -120,6 +121,17 @@ def termination_log(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     path = tmp_path / "termination-log"
     monkeypatch.setattr(boot, "TERMINATION_LOG", str(path))
     return path
+
+
+@pytest.fixture(autouse=True)
+def sse_not_exiting() -> None:
+    """sse-starlette 의 프로세스 전역 종료 표시를 테스트마다 내린다.
+
+    그 표시는 uvicorn 서버 하나가 내려갈 때 서고 다시 내려가지 않는다. 선 뒤에는 같은 프로세스의
+    모든 SSE 응답이 곧바로 끝나므로, 서버를 내리는 테스트 뒤에 도는 MCP 세션(initialize 의 답이
+    SSE 다)이 `SSE stream ended without a response` 로 실패한다. 파드에서는 프로세스가 함께
+    내려가므로 문제가 아니다."""
+    AppStatus.should_exit = False
 
 
 def load_fixture(name: str) -> dict[str, Any]:
