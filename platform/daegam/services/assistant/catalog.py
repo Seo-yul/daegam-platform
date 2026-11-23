@@ -1017,6 +1017,10 @@ _ROLLBACK = (
     "옛 리비전의 정의를 새 리비전으로 저장해 배포한다. 사람이 화면의 리비전 목록에서 고르고, 승인 "
     "카드의 새 문구 없이 비서 도구로 두지 않는다 (P45)"
 )
+_PUBLISH_AGENT = (
+    "게시한 Agent 는 다른 Agent 의 호출을 자기 예산으로 받고 그 대화의 내용을 넘겨받는다. 주인이 "
+    "화면의 게시 대화상자에서 정하고, 승인 카드의 새 문구 없이 비서 도구로 두지 않는다 (P46)"
+)
 
 EXCLUDED: dict[tuple[str, str], str] = {
     ("POST", f"{BP}/convert"): (
@@ -1116,6 +1120,8 @@ EXCLUDED: dict[tuple[str, str], str] = {
     ("POST", f"{AG}/{{agent_id}}/sleep"): _SLEEP,
     ("POST", f"{AG}/{{agent_id}}/wake"): _SLEEP,
     ("POST", f"{AG}/{{agent_id}}/rollback"): _ROLLBACK,
+    ("POST", f"{AG_ITEM}/publish"): _PUBLISH_AGENT,
+    ("DELETE", f"{AG_ITEM}/publish"): _PUBLISH_AGENT,
     ("PUT", f"{AG}/{{agent_id}}/evaluation-gate"): (
         "배포 게이트는 사람이 화면에서 정하는 안전 설정이다. 비서가 끄거나 느슨하게 하지 "
         "못한다 (P45)"

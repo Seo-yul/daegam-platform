@@ -913,6 +913,8 @@ def build_services(
         claims=claims,
         exposure_hosts=stores.exposure_hosts,
         tool_effects=tool_effects,
+        # 게시한 Agent 는 허브의 `agent` 항목이다 (P46 6.1절)
+        hub=hub_service,
         run_hooks=run_service,
         choices=approval_choices,
         sandboxes=sandboxes,
@@ -924,6 +926,8 @@ def build_services(
         gate=deploy_gate,
     )
     agent_service.rule_scopes = rule_scopes
+    # 허브의 agent 항목 상태는 그 Agent 의 판단이다 (P46 6.1절, HubService.late_hooks)
+    hub_service.agent_status = agent_service.item_status
     # 미리 보기의 배포와 끝은 Agent 서비스가 한다 (AgentPreviews.late_hooks)
     agent_previews.service = agent_service
     # 중지와 멈춤이 도는 실행의 턴을 런타임에서 멈춘다 (P41 7절, RunService.late_hooks). 프록시는

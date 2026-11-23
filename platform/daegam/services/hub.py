@@ -1,4 +1,5 @@
-"""MCP Hub: 항목 생성(CR 렌더·apply), 상태, 삭제, 툴 목록 갱신, MCP Server 의 수동 게시(D23).
+"""MCP Hub: 항목 생성(CR 렌더·apply), 상태, 삭제, 툴 목록 갱신, MCP Server·Gateway·Agent 의 수동
+게시(D23).
 
 자기 CR 을 둔 항목(`owns_crs`)은 재적용 단계가 렌더 번호로 제자리에서 다시 렌더한다
 (`rerender`, P50 1절, `services/hub_reapply.py`)."""
@@ -111,6 +112,7 @@ from daegam.services.tool_rules import (
     rules_toolhive_ok,
 )
 from daegam.store.access import stamp_access
+from daegam.store.agents import Agent
 from daegam.store.auth_reapply import AUTH_FIELDS, new_image_switch, switched_server_id
 from daegam.store.base import (
     fields_of,
@@ -122,6 +124,7 @@ from daegam.store.base import (
 from daegam.store.clusters import Cluster
 from daegam.store.gateways import Gateway
 from daegam.store.hub import (
+    AGENT_KIND,
     CHECK_OK,
     CHECK_REFUSED,
     CHECK_UNREACHABLE,
@@ -166,6 +169,9 @@ SchemaLister = Callable[[KubeClient, str, Mapping[str, str] | None], Awaitable["
 # internal 항목의 원본 MCP Server 가 자기 상태로 답하는 자리(`MCPServerService.item_status`). 둘째
 # 인자는 부르는 쪽이 이미 읽은 원본 문서다. 원본이 없거나 draft 면 None 이다
 ServerStatus = Callable[[HubItem, MCPServer | None], Awaitable[dict[str, Any] | None]]
+# agent 항목의 Agent 가 자기 상태로 답하는 자리(`AgentService.item_status`). Agent 가 없거나
+# draft 면 None 이다
+AgentStatus = Callable[[HubItem], Awaitable[dict[str, Any] | None]]
 TOOLS_LIST_TIMEOUT = 20.0
 
 # 도구 스키마 응답의 상한. 저장하지 않고 그때그때 물어보는 값이지만 남의 MCP 서버가 얼마나 큰 것을
@@ -245,8 +251,12 @@ CR_KIND: dict[str, str | None] = {
     "published": "VirtualMCPServer",
     # 플랫폼 항목 가운데 복제되는 것은 fetch 뿐이다 (P39b 13절)
     "platform": "MCPServer",
+    # 게시한 Agent 는 CR 이 아니라 그 Agent 의 Deployment 다 (P46 6.1절)
+    AGENT_KIND: None,
 }
 READY_PHASES = {"MCPServer": {"Ready"}, "MCPRemoteProxy": {"Ready"}, "VirtualMCPServer": {"Ready"}}
+# agent 항목이 쓸 수 있다고 보는 그 Agent 의 phase
+AGENT_READY_PHASES = frozenset({"Ready"})
 # stdio 항목이 Ready 인데 답하지 않는 상태 (P55 5절)
 NOT_ANSWERING = "not_answering"
 # 답하지 않는 stdio 항목의 프록시 파드 지우기 (P55 5절). 실패가 STDIO_CONFIRM 넘게 이어져야 처음
@@ -609,7 +619,9 @@ def _capped(schemas: list[ToolSchema]) -> tuple[list[dict[str, Any]], bool]:
 class HubService:
     # 만든 뒤에 붙이는 훅 (P72 2.4절). MCP Server 서비스가 이 서비스를 받아 만들어지므로 생성자로
     # 받을 수 없다. wiring 의 `_check_wiring` 이 기동 때 채워졌는지 본다
-    late_hooks: ClassVar[frozenset[str]] = frozenset({"server_status", "rule_scopes"})
+    late_hooks: ClassVar[frozenset[str]] = frozenset(
+        {"server_status", "agent_status", "rule_scopes"}
+    )
     # Tool 규칙을 컴파일할 테넌트의 사실 (P52 2절). wiring 이 단다. 없으면 규칙을 렌더하지 않는다
     rule_scopes: RuleScopes | None = None
 
@@ -643,6 +655,8 @@ class HubService:
         self.svc_tokens = svc_tokens
         # internal 항목의 상태는 원본 MCP Server 자신의 판단이다 (T55). wiring 이 붙인다
         self.server_status: ServerStatus | None = None
+        # agent 항목의 상태는 그 Agent 의 것이다 (P46 6.1절). wiring 이 붙인다
+        self.agent_status: AgentStatus | None = None
         # entry 항목의 고정 헤더 값을 두는 관리 Secret (P86 6.1절). 정리는 리컨실의 한 걸음이다
         self.outside_headers = outside_headers.OutsideHeaderSecrets(
             cluster_service.secret_store,
@@ -1572,6 +1586,8 @@ class HubService:
         if item.kind == PLATFORM_KIND:
             # 설정이 먼저 답한다. 켰으면 ready, 껐으면 platform_tool_disabled (P39b 13절)
             return platform_tools.status(item, settings or await self.platform_settings())
+        if item.kind == AGENT_KIND:
+            return await self._agent_item_status(item, out)
         if item.k8s.kind is None:
             # entry: CR 이 없다. URL 만 있으면 쓸 수 있다고 본다
             out.update(phase="Valid", ready=bool(item.source.url), url=item.source.url)
@@ -1626,6 +1642,22 @@ class HubService:
             out["url"] = self.backend_url(item, st.get("url"))
         else:
             out["url"] = self.backend_url(item, st.get("url")) if st.get("url") else None
+        return out
+
+    async def _agent_item_status(self, item: HubItem, out: dict[str, Any]) -> dict[str, Any]:
+        """agent 항목의 상태 (P46 6.1절). 그 Agent 의 phase 를 그대로 쓰고 주소는 없다. Agent 가
+        없거나 draft 면 `Missing` 이다. 그 항목은 호출이 거절되고 게시 해제만 된다."""
+        st = await self.agent_status(item) if self.agent_status is not None else None
+        if st is None:
+            out.update(phase="Missing", message=f"agent {item.source.agent_id} is not deployed")
+            return out
+        phase = st["phase"]
+        out.update(
+            phase=phase,
+            ready=phase in AGENT_READY_PHASES,
+            message=st.get("message"),
+            error=st.get("error"),
+        )
         return out
 
     # -- stdio 항목의 점검 (P55 5절) ------------------------------------------------------
@@ -2000,7 +2032,8 @@ class HubService:
 
     async def delete(self, item: HubItem) -> None:
         """published 는 게시 해제다 (proxy 모드면 MCPRemoteProxy CR 도 지운다).
-        internal 도 게시 해제다. CR 은 배포 소유라 문서만 지운다 (D23). 플랫폼 항목은 지우지
+        internal 과 agent 도 게시 해제다. CR 과 Deployment 는 배포 소유라 문서만 지운다 (D23).
+        agent 항목은 그것을 Tool 로 쓰는 Agent 가 있어도 지운다 (P46 6.1절). 플랫폼 항목은 지우지
         못한다(Platform Settings 가 끈다).
 
         객체는 렌더하지 않고 저장된 이름으로 지운다(`owned_objects`). 그래서 뒤 판이 쓴 항목도
@@ -2077,25 +2110,19 @@ class HubService:
         existing = await self.store.get_by_instance(inst.id)
         if existing is not None:
             return existing, False
-        stamped = self._initial_access(
-            access, owner=inst.tenant, kind="internal", principal=principal
-        )
         name = (name or inst.name).strip()
+        item = self._published_item(
+            inst,
+            kind="internal",
+            name=name,
+            display_name=display_name,
+            source=HubSource(instance_id=inst.id, mcp_profile_id=inst.id),
+            k8s=_instance_k8s(inst),
+            access=access,
+            principal=principal,
+        )
         if await self.store.get_by_name(inst.tenant, name) is not None:
             raise HubError(409, "name_conflict", f"hub item {name!r} already exists")
-        item = HubItem(
-            tenant=inst.tenant,
-            name=name,
-            display_name=display_name or inst.display_name,
-            kind="internal",
-            source=HubSource(instance_id=inst.id, mcp_profile_id=inst.id),
-            cluster_id=inst.cluster_id,
-            k8s=_instance_k8s(inst),
-            access=stamped,
-            access_updated_by=principal.sub if access is not None else None,
-            access_updated_at=utcnow() if access is not None else None,
-            state="created",
-        )
         await self.store.create(item)
         return item, True
 
@@ -2123,28 +2150,99 @@ class HubService:
             if existing.source.gateway_instance_id == gw.id:
                 return existing  # 멱등
             raise HubError(409, "name_conflict", f"hub item {hub_name!r} already exists")
-        stamped = self._initial_access(
-            access, owner=gw.tenant, kind="published", principal=principal
-        )
-        item = HubItem(
-            tenant=gw.tenant,
-            name=hub_name,
-            display_name=display_name or gw.display_name,
+        item = self._published_item(
+            gw,
             kind="published",
+            name=hub_name,
+            display_name=display_name,
             source=HubSource(
                 url=vmcp_cluster_url(k8s.name, k8s.namespace),
                 transport=DEFAULT_TRANSPORT,
                 gateway_instance_id=gw.id,
             ),
-            cluster_id=gw.cluster_id,
             k8s=HubK8s(kind="VirtualMCPServer", name=k8s.name, namespace=k8s.namespace),
+            access=access,
+            principal=principal,
+        )
+        await self.store.create(item)
+        return item
+
+    async def publish_agent(
+        self,
+        agent: Agent,
+        *,
+        name: str | None = None,
+        display_name: str | None = None,
+        description: str,
+        calls_trusted: bool = False,
+        access: Access | None = None,
+        principal: Principal,
+    ) -> tuple[HubItem, bool]:
+        """배포된 Agent 를 `agent` 항목으로 게시한다 (P46 6.1절). (항목, 새로 만들었는지). 이미
+        게시돼 있으면 그대로 돌려준다(멱등). 이름 기본값은 문서 `name`, 표시 이름 기본값은 문서
+        `display_name` 이고 다른 항목과 충돌하면 409 name_conflict 다. 항목은 그 Agent 의 id 와
+        Deployment 이름만 들고 CR 이 없다. agent 는 다른 테넌트에 열 수 없다 (422
+        cross_tenant_unsupported). 상태와 전제 조건은 부르는 쪽 몫이다."""
+        existing = await self.store.get_by_agent(agent.id)
+        if existing is not None:
+            return existing, False
+        k8s = agent.k8s
+        assert k8s is not None  # 부르는 쪽이 턴을 받는 Agent 인지 확인했다
+        name = (name or agent.name).strip()
+        item = self._published_item(
+            agent,
+            kind=AGENT_KIND,
+            name=name,
+            display_name=display_name,
+            source=HubSource(agent_id=agent.id),
+            k8s=HubK8s(name=k8s.name, namespace=k8s.namespace),
+            access=access,
+            principal=principal,
+        )
+        item.description = description
+        item.calls_trusted = calls_trusted
+        if await self.store.get_by_name(agent.tenant, name) is not None:
+            raise HubError(409, "name_conflict", f"hub item {name!r} already exists")
+        try:
+            await self.store.create(item)
+        except DuplicateKeyError as e:
+            # 그사이 같은 Agent 를 게시했으면 그 항목이고, 아니면 이름이 겹친 것이다
+            existing = await self.store.get_by_agent(agent.id)
+            if existing is not None:
+                return existing, False
+            raise HubError(409, "name_conflict", f"hub item {name!r} already exists") from e
+        return item, True
+
+    def _published_item(
+        self,
+        origin: MCPServer | Gateway | Agent,
+        *,
+        kind: str,
+        name: str,
+        display_name: str | None,
+        source: HubSource,
+        k8s: HubK8s,
+        access: Access | None,
+        principal: Principal,
+    ) -> HubItem:
+        """배포된 origin 을 게시하는 항목. 테넌트와 클러스터는 origin 의 것이고 표시 이름 기본값은
+        그 문서의 것이다 (D24). 정책은 생성 때처럼 검증하고, 보낸 정책이 있을 때만 바꾼 사람을
+        적는다."""
+        stamped = self._initial_access(access, owner=origin.tenant, kind=kind, principal=principal)
+        assert origin.cluster_id is not None  # 배포된 문서다
+        return HubItem(
+            tenant=origin.tenant,
+            name=name,
+            display_name=display_name or origin.display_name,
+            kind=kind,  # type: ignore[arg-type]
+            source=source,
+            cluster_id=origin.cluster_id,
+            k8s=k8s,
             access=stamped,
             access_updated_by=principal.sub if access is not None else None,
             access_updated_at=utcnow() if access is not None else None,
             state="created",
         )
-        await self.store.create(item)
-        return item
 
     async def sync_instance(self, inst: MCPServer) -> HubItem | None:
         """재배포 뒤 게시 항목의 CR 참조·클러스터를 맞춘다. 게시돼 있지 않으면 None.
@@ -2174,6 +2272,20 @@ class HubService:
         """인스턴스 삭제에 따라 게시 항목을 지운다. 참조 중이어도 지운다
         (docs/guide/hub-gateway.md 6절)."""
         item = await self.store.get_by_instance(instance_id)
+        if item is not None:
+            await self.store.delete(item.id)
+
+    async def agent_item(self, agent: Agent) -> HubItem:
+        """agent 를 게시한 `agent` 항목. 게시돼 있지 않으면 404 not_published. 해제는 라우터가
+        manage 를 본 뒤 `delete` 로 하므로 `DELETE /hub/{id}` 와 같은 판정이다."""
+        item = await self.store.get_by_agent(agent.id)
+        if item is None:
+            raise HubError(404, "not_published", f"agent {agent.id} is not published")
+        return item
+
+    async def unregister_agent(self, agent_id: str) -> None:
+        """Agent 삭제에 따라 게시 항목을 지운다. 그것을 Tool 로 쓰는 Agent 가 있어도 지운다."""
+        item = await self.store.get_by_agent(agent_id)
         if item is not None:
             await self.store.delete(item.id)
 

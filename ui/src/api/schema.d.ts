@@ -1094,7 +1094,8 @@ export interface paths {
         post?: never;
         /**
          * Delete Item
-         * @description 삭제 = 게시 해제. manage 가 없으면 403, 참조 중이면 409 in_use.
+         * @description 삭제 = 게시 해제. manage 가 없으면 403, 참조 중이면 409 in_use. 게시한 Agent 의 항목이면
+         *     감사 action 이 Agent 쪽 해제와 같은 `unpublish_agent` 다 (P46 6.8절).
          */
         delete: operations["delete_item_api_hub__item_id__delete"];
         options?: never;
@@ -1111,7 +1112,8 @@ export interface paths {
         };
         /**
          * Item References
-         * @description 이 허브 항목 의 참조 (D43). 이 항목을 백엔드로 묶은 Gateway 다.
+         * @description 이 허브 항목 의 참조 (D43). 이 항목을 백엔드로 묶은 Gateway 와, 게시한 Agent 의 항목이면
+         *     그것을 Tool 로 쓰는 Agent 다 (P46 6.1절).
          */
         get: operations["item_references_api_hub__item_id__references_get"];
         put?: never;
@@ -1708,8 +1710,8 @@ export interface paths {
         };
         /**
          * Agent References
-         * @description 이 Agent 의 참조 (D43). 아직 Agent 를 쓰는 리소스는 없어 늘 빈 목록이지만, 상세 여덟이
-         *     같은 카드를 가지므로 라우트도 여덟이다.
+         * @description 이 Agent 의 참조 (D43). 이 Agent 를 게시한 허브 항목과, 그 항목을 거쳐 이 Agent 를 Tool 로
+         *     쓰는 Agent 다 (P46 6.1절).
          */
         get: operations["agent_references_api_agents__agent_id__references_get"];
         put?: never;
@@ -1900,6 +1902,37 @@ export interface paths {
          */
         post: operations["wake_agent_api_agents__agent_id__wake_post"];
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agents/{agent_id}/publish": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Publish Agent
+         * @description 허브에 `agent` 항목으로 게시한다. 같은 테넌트의 다른 Agent 가 캔버스에서 이 항목을 Tool 로
+         *     붙인다. 이미 게시돼 있으면 200 으로 그 항목을 돌려준다. 턴을 받는 Agent 만 되고(409
+         *     not_deployed·in_progress·deleting), 배포된 리비전에 memory 노드와 세션 예산이 있어야 하며(409
+         *     agent_source_runs_unmet), 이벤트 수집이 켜져 있고(409 runs_need_events) 런타임 이미지가
+         *     `runs` 와 `turn_tokens` 를 알려야 한다(409 runtime_feature_missing). Agent 호출이 꺼져 있으면
+         *     409 agent_calls_disabled 다.
+         */
+        post: operations["publish_agent_api_agents__agent_id__publish_post"];
+        /**
+         * Unpublish Agent
+         * @description 게시 해제. `DELETE /hub/{id}` 와 같은 판정이다. 항목의 manage 가 없으면 403, 게시돼 있지
+         *     않으면 404 not_published 다. 이 항목을 Tool 로 쓰는 Agent 가 있어도 해제되고, 그 Agent 의 저장과
+         *     배포와 호출이 그때부터 거절된다.
+         */
+        delete: operations["unpublish_agent_api_agents__agent_id__publish_delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -5869,6 +5902,27 @@ export interface components {
         AgentPreviewsOut: {
             /** Previews */
             previews: components["schemas"]["AgentPreviewOut"][];
+        };
+        /**
+         * AgentPublishBody
+         * @description 허브 게시 본문. name 기본값은 문서 name, display_name 기본값은 문서 display_name 이다
+         *     (D24). description 은 이 Agent 를 Tool 로 부르는 Agent 의 모델이 읽는 Tool 설명이다.
+         *     calls_trusted 가 참이면 호출의 메시지를 사람이 쓴 것으로 다룬다. access 는 생략하면 빈 정책이고,
+         *     agent 항목은 다른 테넌트에 열 수 없다 (422 cross_tenant_unsupported).
+         */
+        AgentPublishBody: {
+            /** Name */
+            name?: string | null;
+            /** Display Name */
+            display_name?: string | null;
+            /** Description */
+            description: string;
+            /**
+             * Calls Trusted
+             * @default false
+             */
+            calls_trusted: boolean;
+            access?: components["schemas"]["Access"] | null;
         };
         /**
          * AgentRegenerateBody
@@ -10402,7 +10456,7 @@ export interface components {
              * Kind
              * @enum {string}
              */
-            kind: "internal" | "remote" | "entry" | "image" | "published" | "platform";
+            kind: "internal" | "remote" | "entry" | "image" | "published" | "platform" | "agent";
             source: components["schemas"]["HubSourceOut"];
             /** Cluster Id */
             cluster_id: string;
@@ -10454,6 +10508,10 @@ export interface components {
             secret_env_updated_by?: string | null;
             /** Secret Env Updated At */
             secret_env_updated_at?: string | null;
+            /** Description */
+            description?: string | null;
+            /** Calls Trusted */
+            calls_trusted?: boolean | null;
             permissions: components["schemas"]["HubItemPermissionsOut"];
             /**
              * Scope
@@ -10549,6 +10607,8 @@ export interface components {
             tools_filter: string[] | null;
             /** Gateway Instance Id */
             gateway_instance_id: string | null;
+            /** Agent Id */
+            agent_id?: string | null;
             /** Stdio */
             stdio?: boolean | null;
             /** Args */
@@ -10634,7 +10694,7 @@ export interface components {
              * Kind
              * @enum {string}
              */
-            kind: "internal" | "remote" | "entry" | "image" | "published" | "platform";
+            kind: "internal" | "remote" | "entry" | "image" | "published" | "platform" | "agent";
             source: components["schemas"]["HubSourceOut"];
             /** Cluster Id */
             cluster_id: string;
@@ -10686,6 +10746,10 @@ export interface components {
             secret_env_updated_by?: string | null;
             /** Secret Env Updated At */
             secret_env_updated_at?: string | null;
+            /** Description */
+            description?: string | null;
+            /** Calls Trusted */
+            calls_trusted?: boolean | null;
             permissions: components["schemas"]["HubItemPermissionsOut"];
             /**
              * Scope
@@ -26653,6 +26717,198 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AgentOut"];
+                };
+            };
+            /** @description 잘못된 테넌트 이름 또는 테넌트 미선택(tenant_required) */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 토큰 없음·검증 실패 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 소속 아님(not_member) 또는 scope 부족(forbidden) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 없는 리소스 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 이름 충돌·참조 중·상태 충돌 */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 입력 검증 실패 {code, detail} 또는 본문 스키마 오류(목록) */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 클러스터 접속 실패 */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description IdP·home 클러스터 사용 불가 */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    publish_agent_api_agents__agent_id__publish_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                agent_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AgentPublishBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HubItemWithStatus"];
+                };
+            };
+            /** @description 잘못된 테넌트 이름 또는 테넌트 미선택(tenant_required) */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 토큰 없음·검증 실패 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 소속 아님(not_member) 또는 scope 부족(forbidden) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 없는 리소스 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 이름 충돌·참조 중·상태 충돌 */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 입력 검증 실패 {code, detail} 또는 본문 스키마 오류(목록) */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 클러스터 접속 실패 */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description IdP·home 클러스터 사용 불가 */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    unpublish_agent_api_agents__agent_id__publish_delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                agent_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeleteResponse"];
                 };
             };
             /** @description 잘못된 테넌트 이름 또는 테넌트 미선택(tenant_required) */

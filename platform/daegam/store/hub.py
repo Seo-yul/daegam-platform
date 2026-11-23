@@ -13,8 +13,12 @@
 뒤 판이 쓴 칸은 읽되 그대로 렌더하지 않는다 (P55 9절). 출처의 모르는 칸은 `HubSource` 가 들고
 있어 칸을 쓰는 저장이 지우지 않는다. 최상위의 모르는 칸은 `from_doc` 이 `newer_fields` 에 적는다.
 그런 항목을 렌더하거나 접근 정책을 바꾸는 자리는 `hub_item_newer` 로 멈춘다(`services/hub.py`).
-뒤 판이 더한 종류(P46 의 `agent`)의 항목은 목록에서 빠지고(`_known`), id 나 이름으로 읽으면 422
+뒤 판이 더한 종류의 항목은 목록에서 빠지고(`_known`), id 나 이름으로 읽으면 422
 `hub_item_newer` 다(`HubItemNewer`). 이 판은 그 항목을 보이지도 바꾸지도 않는다 (P46 A0).
+
+`agent` 항목은 게시한 Agent 다 (P46 6.1절). 출처는 `source.agent_id` 하나이고 `k8s` 는 그 Agent 의
+이름만 든다(`kind` 가 없다). 그래서 MCP Server 를 찾는 조회(`get_by_instance`)와 CR 을 가진 항목의
+조회(`owning_cr_on_cluster`)에 걸리지 않고, 렌더할 것도 없다.
 """
 
 from __future__ import annotations
@@ -48,7 +52,7 @@ from daegam.store.tool_rules import ItemToolRule
 
 HUB_ITEMS = "hub_items"
 
-HubKind = Literal["internal", "remote", "entry", "image", "published", "platform"]
+HubKind = Literal["internal", "remote", "entry", "image", "published", "platform", "agent"]
 HUB_KINDS: frozenset[str] = frozenset(get_args(HubKind))
 Transport = Literal["streamable-http", "sse"]
 # 항목이 transport 를 적지 않았을 때 쓰는 값
@@ -181,7 +185,8 @@ STDIO_PROBE_FIELD = "stdio_probe"
 
 class HubSource(BaseModel):
     """kind 별 출처.
-    remote/entry/published: url·transport, image: image·transport·port, internal: instance_id.
+    remote/entry/published: url·transport, image: image·transport·port, internal: instance_id,
+    agent: agent_id.
     image 는 컨테이너의 stdio·args·env·Secret env 이름을 더 들 수 있다 (P55 5절). transport 는
     늘 소비자가 말하는 전송이고, stdio 컨테이너는 프록시가 그 전송으로 낸다.
 
@@ -200,6 +205,8 @@ class HubSource(BaseModel):
     tools_filter: list[str] | None = None  # image: MCPToolConfig.toolsFilter
     # published: 원본 Gateway
     gateway_instance_id: str | None = None
+    # agent: 게시한 Agent (P46 6.1절). 그 항목의 `instance_id` 는 비어 있다
+    agent_id: str | None = Field(default=None, exclude_if=_unset)
     # image 의 컨테이너 (P55 5절). 비었으면 저장하지 않는다(`_unset`). 앞 판(B1)은 이 칸을 모르는
     # 칸으로 읽어 그 항목을 렌더하지도 다른 테넌트에 열지도 않는다 (9절)
     stdio: bool | None = Field(default=None, exclude_if=_unset)
@@ -224,7 +231,8 @@ class HubSource(BaseModel):
 
 
 class HubK8s(BaseModel):
-    """항목이 소유하거나 가리키는 CR. entry 는 CR 이 없다 (kind None).
+    """항목이 소유하거나 가리키는 CR. entry 는 CR 이 없다 (kind None). agent 도 kind 가 없고 이름은
+    그 Agent 의 Deployment 것이다.
     `name` 은 항목 자신의 CR 이름이다. Gateway 그룹의 Entry 래퍼 이름은 인스턴스 쪽에서 정한다."""
 
     model_config = ConfigDict(extra="forbid")
@@ -245,6 +253,10 @@ DERIVED_KINDS: tuple[str, ...] = ("internal", "published")
 PLATFORM_KIND = "platform"
 # 배포된 Gateway 를 게시한 항목의 종류 (hub-gateway.md 6절)
 PUBLISHED_KIND = "published"
+# 게시한 Agent 의 항목 (P46 6.1절). 다른 Agent 가 Tool 로 부르고, Gateway 의 백엔드는 되지 못한다
+AGENT_KIND = "agent"
+# agent 항목의 Tool 설명 길이의 위 끝
+AGENT_DESCRIPTION_MAX = 1024
 
 
 def is_derived(kind: str | None) -> bool:
@@ -347,6 +359,10 @@ class HubItemBase(Document):
     secret_env_rev: int | None = Field(default=None, exclude_if=_unset)
     secret_env_updated_by: str | None = Field(default=None, exclude_if=_unset)
     secret_env_updated_at: UtcDatetime | None = Field(default=None, exclude_if=_unset)
+    # agent 항목만 갖는 칸 (P46 6.1절). 설명은 부르는 Agent 의 모델이 읽는 Tool 설명이다.
+    # `calls_trusted` 가 참이면 호출의 메시지를 사람이 쓴 것으로 다룬다. 다른 항목에는 없다
+    description: str | None = Field(default=None, exclude_if=_unset)
+    calls_trusted: bool | None = Field(default=None, exclude_if=_unset)
 
 
 class HubItem(HubItemBase, ConsumerAuthState):
@@ -421,10 +437,9 @@ def _known(docs: list[dict[str, Any]]) -> list[HubItem]:
 
 
 class HubItemNewer(ServiceError):
-    """이 판이 모르는 종류(뒤 판이 더한 것, P46 의 `agent`)의 항목을 id 나 이름으로 읽었다 (P46
-    A0). 앱의 전역 처리기가 422 `hub_item_newer` 로 답하므로 그 항목의 상세, 삭제, 접근 정책,
-    Tool, 매니페스트와 그 이름을 쓰는 생성·게시가 모두 멈춘다. 칸이 아니라 종류라 `fields` 는
-    `kind` 하나다.
+    """이 판이 모르는 종류(뒤 판이 더한 것)의 항목을 id 나 이름으로 읽었다 (P46 A0). 앱의 전역
+    처리기가 422 `hub_item_newer` 로 답하므로 그 항목의 상세, 삭제, 접근 정책, Tool, 매니페스트와
+    그 이름을 쓰는 생성·게시가 모두 멈춘다. 칸이 아니라 종류라 `fields` 는 `kind` 하나다.
 
     판정의 면(`HasAccess` 의 `tenant`·`access`)을 들고 있다. 주체가 있는 읽기
     (`HubService.get_visible`)는 view 를 먼저 보고, 볼 수 없는 사람에게는 이 오류 대신 404 로
@@ -486,6 +501,14 @@ class MongoHubStore(EditClaimStore):
         await self.coll.create_index(
             [("source.gateway_instance_id", ASCENDING)], name="ix_gateway_instance"
         )
+        # 게시한 Agent 의 항목을 그 Agent 로 찾는다 (P46 6.1절). Agent 하나에 항목은 하나라, 겹친 두
+        # 게시 가운데 하나만 들어간다. 그 칸이 없는 다른 종류의 항목은 색인에 들지 않는다
+        await self.coll.create_index(
+            [("source.agent_id", ASCENDING)],
+            unique=True,
+            partialFilterExpression={"source.agent_id": {"$type": "string"}},
+            name="uq_agent",
+        )
         await self.coll.create_index([("cluster_id", ASCENDING)], name="ix_cluster")
         await create_access_indexes(self.coll)
 
@@ -531,6 +554,10 @@ class MongoHubStore(EditClaimStore):
             return {}
         cursor = self.coll.find({"kind": "internal", "source.instance_id": {"$in": instance_ids}})
         return {d["source"]["instance_id"]: HubItem.from_doc(d) for d in await cursor.to_list()}
+
+    async def get_by_agent(self, agent_id: str) -> HubItem | None:
+        """그 Agent 를 게시한 `agent` 항목 (P46 6.1절). 게시하지 않았으면 None 이다."""
+        return _one(await self.coll.find_one({"kind": AGENT_KIND, "source.agent_id": agent_id}))
 
     async def published_of_instance(self, gateway_instance_id: str) -> list[HubItem]:
         cursor = self.coll.find(

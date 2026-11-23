@@ -38,7 +38,14 @@ from daegam.names import validate_display_name, validate_name
 from daegam.services.hub import CREATABLE_KINDS, HubService
 from daegam.services.hub_tools import origin_server
 from daegam.services.outside_headers import HeaderInput
-from daegam.store.hub import HubEnvVar, HubItem, HubSecretEnvVar, HubSource, is_derived
+from daegam.store.hub import (
+    AGENT_KIND,
+    HubEnvVar,
+    HubItem,
+    HubSecretEnvVar,
+    HubSource,
+    is_derived,
+)
 from daegam.store.tool_rules import ItemToolRule
 from daegam.urls import EXPORTED_CLASSES, outside_address
 
@@ -322,15 +329,21 @@ async def get_item(tenant: Tenant, service: Service, item_id: str, user: User) -
 async def item_references(
     tenant: Tenant, service: Service, item_id: str, user: User, request: Request
 ) -> dict[str, Any]:
-    """이 허브 항목 의 참조 (D43). 이 항목을 백엔드로 묶은 Gateway 다."""
+    """이 허브 항목 의 참조 (D43). 이 항목을 백엔드로 묶은 Gateway 와, 게시한 Agent 의 항목이면
+    그것을 Tool 로 쓰는 Agent 다 (P46 6.1절)."""
     item = await _visible_or_404(service, user, tenant, item_id)
     return await references_out(request, "hub-item", item.id, tenant=tenant)
 
 
 @router.delete("/{item_id}", response_model=DeleteResponse, dependencies=[WRITE])
-async def delete_item(tenant: Tenant, service: Service, item_id: str, user: User) -> dict[str, Any]:
-    """삭제 = 게시 해제. manage 가 없으면 403, 참조 중이면 409 in_use."""
+async def delete_item(
+    tenant: Tenant, service: Service, item_id: str, user: User, request: Request
+) -> dict[str, Any]:
+    """삭제 = 게시 해제. manage 가 없으면 403, 참조 중이면 409 in_use. 게시한 Agent 의 항목이면
+    감사 action 이 Agent 쪽 해제와 같은 `unpublish_agent` 다 (P46 6.8절)."""
     item = await _visible_or_404(service, user, tenant, item_id)
+    if item.kind == AGENT_KIND:
+        request.state.audit_action = "unpublish_agent"
     return await unpublish_item(service, user, tenant, item)
 
 
@@ -348,7 +361,8 @@ async def refresh_tools(
     # internal·published 의 도구 이름은 우리 리비전에서 계산한다 (D49). 라이브 값을 저장할 자리가
     # 없고, 저장하면 연산자가 새 리비전을 아직 안 굴린 과도기의 값이 굳어 멀쩡한 Gateway 정의를
     # 422 로 막는다. 라이브를 보는 일은 도구 탭이 저장 없이 한다 (D48)
-    if is_derived(item.kind):
+    if is_derived(item.kind) or item.kind == AGENT_KIND:
+        # agent 항목의 Tool 은 그 항목 하나라 받아 올 목록이 없다 (P46 6.2절)
         raise error(
             422,
             "derived_tools",

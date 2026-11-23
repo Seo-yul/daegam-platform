@@ -92,6 +92,7 @@ from daegam.services.agent_graph import (
 from daegam.services.agent_llm import AgentLlm
 from daegam.services.agent_memory import AgentMemories
 from daegam.services.agent_pod_inputs import POD_INPUT_RECORDS, AgentPodInputs
+from daegam.services.agent_publish import CALLS_BROKEN_BY_DEPLOY, AgentPublishing
 from daegam.services.agent_rollback import (
     AgentRollbackMixin,
     deploy_record_push,
@@ -138,6 +139,7 @@ from daegam.services.exposure import (
     expose_object_refs,
     exposure_from_input,
 )
+from daegam.services.hub import HubService
 from daegam.services.instance_base import (
     EDIT_STATES,
     IN_PROGRESS,
@@ -192,6 +194,7 @@ from daegam.store.data_services import DataService, MongoDataServiceStore
 from daegam.store.exposure import AgentExposure
 from daegam.store.exposure_hosts import MongoExposureHostStore
 from daegam.store.gateways import MongoGatewayStore
+from daegam.store.hub import HubItem
 from daegam.store.instances import DeployEnd
 from daegam.store.knowledge import KnowledgeBase, MongoKnowledgeStore
 from daegam.store.mcp_servers import MongoMCPServerStore
@@ -218,6 +221,8 @@ class AgentRunHooks(Protocol):
     async def end_agent_runs(self, tenant: str, agent_id: str, *, deleting: bool) -> object: ...
 
     async def forget_agent(self, tenant: str, agent_id: str) -> object: ...
+
+    def check_revision(self, revision: AgentRevision, message: str | None) -> None: ...
 
 
 class AgentEvaluationHooks(Protocol):
@@ -348,6 +353,7 @@ class AgentService(ExposureValidationMixin, AgentRollbackMixin, BaseInstanceServ
         claims: Claims,
         exposure_hosts: MongoExposureHostStore,
         tool_effects: ToolEffectLoader,
+        hub: HubService,
         run_hooks: AgentRunHooks | None = None,
         choices: ApprovalChoiceService | None = None,
         sandboxes: SandboxService | None = None,
@@ -432,6 +438,15 @@ class AgentService(ExposureValidationMixin, AgentRollbackMixin, BaseInstanceServ
             runs=runs,
         )
         self.proxy.sleep = self.sleep
+        # 허브 게시 (P46 6.1절). 게시한 Agent 는 다른 Agent 의 Tool 이 되고, 호출은 실행이라
+        # 전제 조건을 실행 서비스가 본다
+        self.publishing = AgentPublishing(
+            hub=hub,
+            settings=settings,
+            check_revision=run_hooks.check_revision if run_hooks is not None else None,
+            require_serving=lambda doc: self.proxy.require_deployed(doc, action="publish"),
+            error_cls=AgentError,
+        )
         # 인스턴스 토큰과 그 Secret, 파드 입력 (P72 2.1절)
         self.agent_tokens = AgentTokens(
             tokens=tokens,
@@ -1063,6 +1078,7 @@ class AgentService(ExposureValidationMixin, AgentRollbackMixin, BaseInstanceServ
         async with self._host_claimed(doc):
             await self._transition(doc, {"draft"}, action="deploy", extra={"sleep"}, push=history)
         warnings += await self._runs_deployed(doc, principal, previous=None)
+        warnings += await self._calls_deployed(doc)
         await self._prune_choices(doc)
         return doc, warnings
 
@@ -1380,6 +1396,7 @@ class AgentService(ExposureValidationMixin, AgentRollbackMixin, BaseInstanceServ
             async with self._host_claimed(doc, claim=exposure_sent):
                 await self._transition(doc, EDIT_STATES, action="redeploy", push=history)
             issues += await self._runs_deployed(doc, principal, previous=previous)
+            issues += await self._calls_deployed(doc)
             await self._prune_choices(doc)
             self._place_claim(doc)
             return await self.provision(doc), issue_lines(issues)
@@ -1499,6 +1516,14 @@ class AgentService(ExposureValidationMixin, AgentRollbackMixin, BaseInstanceServ
 
     # -- 해제·삭제 ------------------------------------------------------------------
 
+    async def _guard_undeploy(self, doc: Agent) -> None:
+        """허브에 게시돼 있으면 409 published 다 (P46 6.1절). 다시 몰아가는 해제에도 본다."""
+        await self.publishing.refuse_undeploy(doc)
+
+    async def _after_cluster_removed(self, doc: Agent) -> None:
+        """게시한 허브 항목을 정리한다. 삭제는 게시가 막지 않는다."""
+        await self.publishing.forget(doc)
+
     async def _delete_steps(self, doc: Agent, *, forget_memories: bool = False) -> None:
         """Deployment·Service·NetworkPolicy·노출 객체·Secret 을 지운다. `forget_memories` 면
         마지막에 장기 기억도 지운다(삭제만. 해제는 남긴다)."""
@@ -1595,6 +1620,26 @@ class AgentService(ExposureValidationMixin, AgentRollbackMixin, BaseInstanceServ
             logger.warning("agent %s: run sources not checked at deploy: %s", doc.id, e)
             return []
 
+    async def _calls_deployed(self, doc: Agent) -> list[Issue]:
+        """게시한 Agent 의 새 배포가 호출의 전제 조건을 잃었으면 그 경고다 (P46 6.1절). 배포는 이미
+        저장됐으므로 실패는 경고 로그만 남긴다."""
+        try:
+            message = await self.publishing.deploy_warning(doc)
+        except Exception as e:  # noqa: BLE001 - 저장된 배포를 실패로 돌리지 않는다
+            logger.warning("agent %s: its hub item not checked at deploy: %s", doc.id, e)
+            return []
+        if message is None:
+            return []
+        return [Issue(code=CALLS_BROKEN_BY_DEPLOY, message=message, level="warning")]
+
+    async def item_status(self, item: HubItem) -> dict[str, Any] | None:
+        """agent 허브 항목의 상태. 그 Agent 의 상태라 허브 화면이 Agent 화면과 같은 phase 를 본다
+        (P46 6.1절). Agent 가 없거나 draft 면 None 이다. 허브 상태는 phase 만 쓰므로 런타임 수치와
+        노출 상태는 읽지 않는다."""
+        agent_id = item.source.agent_id
+        doc = await self.agents.get(agent_id, item.tenant) if agent_id else None
+        return await self.status(doc, listing=True, with_exposure=False) if doc else None
+
     async def _end_runs(self, doc: Agent) -> None:
         """도는 턴을 멈추기 전에 이 Agent 의 열린 실행에 해제나 삭제의 까닭을 남긴다. 멈춘 턴의
         `turn_end` 가 그 까닭으로 실행을 끝낸다. 실패는 경고로 남긴다. 그때 실행은 `stopped` 로
@@ -1661,6 +1706,7 @@ class AgentService(ExposureValidationMixin, AgentRollbackMixin, BaseInstanceServ
         돌아온 문서에도 장기 기억이 남아 있다. 클러스터에 아무것도 없어도 사람의 기억은 문서보다
         오래 남으면 안 되므로 이 단계는 지난다 (D34)."""
         await self.memories.forget(doc)
+        await _best_effort(doc, "hub item not deleted", self.publishing.forget(doc))
         await self._forget_feedback_of_draft(doc)
         await self._forget_runs_of_draft(doc)
         await self._forget_choices_of_draft(doc)

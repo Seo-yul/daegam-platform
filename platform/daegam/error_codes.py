@@ -26,9 +26,15 @@ STATUS: dict[str, int] = {
     "agent_asleep": 409,
     # 잠들게 하려는데 턴이 리스를 쥐고 있다 (P44 7절)
     "agent_busy": 409,
+    # Agent 호출이 꺼진 플랫폼에서 Agent 를 허브에 게시하려 했다 (P46 6.5절)
+    "agent_calls_disabled": 409,
     "agent_client_id_is_ui_client": 422,
+    # 게시한 Agent 의 허브 항목은 Gateway 의 백엔드가 되지 못한다 (P46 6.1절)
+    "agent_item_gateway_unsupported": 422,
     "agent_oauth_missing": 422,
     "agent_run_limit": 429,
+    # 다른 Agent 가 Tool 로 부를 Agent 에 memory 노드나 세션 예산이 없다 (P46 6.1절)
+    "agent_source_runs_unmet": 409,
     # 잠들 수 없는 Agent 다. 까닭은 `ineligible` 칸이다 (P44 6절)
     "agent_sleep_ineligible": 409,
     # 파드를 다시 띄우는 중이다. Retry-After 뒤에 다시 보낸다 (P44 8절)
