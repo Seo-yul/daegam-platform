@@ -5,7 +5,7 @@
 # --- 1. vite 빌드 -> /ui/dist ----------------------------------------------------
 # 산출물은 아키텍처와 무관한 정적 파일이라 빌드하는 기계의 아키텍처로 돈다. amd64 이미지를 arm64 에서 구울 때
 # vite 가 QEMU 아래서 돌지 않는다
-FROM --platform=$BUILDPLATFORM node:24-alpine@sha256:a34ab6d7f6f4813f4d0c5469d74685604b962fbdbf5793a7bc7b4998ecb867c8 AS build
+FROM --platform=$BUILDPLATFORM node:24-alpine@sha256:116b800c3754b440ee0aa3ed2f20f5bf3d99a554bfd9adeea09ea8017f6e85f5 AS build
 ARG GIT_SHA=""
 # 릴리스 태그(push-images RELEASE=...). vite.config.ts 가 build.json 의 release 와 화면 배지에 적는다
 ARG RELEASE=""

@@ -2,8 +2,8 @@
   "@context": "https://openvex.dev/ns/v0.2.0",
   "@id": "https://github.com/Seo-yul/daegam-platform/security/vex/base-images.openvex.json",
   "author": "https://github.com/Seo-yul/daegam-platform",
-  "timestamp": "2026-11-07T00:00:00+09:00",
-  "version": 5,
+  "timestamp": "2026-11-21T00:00:00+09:00",
+  "version": 6,
   "statements": [
     {
       "vulnerability": {"name": "CVE-2025-69720"},
@@ -227,6 +227,60 @@
       "status": "not_affected",
       "justification": "inline_mitigations_already_exist",
       "impact_statement": "취약한 코드는 수 GB 의 시작 태그에 속성 수가 넘칠 때만 돈다. CPython 의 expat 을 쓰는 것은 플랫폼 이미지에서 첨부와 Knowledge 의 xlsx 를 읽는 openpyxl 하나이고, openpyxl 은 defusedxml 이 설치돼 있어 defusedxml 을 거쳐 읽는다(openpyxl.DEFUSEDXML, platform/tests/test_image_report.py 가 지킨다). 남이 준 다른 XML 은 lxml(libxml2)로 읽고(platform/daegam/xmlsafe.py), 우리 코드는 표준 라이브러리의 XML 파서를 import 하지 않는다(platform/tests/test_image_report.py 가 지킨다). 문서 본문은 10MiB 가 상한이고(platform/daegam/documents/formats.py `MAX_DOCUMENT_BYTES`), xlsx 는 푼 크기가 모두 합쳐 50MiB, 조각마다 50MiB 이며 100KiB 를 넘게 풀리는 조각은 압축률 100 이 상한이다(platform/daegam/zipsafe.py). openpyxl 은 defusedxml 로 읽어 DTD 와 엔티티를 스스로 거절하고, 그 앞에서도 xlsx 의 조각마다 DOCTYPE 이 있으면 거절하며, XML 로 보이는데 libxml2 가 읽지 못하는 조각(BOM 없는 UTF-16 포함)도 거절한다(platform/daegam/documents/ooxml.py `_reject_dtds`, `_xml_like`). 그 크기의 시작 태그는 메모리에 담겨야 하는데 문서 추출은 요청마다 새 하위 프로세스(daegam-docparse)에서 RLIMIT_AS 768MiB, RLIMIT_CPU 30초, 30초 시한으로 돈다(platform/daegam/documents/sandbox.py). python-build-standalone 이 expat 2.9.1 이상으로 구운 빌드를 uv 가 받게 되면 핀을 올리고 이 항목을 뺀다."
+    },
+    {
+      "vulnerability": {"name": "CVE-2026-113425"},
+      "products": [
+        {"@id": "pkg:apk/alpine/nginx@1.30.6-r1"}
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "취약한 코드는 mail 프록시 모듈에 있다. UI 이미지의 설정(ui/docker/nginx.conf)에는 mail 블록이 없어 그 모듈이 연결을 받지 않는다. 이미지는 nginx 1.30.6-r1 을 nginx.org 에서 받은 바탕(nginxinc/nginx-unprivileged)에서 물려받고, 고친 판 1.30.7 을 담은 바탕 태그는 아직 나오지 않았다. 그 태그가 나오면 ui/Dockerfile 의 바탕 고정을 올리고 이 항목을 뺀다."
+    },
+    {
+      "vulnerability": {"name": "CVE-2026-121810"},
+      "products": [
+        {"@id": "pkg:apk/alpine/nginx@1.30.6-r1"}
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "취약한 코드는 HTTP/3 연결 처리에 있다. UI 이미지의 설정(ui/docker/nginx.conf)은 8080 과 8081 을 평문 HTTP/1.1 로만 열고 quic 이나 http3 를 켜지 않는다. 이미지는 nginx 1.30.6-r1 을 nginx.org 에서 받은 바탕(nginxinc/nginx-unprivileged)에서 물려받고, 고친 판 1.30.7 을 담은 바탕 태그는 아직 나오지 않았다. 그 태그가 나오면 ui/Dockerfile 의 바탕 고정을 올리고 이 항목을 뺀다."
+    },
+    {
+      "vulnerability": {"name": "CVE-2026-123007"},
+      "products": [
+        {"@id": "pkg:apk/alpine/nginx@1.30.6-r1"}
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "취약한 코드는 HTTP/2 흐름 제어에 있다. UI 이미지의 설정(ui/docker/nginx.conf)은 http2 를 켜지 않아 8080 과 8081 이 HTTP/1.1 만 받는다. 이미지는 nginx 1.30.6-r1 을 nginx.org 에서 받은 바탕(nginxinc/nginx-unprivileged)에서 물려받고, 고친 판 1.30.7 을 담은 바탕 태그는 아직 나오지 않았다. 그 태그가 나오면 ui/Dockerfile 의 바탕 고정을 올리고 이 항목을 뺀다."
+    },
+    {
+      "vulnerability": {"name": "CVE-2026-123633"},
+      "products": [
+        {"@id": "pkg:apk/alpine/nginx@1.30.6-r1"}
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "취약한 코드는 HTTP/2 로 받은 요청을 뒤 서버로 넘길 때 닿는다. UI 이미지의 설정(ui/docker/nginx.conf)은 http2 를 켜지 않고 proxy_pass 도 없이 정적 파일만 낸다. 이미지는 nginx 1.30.6-r1 을 nginx.org 에서 받은 바탕(nginxinc/nginx-unprivileged)에서 물려받고, 고친 판 1.30.7 을 담은 바탕 태그는 아직 나오지 않았다. 그 태그가 나오면 ui/Dockerfile 의 바탕 고정을 올리고 이 항목을 뺀다."
+    },
+    {
+      "vulnerability": {"name": "CVE-2026-118899"},
+      "products": [
+        {"@id": "pkg:apk/alpine/nginx@1.30.6-r1"}
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "취약한 코드는 TLSv1.3 을 켠 ssl listen 에서 요청 본문을 읽을 때 닿는다. UI 이미지의 설정(ui/docker/nginx.conf)에는 ssl listen 이 없고 TLS 는 앞의 Ingress 가 끝낸다. 이미지는 nginx 1.30.6-r1 을 nginx.org 에서 받은 바탕(nginxinc/nginx-unprivileged)에서 물려받고, 고친 판 1.30.7 을 담은 바탕 태그는 아직 나오지 않았다. 그 태그가 나오면 ui/Dockerfile 의 바탕 고정을 올리고 이 항목을 뺀다."
+    },
+    {
+      "vulnerability": {"name": "CVE-2026-123634"},
+      "products": [
+        {"@id": "pkg:apk/alpine/nginx@1.30.6-r1"}
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "취약한 코드는 서버 이름에 변수를 쓴 프록시와 SSI 나 mirror 의 하위 요청이 같은 이름을 resolver 로 풀 때 닿는다. UI 이미지의 설정(ui/docker/nginx.conf)에는 proxy_pass, resolver, ssi, mirror 가 없다. 이미지는 nginx 1.30.6-r1 을 nginx.org 에서 받은 바탕(nginxinc/nginx-unprivileged)에서 물려받고, 고친 판 1.30.7 을 담은 바탕 태그는 아직 나오지 않았다. 그 태그가 나오면 ui/Dockerfile 의 바탕 고정을 올리고 이 항목을 뺀다."
     }
   ]
 }

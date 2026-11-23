@@ -1,7 +1,7 @@
 # Daegam mcp-runtime: fixed image. The spec (/config/openapi.yaml) and profile
 # (/config/profile.json) are injected by an initContainer (P1 D안).
 # 빌드 단계는 런타임 베이스와 같은 Debian 13 이다. 런타임 단계가 이 단계의 glibc 로캘 데이터를 가져다 쓴다
-FROM python:3.12-slim-trixie@sha256:4840d514c583a4d3d8cad3940e68dee6f0f6f3635c12fcd0a3d74c21a5b93a54 AS build
+FROM python:3.12-slim-trixie@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b AS build
 # 사내 방화벽 CA (선택). make 의 DAEGAM_CA_FILE 이 빌드 비밀 daegam_ca 로 오면, 받기 단계만 시스템 CA 묶음에 그 CA 를
 # 더한 묶음을 tmpfs 에 만들어 믿는다. 이미지 층에는 CA 도 묶음도 남지 않는다. 비밀이 없으면 받기는 그대로다
 # (docs/guide/images.md 3절)
@@ -42,7 +42,7 @@ RUN --mount=type=secret,id=daegam_ca,required=false --mount=type=tmpfs,target=/r
     with-daegam-ca uv sync --frozen --no-dev --no-install-project
 
 # 셸도 패키지 관리자도 없는 베이스다. 바탕은 digest 로 고정하고 OS 보안 판은 make base-pins 가 고정을 옮길 때 따라온다(D55)
-FROM gcr.io/distroless/cc-debian13:latest@sha256:58e12be899275afaa05f1b03051ab19037ed7f252528e57a3a9ad7e220a62578
+FROM gcr.io/distroless/cc-debian13:latest@sha256:dac90a25ffe03ebaace90cda886b081e61ab6cd77ac47eda51f7bcc15c320765
 WORKDIR /app
 # 베이스에는 C.UTF-8 로캘 데이터가 없다. LANG 이 없는 로캘을 가리키면 setlocale(LC_ALL, "") 이 실패하므로 빌드 단계의
 # libc-bin 에서 가져온다

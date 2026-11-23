@@ -459,8 +459,9 @@ def test_repository_list_is_openvex_that_trivy_reads(vex: Path) -> None:
         assert statement["impact_statement"].strip()
         for product in statement["products"]:
             purl = product["@id"]
-            generic = tuple(f"pkg:generic/{c}@" for c in JUDGED)
-            assert purl.startswith("pkg:deb/debian/") or purl.startswith(generic), purl
+            # apk 는 UI 이미지의 바탕(알파인)이 nginx.org 에서 받은 nginx 다
+            known = ("pkg:deb/debian/", "pkg:apk/alpine/", *(f"pkg:generic/{c}@" for c in JUDGED))
+            assert purl.startswith(known), purl
             purl_package(purl)
     assert set(load_accepted(str(vex))) == set(names)
 
