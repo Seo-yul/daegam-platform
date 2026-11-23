@@ -137,6 +137,8 @@ class SandboxSweep:
             logger.info("sandbox slots changed during the recount; the next sweep counts again")
 
     async def sweep_cluster(self, cluster: Cluster, now: datetime) -> None:
+        # 클러스터를 부르기 전이다. 닿지 않는 클러스터와 뒤 단계의 실패가 이 시한을 미루지 않는다
+        await self.sandboxes.void_late_first_checks(cluster, now)
         records = await self.store.live(cluster_id=cluster.id)
         try:
             client = await self.sandboxes.client_for(cluster)
@@ -160,7 +162,10 @@ class SandboxSweep:
                 kept.append(rec)
                 continue
             if reason == "void":
-                await self.sandboxes.void(cluster, "self_check")
+                await self.sandboxes.void(cluster, "self_check", view)
+            elif reason == "first_check":
+                await self.sandboxes.first_check_failed(rec, cluster, view)
+                reason = "failed_self_check"
             if reason == "later_failed":
                 await self.sandboxes.settle(rec, reason, cluster, client)
             elif reason == "idle":
@@ -188,7 +193,8 @@ class SandboxSweep:
         override: bool,
         agents: dict[str, Agent | None],
     ) -> str | None:
-        """기록을 닫을 까닭. 둘 것이면 None 이다. `void` 는 87 이라 판정을 쓰기로 무효로 한다."""
+        """기록을 닫을 까닭. 둘 것이면 None 이다. `void` 는 준비됐던 샌드박스의 87 이라 판정을
+        쓰기로 무효로 하고, `first_check` 는 여는 중의 87 이라 프로브가 확인하게 한다."""
         if rec.kind == "check":
             return "check_stale" if now - rec.opened_at > STALE_CHECK else None
         if rec.agent_id not in agents:
@@ -202,7 +208,7 @@ class SandboxSweep:
         if not rec.ready:
             judgement = judge_open(view, opened_at=rec.opened_at, now=now)
             if judgement.void:
-                return "void"
+                return "first_check"
             if judgement.fail is not None or now - rec.opened_at > STALE_OPENING:
                 return "open_stale"
             return None

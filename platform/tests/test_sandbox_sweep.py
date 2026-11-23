@@ -5,12 +5,14 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import timedelta
 from typing import Any
 
 import pytest
 
 from daegam.k8s.labels import LABEL_PLATFORM_ID
+from daegam.k8s.sandbox_pods import pod_view
 from daegam.k8s.templates.sandbox import LABEL_PROBE
 from daegam.store.base import utcnow
 from daegam.store.clusters import SandboxScheduling
@@ -104,6 +106,23 @@ def test_exit_87_voids_and_exit_88_only_ends_that_pod(client, mongo, fake, opene
     assert _rec(mongo, "s2")["state"] == "closed"
     check = _check(mongo, c.id)
     assert check["passed"] is False and check["void_reason"] == "self_check"
+
+
+def test_the_message_of_a_pod_that_failed_its_first_check_is_logged(
+    client, mongo, fake, opened, caplog
+):
+    """87 로 끝난 파드는 곧 지워진다. 무엇이 닿았는지는 그 종료 메시지뿐이라 기록에 남긴다."""
+    _, pod = opened
+    set_status(fake, pod, ready=False, running=False, waiting="CrashLoopBackOff", exit_code=87)
+    key = ("v1", "Pod", pod["metadata"]["namespace"], pod["metadata"]["name"])
+    said = '{"check": "first", "result": "reached", "reached": ["tcp:10.43.0.1:443"]}'
+    status = fake.objects[key]["status"]["containerStatuses"][0]
+    terminated = (status.get("state") or {}).get("terminated") or status["lastState"]["terminated"]
+    terminated["message"] = said + "\n"
+    assert pod_view(fake.objects[key]).terminated_message == said
+    with caplog.at_level(logging.WARNING, logger="daegam"):
+        _sweep(client)
+    assert any(said in r.getMessage() for r in caplog.records)
 
 
 def test_idle_sandboxes_are_reclaimed_after_30_minutes(client, mongo, fake, opened):
@@ -204,6 +223,25 @@ def test_a_stale_opening_record_closes(client, mongo, fake, opened):
     set_status(fake, pod, ready=False, running=False, waiting="ContainerCreating")
     _sweep(client)
     assert _rec(mongo)["close_reason"] == "open_stale"
+
+
+def test_the_sweep_asks_for_a_probe_when_an_opening_pod_exits_87(client, mongo, fake):
+    """열기가 기다리다 떠난 뒤에 87 로 끝난 여는 중의 파드도 판정을 바로 무효로 하지 않는다."""
+    c = seed_cluster(mongo, fake, cluster())
+    seed_agent(mongo, c)
+    kubelet(fake, ready=False, running=False, waiting="ContainerCreating")
+    r = client.post(
+        f"/agents/{AGENT_ID}/sandboxes",
+        json={"session_id": "s1", "wait_seconds": 0},
+        headers=auth(),
+    )
+    assert r.status_code == 503
+    [pod] = sandbox_pods(fake)
+    set_status(fake, pod, ready=False, running=False, waiting="CrashLoopBackOff", exit_code=87)
+    _sweep(client)
+    assert _rec(mongo)["close_reason"] == "failed_self_check"
+    assert _check(mongo, c.id)["passed"] is True
+    assert mongo["sandbox_probes"].find_one()["first_check"]["at"] is not None
 
 
 def test_undeploy_and_delete_close_the_agents_sandboxes(client, mongo, fake, opened):

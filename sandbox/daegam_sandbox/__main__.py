@@ -40,8 +40,9 @@ from daegam_sandbox.selfcheck import (
     ERROR,
     EXIT_COULD_NOT_RUN,
     EXIT_FIRST_FAILED,
+    FIRST_SETTLE,
     Verdict,
-    run_check,
+    run_first_check,
     write_termination,
 )
 
@@ -61,6 +62,7 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--uid-map", type=Path, default=Path("/proc/self/uid_map"))
     p.add_argument("--termination-log", type=Path, default=Path("/dev/termination-log"))
     p.add_argument("--check-interval", type=float, default=300.0)
+    p.add_argument("--first-settle", type=float, default=FIRST_SETTLE)
     p.add_argument("--nproc-limit", type=int, default=256)
     p.add_argument("--font-cache", type=Path, default=FONT_CACHE)
     p.add_argument("--sweep-pause", type=float, default=0.0)
@@ -109,6 +111,7 @@ def _serve(args: argparse.Namespace) -> int:
         port=args.port,
         port_file=args.port_file,
         check_interval=args.check_interval,
+        first_settle=args.first_settle,
         nproc_limit=args.nproc_limit,
         font_cache=args.font_cache,
         sweep_pause=args.sweep_pause,
@@ -135,7 +138,7 @@ def _probe(args: argparse.Namespace) -> int:
         targets, reason = parse_targets(os.environ.get(TARGETS_ENV)), ""
     except ConfigError as e:
         targets, reason = None, str(e)
-    verdict = asyncio.run(run_check(args.uid_map, targets, reason))
+    verdict = asyncio.run(run_first_check(args.uid_map, targets, reason, settle=args.first_settle))
     write_termination(args.termination_log, verdict.message("probe"))
     print(verdict.message("probe"), flush=True)
     if verdict.passed:

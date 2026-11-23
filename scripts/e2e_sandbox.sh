@@ -263,6 +263,23 @@ sandbox_status() {
   [ "$code" = 200 ] || die "$1" "GET /clusters/$HOME_ID/sandbox -> $code"
 }
 
+# open_report SID  작업 공간이 열리지 못한 까닭을 정리 앞에 남긴다. 실패한 파드는 플랫폼이 곧 지우고 정리가 플랫폼을
+# 굴리므로 그 뒤에는 볼 수 없다. 그 세션의 기록, 클러스터의 판정, 플랫폼 기록의 샌드박스 줄(87 로 끝난 파드의 종료
+# 메시지가 여기 있다)과 네임스페이스의 이벤트다
+open_report() {
+  {
+    echo "--- sandbox open report (session $1)"
+    if sandbox_record "$1"; then
+      rec_ '{k: d.get(k) for k in ("state", "generation", "pod", "node", "opened_at", "ready_at", "closed_at", "close_reason")}'
+    else
+      echo "no sandbox record"
+    fi
+    api GET "/clusters/$HOME_ID/sandbox" >/dev/null && jq_ '{"gate": d.get("gate"), "check": d.get("check"), "capacity": d.get("capacity")}'
+    "${K[@]}" -n "$PLATFORM_NS" logs deploy/daegam-platform -c platform --tail=2000 2>/dev/null | grep -i sandbox | tail -n 40
+    "${K[@]}" -n "$AG_NS" get events --sort-by=.lastTimestamp 2>/dev/null | tail -n 30
+  } >&2 || :
+}
+
 # wait_gate_open STEP  게이트가 열리고 용량이 1 이상일 때까지 120초 본다. 노드·파드 목록은 60초 캐시라 다시 배포한 뒤의
 # 겹친 파드가 그만큼 남아 있을 수 있다
 wait_gate_open() {
@@ -828,6 +845,7 @@ if [ "$CAN_RECLAIM" = 1 ]; then
   delete_session 9 "$S2"
   closed_within 9 "$S2" 60
   say 9 "$S1" "$(exec_frag 'ls -a /workspace /workspace/uploads')"
+  ! has_text "$TOOL_OUT" 'could not start' || open_report "$S1"
   [ "$TOOL_STATUS" = success ] || die 9 "the first session's new workspace: $TOOL_STATUS $TOOL_OUT"
   case "$TOOL_OUT" in *keep.txt* | *chart.png*) die 9 "the files of the reclaimed workspace came back: $TOOL_OUT" ;; esac
   has_text "$TOOL_OUT" "$XLSX" || die 9 "the new workspace lacks the attachment $XLSX: $TOOL_OUT"

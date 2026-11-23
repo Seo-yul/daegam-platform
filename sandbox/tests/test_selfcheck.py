@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import signal
 import socket
@@ -13,6 +14,7 @@ from pathlib import Path
 import pytest
 from conftest import IDENTITY_MAP, LINUX, closed_port, start, targets_env
 
+from daegam_sandbox import selfcheck
 from daegam_sandbox.config import Target
 from daegam_sandbox.probes import probe
 from daegam_sandbox.selfcheck import uid_map_is_identity
@@ -75,16 +77,117 @@ def test_an_identity_uid_map_exits_87(tmp_path: Path, blocked_targets: str) -> N
 def test_a_reached_target_exits_87_before_listening(tmp_path: Path) -> None:
     open_sock, shut = listening(), closed_port()
     targets = targets_env(tcp(shut.getsockname()[1]), tcp(open_sock.getsockname()[1]))
-    box = start(tmp_path, targets=targets)
+    box = start(tmp_path, targets=targets, extra_args=("--first-settle", "2.5"))
     try:
         assert box.wait_exit() == 87
         assert box.port == 0, "점검이 실패한 서버가 듣기 시작했다"
         message = json.loads(box.termination.read_text())
         assert message["result"] == "reached"
         assert message["reached"] == [f"tcp 127.0.0.1:{open_sock.getsockname()[1]}"]
+        # 닿은 첫 점검은 그 시간 안에서 다시 돌고, 끝까지 닿으면 87 이다
+        assert message["rounds"] >= 2
     finally:
         open_sock.close()
         shut.close()
+
+
+def test_a_first_check_passes_after_two_clean_rounds(tmp_path: Path) -> None:
+    """파드가 뜬 직후에만 닿던 대상(노드의 정책 규칙이 놓이기 전)이 막히면 깨끗한 바퀴가 두 번
+    잇따른 뒤에 통과한다. 그 전에는 듣지 않는다."""
+    late = listening()
+    targets = targets_env(tcp(late.getsockname()[1]))
+
+    def close_after_the_first_round() -> None:
+        # 서버의 첫 바퀴가 닿은 것을 본 뒤에 닫는다. 느린 러너에서도 첫 바퀴는 열린 포트를 본다
+        with contextlib.suppress(OSError):
+            conn, _ = late.accept()
+            conn.close()
+        late.close()
+
+    closer = threading.Thread(target=close_after_the_first_round, daemon=True)
+    closer.start()
+    box = start(tmp_path, targets=targets)
+    try:
+        assert box.execute("echo ran")["output"] == "ran\n"
+        assert box.proc.poll() is None
+        assert "passed on round 3" in box.log.read_text()
+    finally:
+        late.close()
+        box.close()
+
+
+def _scripted(
+    monkeypatch: pytest.MonkeyPatch, results: list[str], *, cycle: bool = False
+) -> list[str]:
+    """run_check 를 적어 둔 결과로 바꾼다. 다 쓰면 마지막 결과를 되풀이하고, cycle 이면 처음부터
+    다시 돈다. 부른 결과를 돌려준다."""
+    calls: list[str] = []
+
+    async def fake(*_: object) -> selfcheck.Verdict:
+        at = len(calls) % len(results) if cycle else min(len(calls), len(results) - 1)
+        result = results[at]
+        calls.append(result)
+        return selfcheck.Verdict(result)
+
+    monkeypatch.setattr(selfcheck, "run_check", fake)
+    return calls
+
+
+def _first(settle: float = 0.3) -> selfcheck.Verdict:
+    return asyncio.run(selfcheck.run_first_check(Path("unused"), (), settle=settle, pause=0.0))
+
+
+def test_one_clean_round_after_a_reach_is_not_a_pass(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _scripted(monkeypatch, ["reached", "passed", "reached", "passed", "passed"])
+    verdict = _first(settle=30.0)
+    assert (verdict.result, verdict.rounds, len(calls)) == ("passed", 5, 5)
+    # 깨끗한 바퀴와 닿은 바퀴가 번갈아 오면 끝까지 통과가 아니다
+    calls = _scripted(monkeypatch, ["reached", "passed"], cycle=True)
+    flapping = _first()
+    assert flapping.result == "reached" and flapping.rounds == len(calls) > 6
+
+
+def test_a_reach_is_not_downgraded_by_a_later_round_that_could_not_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _scripted(monkeypatch, ["reached", "passed", "error"])
+    verdict = _first()
+    assert verdict.result == "reached" and verdict.rounds > 3
+    assert selfcheck.exit_code(verdict, first=True) == 87
+
+
+@pytest.mark.parametrize("result", ["passed", "error", "identity"])
+def test_a_first_round_that_reached_nothing_is_the_answer(
+    monkeypatch: pytest.MonkeyPatch, result: str
+) -> None:
+    calls = _scripted(monkeypatch, [result, "reached"])
+    assert (_first().result, len(calls)) == (result, 1)
+
+
+def test_settle_zero_is_one_round(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _scripted(monkeypatch, ["reached", "passed"])
+    assert (_first(settle=0.0).result, len(calls)) == ("reached", 1)
+
+
+def test_unchecked_does_not_wait_for_the_settle(tmp_path: Path) -> None:
+    open_sock = listening()
+    started = time.monotonic()
+    box = start(tmp_path, targets=targets_env(tcp(open_sock.getsockname()[1])), unchecked=True)
+    try:
+        assert box.proc.poll() is None
+        assert time.monotonic() - started < 8
+        assert "rounds" not in json.loads(box.termination.read_text())
+    finally:
+        open_sock.close()
+        box.close()
+
+
+def test_an_identity_uid_map_is_not_tried_again(tmp_path: Path, blocked_targets: str) -> None:
+    started = time.monotonic()
+    box = start(tmp_path, targets=blocked_targets, uid_map=IDENTITY_MAP)
+    assert box.wait_exit() == 87
+    assert time.monotonic() - started < 5
+    assert "rounds" not in json.loads(box.termination.read_text())
 
 
 def test_a_later_failure_refuses_commands_and_exits_88(tmp_path: Path) -> None:
@@ -120,7 +223,8 @@ def test_a_termination_message_alone_decides_nothing(tmp_path: Path) -> None:
 
 def test_unchecked_reports_instead_of_exiting(tmp_path: Path) -> None:
     open_sock = listening()
-    box = start(tmp_path, targets=targets_env(tcp(open_sock.getsockname()[1])), unchecked=True)
+    targets = targets_env(tcp(open_sock.getsockname()[1]))
+    box = start(tmp_path, targets=targets, unchecked=True)
     try:
         assert box.proc.poll() is None
         status, body = box.call("/healthz", method="GET", token=None)

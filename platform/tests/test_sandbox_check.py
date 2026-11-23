@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import timedelta
 from typing import Any
 
@@ -18,6 +19,7 @@ from daegam.k8s.templates.sandbox import (
     TARGETS_ENV,
 )
 from daegam.services.sandbox_check import check_lease
+from daegam.services.sandboxes import first_check_confirm
 from daegam.store.base import iso_utc, utcnow
 from daegam.store.leases import Lease
 from tests.helpers.aio import run_db
@@ -407,6 +409,256 @@ def test_an_unscheduled_probe_is_retried(client, mongo, fake, later_failed):
     assert mongo["sandbox_probes"].find_one()["state"] == "wanted" and _probes(fake) == []
     _tick(client)
     assert len(_probes(fake)) == 1
+
+
+@pytest.fixture
+def first_failed(client, mongo, fake):
+    """여는 중인 샌드박스의 첫 점검이 87 로 끝난 클러스터. 판정은 그대로이고 프로브를 바란다."""
+    c = seed_cluster(mongo, fake, cluster())
+    seed_agent(mongo, c)
+    hook = kubelet(fake, ready=False, running=False, waiting="CrashLoopBackOff", exit_code=87)
+    r = client.post(f"/agents/{AGENT_ID}/sandboxes", json={"session_id": "s1"}, headers=auth())
+    assert detail_code(r) == (503, "sandbox_open_failed")
+    fake.create_hooks.remove(hook)
+    kubelet(fake)
+    mongo["sandbox_probes"].update_one({}, {"$set": {"first_check.message": "reached tcp:x"}})
+    assert _sandbox(mongo, c.id)["check"]["passed"] is True
+    return c
+
+
+def _end_probe(fake: FakeClusterClient, code: int) -> None:
+    [probe] = _probes(fake)
+    key = ("v1", "Pod", probe["metadata"]["namespace"], probe["metadata"]["name"])
+    fake.objects[key]["status"] = {
+        "phase": "Succeeded" if code == 0 else "Failed",
+        "containerStatuses": [
+            container_status(running=False, ready=False)
+            | {"state": {"terminated": {"exitCode": code}}}
+        ],
+    }
+
+
+def test_a_passed_probe_leaves_the_verdict_after_a_failed_first_check(
+    client, mongo, fake, first_failed, caplog
+):
+    _tick(client)
+    _end_probe(fake, 0)
+    with caplog.at_level(logging.WARNING, logger="daegam"):
+        _tick(client)
+    assert _sandbox(mongo, first_failed.id)["check"]["passed"] is True
+    assert mongo["sandbox_probes"].find_one()["result"] == "passed"
+    assert any(
+        "not confirmed" in r.getMessage() and "reached tcp:x" in r.getMessage()
+        for r in caplog.records
+    )
+    # 게이트가 열려 있어 다시 열면 된다
+    r = client.post(f"/agents/{AGENT_ID}/sandboxes", json={"session_id": "s1"}, headers=auth())
+    assert r.status_code == 200, r.text
+
+
+@pytest.mark.parametrize("code", [87, 86])
+def test_a_probe_that_fails_or_cannot_run_voids_after_a_failed_first_check(
+    client, mongo, fake, first_failed, code
+):
+    _tick(client)
+    _end_probe(fake, code)
+    _tick(client)
+    check = _sandbox(mongo, first_failed.id)["check"]
+    assert check["passed"] is False and check["void_reason"] == "self_check"
+    assert _probes(fake) == []
+
+
+@pytest.mark.parametrize("state", ["wanted", "pending", "gone"])
+def test_a_first_check_no_probe_confirmed_in_time_voids(client, mongo, fake, first_failed, state):
+    """87 을 확인하는 프로브는 끝없이 다시 하지 않는다. 시한을 넘기면 판정이 무효다."""
+    if state != "wanted":
+        _tick(client)
+        [probe] = _probes(fake)
+        key = ("v1", "Pod", probe["metadata"]["namespace"], probe["metadata"]["name"])
+        if state == "pending":
+            fake.objects[key]["status"] = {"phase": "Pending"}
+        else:
+            del fake.objects[key]
+    mongo["sandbox_probes"].update_one(
+        {}, {"$set": {"first_check.at": utcnow() - timedelta(minutes=6)}}
+    )
+    _tick(client)
+    check = _sandbox(mongo, first_failed.id)["check"]
+    assert check["passed"] is False and check["void_reason"] == "self_check"
+    doc = mongo["sandbox_probes"].find_one()
+    assert (doc["state"], doc["result"]) == ("done", "unconfirmed") and _probes(fake) == []
+
+
+def test_a_probe_after_exit_88_does_not_inherit_an_earlier_first_check(
+    client, mongo, fake, first_failed
+):
+    """끝난 확인의 표시는 다음 프로브로 넘어가지 않는다. 88 뒤의 프로브는 끝없이 다시 한다."""
+    _tick(client)
+    _end_probe(fake, 0)
+    _tick(client)
+    store = client.app.state.sandboxes.store
+    assert client.portal.call(
+        lambda: store.want_probe(first_failed.id, "n1", NS, "acme", quiet_since=utcnow())
+    )
+    assert mongo["sandbox_probes"].find_one()["first_check"] is None
+
+
+def _mark(client, cluster_id: str) -> bool:
+    """그 노드에서 여는 중의 샌드박스가 87 로 끝났다고 표시한다."""
+    store = client.app.state.sandboxes.store
+    return client.portal.call(
+        lambda: store.confirm_first_check(
+            cluster_id, "n1", NS, "acme", "late 87", quiet_since=utcnow() - timedelta(minutes=10)
+        )
+    )
+
+
+def test_a_first_check_marked_after_the_sweep_read_the_probe_is_not_lost(
+    client, mongo, fake, later_failed
+):
+    """스윕이 프로브 문서를 읽은 뒤에 붙은 87 의 표시도 프로브를 끝낼 때 본다. 그 프로브는 87
+    보다 먼저 시작했으므로 답이 아니고, 표시를 둔 채 새 프로브를 바란다."""
+    _tick(client)
+    _end_probe(fake, 86)
+    store = client.app.state.sandboxes.store
+    read = store.probes_of
+
+    async def stale(cluster_id: str):
+        docs = await read(cluster_id)
+        assert await store.confirm_first_check(
+            cluster_id, "n1", NS, "acme", "late 87", quiet_since=utcnow() - timedelta(minutes=10)
+        )
+        return docs
+
+    store.probes_of = stale
+    try:
+        _tick(client)
+    finally:
+        store.probes_of = read
+    doc = mongo["sandbox_probes"].find_one()
+    assert doc["state"] == "wanted" and doc["first_check"]["message"] == "late 87"
+    assert _sandbox(mongo, later_failed.id)["check"]["passed"] is True
+    # 새 프로브가 돌지 못하면 닫힌 쪽이다
+    _tick(client)
+    _end_probe(fake, 86)
+    _tick(client)
+    check = _sandbox(mongo, later_failed.id)["check"]
+    assert check["passed"] is False and check["void_reason"] == "self_check"
+
+
+@pytest.mark.parametrize("code", [0, 86])
+def test_a_probe_that_ran_before_the_failed_first_check_does_not_answer_it(
+    client, mongo, fake, later_failed, code
+):
+    _tick(client)
+    assert _mark(client, later_failed.id)
+    _end_probe(fake, code)
+    _tick(client)
+    doc = mongo["sandbox_probes"].find_one()
+    assert doc["state"] == "wanted" and doc["first_check"]["at"] is not None
+    assert _probes(fake) == [] and _sandbox(mongo, later_failed.id)["check"]["passed"] is True
+    # 새 프로브가 통과해야 87 이 확인되지 않은 것이다
+    _tick(client)
+    _end_probe(fake, 0)
+    _tick(client)
+    doc = mongo["sandbox_probes"].find_one()
+    assert (doc["state"], doc["result"], doc["first_check"]) == ("done", "passed", None)
+    assert _sandbox(mongo, later_failed.id)["check"]["passed"] is True
+
+
+def test_a_running_probe_that_exits_87_voids_whenever_it_started(client, mongo, fake, later_failed):
+    _tick(client)
+    assert _mark(client, later_failed.id)
+    _end_probe(fake, 87)
+    _tick(client)
+    check = _sandbox(mongo, later_failed.id)["check"]
+    assert check["passed"] is False and check["void_reason"] == "self_check"
+
+
+def test_a_second_87_while_the_probe_runs_asks_for_another_probe(client, mongo, fake, first_failed):
+    """프로브가 뜬 뒤의 87 은 그 프로브가 답하지 못한다. 시한은 첫 87 부터 잰다."""
+    _tick(client)
+    at = mongo["sandbox_probes"].find_one()["first_check"]["at"]
+    assert _mark(client, first_failed.id)
+    _end_probe(fake, 0)
+    _tick(client)
+    doc = mongo["sandbox_probes"].find_one()
+    assert doc["state"] == "wanted" and doc["first_check"]["at"] == at
+    assert doc["first_check"]["last_at"] > at
+
+
+def test_a_late_first_check_voids_while_the_cluster_is_unreachable(
+    client, mongo, fake, first_failed, monkeypatch
+):
+    """시한은 Mongo 만으로 본다. 클러스터에 닿지 않는 스윕도 게이트를 연 채 두지 않는다."""
+    _tick(client)
+
+    async def unreachable(cluster):
+        raise RuntimeError("no route")
+
+    monkeypatch.setattr(client.app.state.sandboxes, "client_for", unreachable)
+    _tick(client)
+    assert _sandbox(mongo, first_failed.id)["check"]["passed"] is True
+    mongo["sandbox_probes"].update_one(
+        {}, {"$set": {"first_check.at": utcnow() - timedelta(minutes=6)}}
+    )
+    _tick(client)
+    check = _sandbox(mongo, first_failed.id)["check"]
+    assert check["passed"] is False and check["void_reason"] == "self_check"
+    doc = mongo["sandbox_probes"].find_one()
+    assert (doc["state"], doc["result"]) == ("done", "unconfirmed")
+    # 닿게 되면 남은 프로브 파드를 지운다
+    monkeypatch.undo()
+    assert len(_probes(fake)) == 1
+    _tick(client)
+    assert _probes(fake) == [] and mongo["sandbox_probes"].find_one()["orphan_pod"] is None
+
+
+def test_a_probe_that_cannot_start_does_not_stop_the_other_probes(
+    client, mongo, fake, first_failed, monkeypatch
+):
+    store = client.app.state.sandboxes.store
+    assert client.portal.call(
+        lambda: store.want_probe(first_failed.id, "a-gone", NS, "acme", quiet_since=utcnow())
+    )
+    checks = client.app.state.sandbox_checks
+    start = checks._start_probe
+
+    async def broken(cluster, kube, doc):
+        if doc["node"] == "a-gone":
+            raise RuntimeError("boom")
+        await start(cluster, kube, doc)
+
+    monkeypatch.setattr(checks, "_start_probe", broken)
+    _tick(client)
+    states = {d["node"]: d["state"] for d in mongo["sandbox_probes"].find()}
+    assert states == {"a-gone": "wanted", "n1": "running"}
+
+
+def test_wanting_a_probe_does_not_clear_a_first_check_marked_meanwhile(
+    client, mongo, fake, first_failed, monkeypatch
+):
+    """`want_probe` 가 읽고 쓰는 사이에 87 의 표시가 붙어도 그 표시는 남는다."""
+    store = client.app.state.sandboxes.store
+    find_one = store.probes.find_one
+
+    async def stale(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(store.probes, "find_one", stale)
+    assert client.portal.call(
+        lambda: store.want_probe(first_failed.id, "n1", NS, "acme", quiet_since=utcnow())
+    )
+    monkeypatch.setattr(store.probes, "find_one", find_one)
+    doc = mongo["sandbox_probes"].find_one()
+    assert doc["state"] == "wanted" and doc["first_check"]["at"] is not None
+
+
+def test_the_confirm_window_follows_the_sweep_interval_within_bounds():
+    assert first_check_confirm(60) == timedelta(minutes=5)
+    assert first_check_confirm(10) == timedelta(minutes=5)
+    assert first_check_confirm(300) == timedelta(minutes=20)
+    assert first_check_confirm(3600) == timedelta(minutes=60)
 
 
 def test_the_sweep_removes_check_pods_an_interrupted_check_left(client, mongo, fake):

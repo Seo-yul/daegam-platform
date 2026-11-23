@@ -11,8 +11,9 @@
   (`seq` 가 바뀌었으면) 쓰지 않는다. 열기는 기록을 먼저 넣고 슬롯을 잡고, 닫기는 슬롯을 돌려준 뒤
   `closed` 로 옮기므로 다시 세기는 넘치게 셀 수는 있어도 모자라게 세지 않는다.
 
-- `sandbox_probes`: 88 로 끝난 샌드박스 뒤에 도는 사용자 코드 없는 프로브(8절)다. (클러스터,
-  노드)마다 문서 하나이고, 한 노드에 한 번에 하나, 10분에 하나다.
+- `sandbox_probes`: 88 로 끝난 샌드박스와 첫 점검이 87 로 끝난 여는 중의 샌드박스 뒤에 도는 사용자
+  코드 없는 프로브(8절)다. (클러스터, 노드)마다 문서 하나이고, 한 노드에 한 번에 하나, 10분에
+  하나다. `first_check` 가 있으면 그 프로브가 87 을 확인하는 중이다.
 
 열쇠는 사람의 sub 처럼 점이나 `$` 가 들 수 있는 값이라 sha256 의 앞 32자로 바꿔 칸 이름으로 쓴다.
 """
@@ -38,6 +39,8 @@ SLOTS_ID = "slots"
 # 닫힌 기록이 남는 날 수
 CLOSED_TTL_DAYS = 7
 KEY_LENGTH = 32
+# 조건부 쓰기가 다른 쓰기와 겹쳤을 때 다시 해 보는 횟수
+CAS_TRIES = 5
 
 SandboxState = Literal["open", "closing", "closed"]
 # session 은 세션의 샌드박스, check 는 클러스터 점검의 진짜 샌드박스(8절 2단계)다
@@ -397,7 +400,9 @@ class MongoSandboxStore:
         self, cluster_id: str, node: str, namespace: str, tenant: str, *, quiet_since: datetime
     ) -> bool:
         """그 노드의 프로브를 바란다. 도는 프로브가 있거나 quiet_since 뒤에 시작한 것이 있으면
-        아무것도 하지 않고 거짓이다."""
+        아무것도 하지 않고 거짓이다. `first_check` 는 건드리지 않는다. 읽고 쓰는 사이에
+        `confirm_first_check` 가 넣은 표시를 지우지 않으려는 것이고, 끝난 프로브의 표시는 끝낼 때
+        지워져 있다."""
         key = probe_id(cluster_id, node)
         doc = await self.probes.find_one({"_id": key})
         if doc is not None and (
@@ -421,6 +426,61 @@ class MongoSandboxStore:
         )
         return True
 
+    async def confirm_first_check(
+        self,
+        cluster_id: str,
+        node: str,
+        namespace: str,
+        tenant: str,
+        message: str | None,
+        *,
+        quiet_since: datetime,
+    ) -> bool:
+        """87 로 끝난 첫 점검을 그 노드의 프로브가 확인하게 한다. 바라거나 도는 프로브가 있으면
+        그 문서에 표시하고(`at` 은 첫 87 의 때로 남아 시한을 재고, `last_at` 은 가장 늦은 87 의
+        때다), 없으면 새로 바란다. `last_at` 보다 먼저 시작한 프로브는 그 87 을 답하지 못한다
+        (`probe_end`). quiet_since 뒤에 시작해 이미 끝난 프로브가 있으면 10분의 창 때문에 띄울 수
+        없어 거짓이다. 그때는 부른 쪽이 판정을 무효로 한다."""
+        key = probe_id(cluster_id, node)
+        now = utcnow()
+        first = {"at": now, "last_at": now, "message": message}
+        for _ in range(CAS_TRIES):
+            doc = await self.probes.find_one({"_id": key})
+            if doc is not None and doc.get("state") in ("wanted", "running"):
+                had = doc.get("first_check")
+                marked = {**had, "last_at": now, "message": message} if had else first
+                res = await self.probes.update_one(
+                    {"_id": key, "state": doc["state"], "first_check": had},
+                    {"$set": {"first_check": marked}},
+                )
+                if res.matched_count == 1:
+                    return True
+                continue
+            if doc is not None and doc.get("started_at") and doc["started_at"] >= quiet_since:
+                return False
+            try:
+                res = await self.probes.update_one(
+                    {"_id": key, "state": doc.get("state") if doc else {"$exists": False}},
+                    {
+                        "$set": {
+                            "cluster_id": cluster_id,
+                            "node": node,
+                            "namespace": namespace,
+                            "tenant": tenant,
+                            "state": "wanted",
+                            "wanted_at": now,
+                            "first_check": first,
+                        }
+                    },
+                    upsert=doc is None,
+                )
+            except DuplicateKeyError:
+                continue
+            if res.matched_count == 1 or res.upserted_id is not None:
+                return True
+        # 문서가 계속 바뀌어 표시하지 못했다. 확인을 맡기지 못했으므로 부른 쪽이 무효로 한다
+        return False
+
     async def probes_of(self, cluster_id: str) -> list[dict[str, Any]]:
         cursor = self.probes.find(
             {"cluster_id": cluster_id, "state": {"$in": ["wanted", "running"]}}
@@ -433,16 +493,94 @@ class MongoSandboxStore:
             {"$set": {"state": "running", "pod": pod, "started_at": utcnow()}},
         )
 
-    async def probe_done(self, key: str, result: str) -> None:
-        await self.probes.update_one(
-            {"_id": key}, {"$set": {"state": "done", "result": result, "done_at": utcnow()}}
-        )
+    async def probe_end(self, key: str, result: str) -> ProbeEnd | None:
+        """끝난 프로브를 적고, 그때의 문서로 정한 결말을 돌려준다. 문서를 읽은 뒤에 붙은
+        `first_check` 도 보도록 지금의 문서에 조건부로 쓴다. 표시가 있는데 프로브가 가장 늦은
+        87 보다 먼저 시작했으면 그 87 을 답하지 못하므로, 87 로 끝난 것이 아니면 표시를 둔 채
+        `wanted` 로 돌려 새 프로브가 확인하게 한다. 그 밖에는 `done` 이고 표시를 지운다. 문서가
+        이미 끝났으면 None 이다."""
+        for _ in range(CAS_TRIES):
+            doc = await self.probes.find_one({"_id": key, "state": "running"})
+            if doc is None:
+                return None
+            first = doc.get("first_check")
+            started = doc.get("started_at")
+            again = bool(
+                first
+                and result != "failed"
+                and (started is None or started < first.get("last_at", first["at"]))
+            )
+            if again:
+                change = {"state": "wanted", "pod": None, "started_at": None}
+            else:
+                change = {
+                    "state": "done",
+                    "result": result,
+                    "done_at": utcnow(),
+                    "first_check": None,
+                }
+            res = await self.probes.update_one(
+                {"_id": key, "state": "running", "first_check": first}, {"$set": change}
+            )
+            if res.matched_count == 1:
+                return ProbeEnd(first_check=first, again=again)
+        return None
 
     async def probe_retry(self, key: str) -> None:
-        """뜨지 못한 프로브를 다음 스윕이 다시 하게 한다. 10분의 창에 세지 않는다."""
+        """뜨지 못한 프로브를 다음 스윕이 다시 하게 한다. 10분의 창에 세지 않는다. `first_check`
+        는 그대로 둔다."""
         await self.probes.update_one(
-            {"_id": key}, {"$set": {"state": "wanted", "pod": None, "started_at": None}}
+            {"_id": key, "state": {"$in": ["wanted", "running"]}},
+            {"$set": {"state": "wanted", "pod": None, "started_at": None}},
         )
+
+    async def end_late_first_checks(
+        self, cluster_id: str, before: datetime
+    ) -> list[dict[str, Any]]:
+        """`first_check.at` 이 before 보다 이른, 아직 끝나지 않은 프로브를 `unconfirmed` 로 끝내고
+        끝내기 전의 문서들을 돌려준다. Mongo 만 쓴다. 그 파드는 `orphan_pod` 에 남겨 프로브 단계가
+        지운다."""
+        ended: list[dict[str, Any]] = []
+        while True:
+            doc = await self.probes.find_one_and_update(
+                {
+                    "cluster_id": cluster_id,
+                    "state": {"$in": ["wanted", "running"]},
+                    "first_check.at": {"$lt": before},
+                },
+                [
+                    {
+                        "$set": {
+                            "state": "done",
+                            "result": "unconfirmed",
+                            "done_at": utcnow(),
+                            "first_check": None,
+                            "orphan_pod": "$pod",
+                        }
+                    }
+                ],
+            )
+            if doc is None:
+                return ended
+            ended.append(doc)
+
+    async def orphan_probes(self, cluster_id: str) -> list[dict[str, Any]]:
+        cursor = self.probes.find({"cluster_id": cluster_id, "orphan_pod": {"$type": "string"}})
+        return await cursor.to_list()
+
+    async def orphan_deleted(self, key: str, pod: str) -> None:
+        await self.probes.update_one(
+            {"_id": key, "orphan_pod": pod}, {"$set": {"orphan_pod": None}}
+        )
+
+
+@dataclass(frozen=True)
+class ProbeEnd:
+    """끝난 프로브의 결말(`probe_end`). first_check 는 끝낼 때 문서에 있던 표시이고, again 이면
+    그 표시를 둔 채 다시 바라는 것으로 돌렸다."""
+
+    first_check: dict[str, Any] | None
+    again: bool
 
 
 def probe_id(cluster_id: str, node: str) -> str:

@@ -206,7 +206,8 @@ def test_an_extra_allow_all_policy_refuses_in_its_namespace_only(client, mongo, 
     assert mongo["clusters"].find_one({"_id": c.id})["sandbox"]["check"]["passed"] is True
 
 
-def test_exit_87_voids_the_verdict_by_a_write(client, mongo, fake):
+def test_exit_87_of_an_opening_sandbox_asks_for_a_probe_and_voids_nothing(client, mongo, fake):
+    """새 파드의 첫 점검 하나로는 판정을 무효로 하지 않는다. 같은 노드의 프로브가 확인한다."""
     c = seed_cluster(mongo, fake, cluster())
     seed_agent(mongo, c)
     kubelet(fake, ready=False, running=False, waiting="CrashLoopBackOff", exit_code=87)
@@ -214,9 +215,37 @@ def test_exit_87_voids_the_verdict_by_a_write(client, mongo, fake):
     assert detail_code(r) == (503, "sandbox_open_failed") and r.json()["detail"]["reason"] == (
         "self_check"
     )
+    assert mongo["clusters"].find_one({"_id": c.id})["sandbox"]["check"]["passed"] is True
+    assert sandbox_pods(fake) == [] and _record(mongo)["state"] == "closed"
+    assert _record(mongo)["close_reason"] == "failed_self_check"
+    probe = mongo["sandbox_probes"].find_one()
+    assert (probe["state"], probe["node"], probe["namespace"]) == ("wanted", "n1", NS)
+    assert probe["first_check"]["at"] is not None
+    # 확인을 기다리는 동안의 다음 87 도 같은 프로브가 답한다
+    first_at = probe["first_check"]["at"]
+    r = _open(client, "s2")
+    assert detail_code(r) == (503, "sandbox_open_failed")
+    assert mongo["clusters"].find_one({"_id": c.id})["sandbox"]["check"]["passed"] is True
+    assert mongo["sandbox_probes"].count_documents({}) == 1
+    assert mongo["sandbox_probes"].find_one()["first_check"]["at"] == first_at
+
+
+def test_exit_87_voids_at_once_when_the_nodes_probe_already_ran(client, mongo, fake):
+    """그 노드의 프로브가 10분 안에 이미 돌았으면 확인할 수 없어 바로 무효다."""
+    c = seed_cluster(mongo, fake, cluster())
+    seed_agent(mongo, c)
+    store = client.app.state.sandboxes.store
+    assert client.portal.call(
+        lambda: store.want_probe(c.id, "n1", NS, "acme", quiet_since=utcnow())
+    )
+    mongo["sandbox_probes"].update_one(
+        {}, {"$set": {"state": "done", "result": "passed", "started_at": utcnow()}}
+    )
+    kubelet(fake, ready=False, running=False, waiting="CrashLoopBackOff", exit_code=87)
+    r = _open(client)
+    assert detail_code(r) == (503, "sandbox_open_failed")
     check = mongo["clusters"].find_one({"_id": c.id})["sandbox"]["check"]
     assert check["passed"] is False and check["void_reason"] == "self_check"
-    assert sandbox_pods(fake) == [] and _record(mongo)["state"] == "closed"
 
 
 @pytest.mark.parametrize(
