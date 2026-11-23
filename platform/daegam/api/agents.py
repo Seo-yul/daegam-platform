@@ -1000,7 +1000,15 @@ async def decide_with(
         return pending
 
     try:
-        plan = await turns.decide(doc, user, session_id, body.decisions, approver=approver)
+        plan = await turns.decide(
+            doc,
+            user,
+            session_id,
+            body.decisions,
+            approver=approver,
+            # 다른 Agent 가 부른 실행의 재개는 뿌리 턴의 한도 종류를 그대로 싣는다 (P46 6.4절)
+            long_bound=run.long_bound if run is not None else None,
+        )
         async with turns.preparing(plan):
             to_save = await choices.to_remember(plan, body.decisions, read_pending)
             delivered = await choices.for_turn(plan, run=run is not None)

@@ -44,7 +44,7 @@ class RevisionCheck(Protocol):
 def calls_enabled(settings: Settings) -> bool:
     """이 플랫폼에서 Agent 가 다른 Agent 를 부를 수 있는가 (P46 6.5절). 호출은 실행이라 실행이
     꺼지면 함께 꺼진다."""
-    return settings.runs_enabled
+    return settings.agent_calls_on
 
 
 def revision_refusal(revision: AgentRevision, check: RevisionCheck) -> ServiceError | None:

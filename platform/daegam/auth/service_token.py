@@ -28,6 +28,7 @@ from daegam.auth.oidc import AuthError
 from daegam.auth.signer import (
     LLM_AUDIENCE,
     PlatformSigner,
+    agent_call_audience,
     internal_audience,
     registered_claims,
     search_audience,
@@ -46,6 +47,11 @@ LLM_TOKEN_TTL = 90 * 24 * 3600
 LLM_TOKEN_RENEW_DAYS = 30
 # 서비스 토큰이 반드시 싣는 클레임. 검증기가 없으면 거절한다
 SERVICE_TOKEN_CLAIMS = ("exp", "sub", "tenant")
+# 다른 Agent 를 Tool 로 부르는 호출 토큰의 `bound_to` 꼴이다. 노출된 런타임이 받는 `agent:<id>` 와
+# 달라 플랫폼의 호출 경로만 받는다
+AGENT_CALL_TARGET = "agent-call:{}"
+# 호출 토큰이 싣는 턴 위임의 id 다. 호출 경로가 이 id 로 위임을 찾는다
+GRANT_ID_CLAIM = "grant_id"
 
 
 def is_account(sub: str) -> bool:
@@ -112,12 +118,14 @@ def turn_token_claims(
     tenant: str,
     username: str | None,
     agent_id: str | None = None,
+    grant_id: str | None = None,
 ) -> dict[str, Any]:
     """턴 위임 토큰의 클레임 (P53 1절). sub 는 사람, `act` 는 그 사람 대신 부르는 Agent 의 서비스
     신원(RFC 8693)과 그 Agent 의 id 이고(P52 3절, Tool 규칙의 위임 절이 그 레코드를 통째로
     견준다), `bound_to` 는 대상 하나다. `groups`·`cid`·`tv`·`scope` 를 싣지 않으므로 그것으로 받는
     경계는 모두 거절하고 자기 대상을 이름으로 적은 경계만 받는다. sub 는 `svc:` 로 시작하지
-    않는다. 테넌트 울타리가 그런 sub 를 서비스로 읽기 때문이다."""
+    않는다. 테넌트 울타리가 그런 sub 를 서비스로 읽기 때문이다. grant_id 는 호출 토큰만 싣는 위임의
+    id 다."""
     if sub.startswith(SERVICE_SUB_PREFIX):
         raise ValueError(f"turn token sub must not start with {SERVICE_SUB_PREFIX!r}")
     claims = {
@@ -128,6 +136,8 @@ def turn_token_claims(
     }
     if username:
         claims["preferred_username"] = username
+    if grant_id:
+        claims[GRANT_ID_CLAIM] = grant_id
     return claims
 
 
@@ -380,3 +390,46 @@ def verify_gateway_token(token: str, signer: PlatformSigner, *, issuer: str) -> 
     if not name:
         raise AuthError("not a Gateway service token")
     return tenant, name
+
+
+@dataclass(frozen=True)
+class AgentCallClaims:
+    """검증한 호출 토큰이 말하는 것이다. sub 는 사람, actor_agent_id 는 부르는 Agent 의 id(미리
+    보기는 원본의 것), grant_id 는 그 턴의 위임이다."""
+
+    sub: str
+    tenant: str
+    grant_id: str
+    actor_agent_id: str
+
+
+def verify_agent_call_token(
+    token: str, signer: PlatformSigner, *, issuer: str, agent_id: str
+) -> AgentCallClaims:
+    """호출 경로가 받은 턴 위임 토큰을 검증한다. 서명 없이 읽은 `tenant` 로 그 Agent 의 호출
+    audience 를 정해 플랫폼 서비스 키로 검증하고, audience 가 그것 하나뿐인지, `bound_to` 가 그
+    Agent 의 호출(`AGENT_CALL_TARGET`)인지, sub 가 사람인지, 위임 id 와 부르는 Agent 의 id 를
+    실었는지 본다. 그 밖은 AuthError 다. Gateway, MCP Server, 노출된 Agent 로 가는 턴 토큰과 서비스
+    토큰은 audience 와 `bound_to` 가 달라 여기를 지나지 못한다."""
+    peek = InternalIssuer.peek(token)
+    tenant = peek.tenant if peek is not None else None
+    if not tenant or peek is None:
+        raise AuthError("not an agent call token")
+    audience = agent_call_audience(tenant, agent_id)
+    if list(peek.audiences) != [audience]:
+        raise AuthError("not a token for this agent's calls")
+    claims = LocalVerifier(
+        signer, issuer=issuer, audience=audience, required=SERVICE_TOKEN_CLAIMS
+    ).verify(token)
+    sub, grant_id, act = claims.get("sub"), claims.get(GRANT_ID_CLAIM), claims.get("act")
+    actor = act.get("agent_id") if isinstance(act, dict) else None
+    if (
+        claims.get("tenant") != tenant
+        or claims.get("bound_to") != AGENT_CALL_TARGET.format(agent_id)
+        or not isinstance(sub, str)
+        or not is_person_sub(sub)
+        or not isinstance(grant_id, str)
+        or not isinstance(actor, str)
+    ):
+        raise AuthError("not an agent call token")
+    return AgentCallClaims(sub=sub, tenant=tenant, grant_id=grant_id, actor_agent_id=actor)

@@ -11,10 +11,13 @@ from daegam.services.turn_grants import GrantPerson, OpenedGrant, OpenOutcome
 @dataclass
 class FakeGrants:
     """`TurnGrantService` 의 가짜다. refuse 에 든 sub 는 사람 검사를 지나지 못하고, raises 가 있으면
-    열기가 그것을 던진다."""
+    열기가 그것을 던진다. off 면 위임을 열지 못하는 플랫폼이고 no_targets 면 토큰을 받을 대상이
+    없는 Agent 다."""
 
     refuse: set[str] = field(default_factory=set)
     raises: Exception | None = None
+    off: bool = False
+    no_targets: bool = False
     opened: list[dict[str, Any]] = field(default_factory=list)
     attached: list[tuple[str, str]] = field(default_factory=list)
     ended: list[tuple[str, str]] = field(default_factory=list)
@@ -23,8 +26,12 @@ class FakeGrants:
         self.opened.append({"person": person, **kwargs})
         if self.raises is not None:
             raise self.raises
+        if self.off:
+            return OpenOutcome(None)
         if person.sub in self.refuse:
             return OpenOutcome(None, refused="disabled")
+        if self.no_targets:
+            return OpenOutcome(None, no_targets=True)
         gid = f"g{len(self.opened)}"
         return OpenOutcome(OpenedGrant(gid, {"id": gid, "sub": person.sub}))
 

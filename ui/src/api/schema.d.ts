@@ -5981,7 +5981,8 @@ export interface components {
         /**
          * AgentRunOut
          * @description 실행 기록 하나. 입력은 본문 대신 크기와 sha256 만 낸다. `source` 는 `schedule`·`webhook`·
-         *     `manual` 이고, 뒤 판이 더한 출처(P46 의 `agent`)의 기록도 글자 그대로 낸다 (P46 A0).
+         *     `manual`·`agent` 이고, 뒤 판이 더한 출처의 기록도 글자 그대로 낸다 (P46 A0). `caller` 는 출처가
+         *     `agent` 인 실행만 채운다.
          */
         AgentRunOut: {
             /** Id */
@@ -6039,6 +6040,7 @@ export interface components {
             usage?: components["schemas"]["RunUsageOut"] | null;
             /** Cost Usd */
             cost_usd?: number | null;
+            caller?: components["schemas"]["RunCallerOut"] | null;
         };
         /** AgentRunsOut */
         AgentRunsOut: {
@@ -13048,6 +13050,19 @@ export interface components {
             worse: string[];
             /** Missing */
             missing: string[];
+        };
+        /**
+         * RunCallerOut
+         * @description 다른 Agent 가 Tool 로 부른 실행의 부른 쪽 (P46 6.5절). `chain` 은 뿌리부터 부른 Agent 까지의
+         *     Agent id 다.
+         */
+        RunCallerOut: {
+            /** Agent Id */
+            agent_id: string;
+            /** Session Id */
+            session_id: string | null;
+            /** Chain */
+            chain: string[];
         };
         /** RunNowIn */
         RunNowIn: {

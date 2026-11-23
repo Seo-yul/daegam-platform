@@ -19,6 +19,7 @@ from urllib.parse import urlsplit
 
 from daegam.auth.cedar import CLIENT_ID_CLAIM, claim_path
 from daegam.auth.signer import (
+    AGENT_CALL_AUDIENCE_PREFIX,
     CONTROL_PLANE_AUDIENCE,
     INTERNAL_AUDIENCE_PREFIX,
     LLM_AUDIENCE,
@@ -346,6 +347,14 @@ class Settings:
                 f"LLM or internal audience ({CONTROL_PLANE_AUDIENCE}, {TELEMETRY_AUDIENCE}, "
                 f"{LLM_AUDIENCE}, {INTERNAL_AUDIENCE_PREFIX}<tenant>)"
             )
+        # Agent 호출의 audience 는 플랫폼의 호출 경로만 받는다. 설정한 audience 가 그 접두사로
+        # 시작하면 호출 토큰이 다른 경계를 지나거나 다른 토큰이 호출 경로에 든다
+        for name in ("mcp_audience", "oidc_audience"):
+            if (getattr(self, name) or "").startswith(AGENT_CALL_AUDIENCE_PREFIX):
+                raise ValueError(
+                    f"{name} {getattr(self, name)!r} starts with the agent call audience prefix "
+                    f"{AGENT_CALL_AUDIENCE_PREFIX!r}, which is reserved"
+                )
         # 주소는 늘 있다. 비면 게이트웨이 네임스페이스의 Service 다 (P38 3절)
         if not self.llm_gateway_url:
             url = default_llm_gateway_url(self.llm_gateway_namespace)
@@ -436,6 +445,12 @@ class Settings:
         if self.data_plane_trusts_platform:
             return self.platform_human_issuer
         return self.issuer
+
+    @property
+    def agent_calls_on(self) -> bool:
+        """이 플랫폼에서 Agent 가 다른 Agent 를 부를 수 있는가. 호출의 스위치와 실행의 스위치가 둘
+        다 켜져 있을 때다."""
+        return self.runs_enabled and self.agent_calls_enabled
 
     @property
     def interactive_bound(self) -> timedelta:
@@ -640,6 +655,10 @@ class Settings:
     runs_workers_enabled: bool = True
     runs_interval: float = 15.0
     runs_lease_seconds: float = 60.0
+    # --- Agent 가 다른 Agent 를 Tool 로 부르는 호출. 호출은 실행이라 runs_enabled 도 켜져 있어야
+    # 한다(`agent_calls_on`). 끄면 호출 경로가 409 agent_calls_disabled 로 답하고 게시도 같은
+    # 코드로 거절하며, 부르는 Agent 는 계속 대화한다 ---
+    agent_calls_enabled: bool = True
     # --- 바깥 채널 (P47 6.1절). 끄면 Teams 의 메시지 엔드포인트와 모든 채널 라우트가 404 이고 채널
     # 워커가 서며, 연결과 설정은 남는다. header 모드는 켜도 404 다 ---
     channels_enabled: bool = True
@@ -1161,6 +1180,9 @@ def settings_from_env() -> Settings:
         ),
         runs_enabled=_env_bool("DAEGAM_RUNS_ENABLED", _DEFAULTS["runs_enabled"]),
         runs_interval=_env_float("DAEGAM_RUNS_INTERVAL", _DEFAULTS["runs_interval"]),
+        agent_calls_enabled=_env_bool(
+            "DAEGAM_AGENT_CALLS_ENABLED", _DEFAULTS["agent_calls_enabled"]
+        ),
         channels_enabled=_env_bool("DAEGAM_CHANNELS_ENABLED", _DEFAULTS["channels_enabled"]),
         docparse_url=os.environ.get("DAEGAM_DOCPARSE_URL") or None,
         docparse_token=(os.environ.get(DOCPARSE_TOKEN_ENV) or "").strip() or None,

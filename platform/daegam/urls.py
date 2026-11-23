@@ -74,6 +74,16 @@ SANDBOX_PATHS = re.compile(rf"^{re.escape(API_PREFIX)}/agents/[^/]+/sandboxes(/t
 # id 로 실행을 시작하고, 그 아래의 runs/{run_id} 와 runs/{run_id}/cancel 로 묻고 취소한다. 컴파일이
 # 이 경로를 agent.json 의 Agent 소스에 싣는다
 AGENT_CALL_PATH = "/internal/agent-calls/{agent_id}"
+AGENT_CALL_ROUTES = {
+    "start": AGENT_CALL_PATH,
+    "poll": f"{AGENT_CALL_PATH}/runs/{{run_id}}",
+    "cancel": f"{AGENT_CALL_PATH}/runs/{{run_id}}/cancel",
+}
+# 세 경로와 통째로만 맞는 정규식이다. 감사 미들웨어가 빼고(경로가 스스로 감사 행을 쓴다) 본문
+# 상한이 따로 건다
+AGENT_CALL_PATHS = re.compile(
+    rf"^{re.escape(API_PREFIX)}/internal/agent-calls/[^/]+(/runs/[^/]+(/cancel)?)?$"
+)
 
 
 # 웹훅 트리거의 공개 경로 (P41 4절). 다른 시스템이 Bearer 없이 서명으로 부른다. 감사 미들웨어가

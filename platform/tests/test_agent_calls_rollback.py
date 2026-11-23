@@ -84,6 +84,7 @@ def _agent_run(status: str, **fields: Any) -> dict[str, Any]:
         "grant_id": "g-calling",
         "chain": ["ag-support"],
         "long_bound": False,
+        "later_field": "x",
     }
     return base | {"source": LATER, "status": status, "caller": caller, **fields}
 
@@ -296,7 +297,8 @@ def test_the_watch_ends_a_stopped_quiet_call_of_a_later_release(settings):
 
 
 def test_agent_runs_read_as_text_and_settle_by_their_events(settings):
-    """읽기(하나, 목록, 세션, 세션 목록)는 출처를 글자 그대로 읽고 `caller` 는 버린다. 이벤트는 그
+    """읽기(하나, 목록, 세션, 세션 목록)는 출처를 글자 그대로 읽고 `caller` 는 아는 칸만 읽는다.
+    뒤 판이 그 안에 더한 칸은 버린다. 이벤트는 그
     기록을 옮기고, Agent 를 지우는 중지는 그 기록에도 표시를 남긴다."""
 
     async def body(runs: MongoAgentRunStore) -> dict[str, Any]:
@@ -324,7 +326,8 @@ def test_agent_runs_read_as_text_and_settle_by_their_events(settings):
 
     out = run_store(settings, MongoAgentRunStore, body)
     assert [(r.id, r.source) for r in out["read"]] == [("call-1", LATER)] * 4
-    assert "caller" not in out["read"][0].model_dump()
+    assert out["read"][0].caller.chain == ["ag-support"]
+    assert "later_field" not in out["read"][0].model_dump()["caller"]
     assert out["settled"]["status"] == "succeeded" and out["settled"]["caller"]["agent_id"]
     [stopped] = out["stopped"]
     assert (stopped.id, stopped.stop_reason) == ("call-2", "agent_deleted")

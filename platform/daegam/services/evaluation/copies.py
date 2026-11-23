@@ -18,7 +18,7 @@ from __future__ import annotations
 from collections import Counter
 from typing import Any
 
-from daegam.services.agent_runtime import done_index, transcript_items
+from daegam.services.agent_runtime import done_index, transcript_items, turn_answer
 from daegam.services.evaluation import pii
 from daegam.services.evaluation.cases import case_digest
 from daegam.services.evaluation.errors import EvaluationError
@@ -64,21 +64,10 @@ def rated_turn(items: list[dict[str, Any]], turn_id: str) -> tuple[str, str] | N
     end = done_index(items, turn_id)
     if end is None:
         return None
-    start = end
-    while start > 0 and items[start - 1].get("kind") != "user":
-        start -= 1
+    start, answer = turn_answer(items, end)
     if start == 0:
         return None
     question = items[start - 1].get("text")
-    said = [
-        it
-        for it in items[start:end]
-        if it.get("kind") == "assistant"
-        and not it.get("greeting")
-        and isinstance(it.get("text"), str)
-    ]
-    main = [it["text"] for it in said if not it.get("agent")] or [it["text"] for it in said]
-    answer = "\n\n".join(t for t in main if t.strip())
     if not isinstance(question, str) or not question.strip():
         return None
     return question, answer

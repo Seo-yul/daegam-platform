@@ -146,6 +146,31 @@ def done_index(items: list[dict[str, Any]], turn_id: str) -> int | None:
     )
 
 
+def turn_answer(items: list[dict[str, Any]], end: int) -> tuple[int, str]:
+    """end 자리의 `done` 으로 끝난 턴의 (첫 자리, 답)이다. 첫 자리는 그 턴의 사용자 항목 바로
+    뒤이고 사용자 항목이 없으면 0 이다. 답은 메인 에이전트의 말(하위 에이전트의 이름표가 없는 것)을
+    잇고, 없으면 그 턴의 모든 말을 잇는다. 인사말은 뺀다."""
+    start = end
+    while start > 0 and items[start - 1].get("kind") != "user":
+        start -= 1
+    said = [
+        it
+        for it in items[start:end]
+        if it.get("kind") == "assistant"
+        and not it.get("greeting")
+        and isinstance(it.get("text"), str)
+    ]
+    main = [it["text"] for it in said if not it.get("agent")] or [it["text"] for it in said]
+    return start, "\n\n".join(t for t in main if t.strip())
+
+
+def last_answer(items: list[dict[str, Any]]) -> str | None:
+    """전사의 마지막 `done` 으로 끝난 턴의 답이다. 끝난 턴이 없으면 None 이다. 다른 Agent 가 부른
+    실행의 답을 이것으로 읽는다."""
+    end = next((i for i in range(len(items) - 1, -1, -1) if items[i].get("kind") == "done"), None)
+    return turn_answer(items, end)[1] if end is not None else None
+
+
 def _with_choices(body: dict[str, Any], choices: list[dict[str, str]] | None) -> dict[str, Any]:
     """기억한 승인 선택을 실은 본문이다(P43 5절). 실을 것이 있을 때만 칸을 둔다. `tool_safety` 를
     모르는 옛 이미지는 모르는 칸을 버린다."""

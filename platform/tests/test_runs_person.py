@@ -20,7 +20,7 @@ from daegam.services.runs.person import (
     BoundPersonCheck,
 )
 from daegam.services.runs.service import AGENT_DELETED, RunError, ScheduleInput
-from daegam.store.agent_runs import STOPPED, ActsAs
+from daegam.store.agent_runs import STOPPED, ActsAs, AgentRun, RunCaller
 from daegam.store.personal_tokens import DISABLED, MEMBERSHIP, PASSWORD
 from tests.helpers.runs import (
     BOUND,
@@ -146,6 +146,39 @@ def test_oidc_mode_pauses_a_person_past_the_long_bound(record, cause):
     people = FakePeople(record)
     check = person_check(OIDC, None, ("alice", "default", "developer"), people=people)
     assert lost(check) == cause
+
+
+def _called(long_bound: bool) -> AgentRun:
+    """다른 Agent 가 Tool 로 부른 실행이다. 사람은 부른 턴의 사람이다."""
+    caller = RunCaller(agent_id="ag-calling", chain=["ag-calling"], long_bound=long_bound)
+    return run_of(source="agent", acts_as=BOUND, caller=caller)
+
+
+@pytest.mark.parametrize(
+    ("role", "scheduled", "called"),
+    [("developer", None, None), ("viewer", CAUSE_ROLE, None), ("operator", CAUSE_ROLE, CAUSE_ROLE)],
+)
+def test_a_called_run_needs_chat_only_while_a_scheduled_one_needs_write_too(
+    role, scheduled, called
+):
+    """다른 Agent 가 부른 실행의 사람은 그 Agent 와 직접 대화할 수 있으면 된다 (P46 6.4절). 계정의
+    확인은 같다."""
+    check = person_check(LOCAL, FakeUsers(alice()), ("alice", "default", role))
+    assert asyncio.run(check.lost_for(run_of(acts_as=BOUND))) == scheduled
+    assert asyncio.run(check.lost_for(_called(False))) == called
+    stale = person_check(LOCAL, FakeUsers(alice(token_version=4)), ("alice", "default", role))
+    assert asyncio.run(stale.lost_for(_called(False))) == CAUSE_PASSWORD
+
+
+def test_in_oidc_mode_a_called_run_is_checked_with_its_roots_bound():
+    """뿌리가 채팅이면 대화형 한도, 실행이면 긴 한도다."""
+    hours = FakePeople(idp_person("alice", age=timedelta(hours=2)))
+    check = person_check(OIDC, None, ("alice", "default", "viewer"), people=hours)
+    assert asyncio.run(check.lost_for(_called(False))) == CAUSE_UNCONFIRMED
+    assert asyncio.run(check.lost_for(_called(True))) is None
+    days = FakePeople(idp_person("alice", age=timedelta(days=8)))
+    check = person_check(OIDC, None, ("alice", "default", "viewer"), people=days)
+    assert asyncio.run(check.lost_for(_called(True))) == CAUSE_UNCONFIRMED
 
 
 def test_oidc_runs_act_as_the_person_once_they_had_a_record():

@@ -80,6 +80,17 @@ def test_evaluations_are_on_by_default_and_turned_off_by_env(bare_env):
     assert settings_from_env().evaluations_enabled is False
 
 
+def test_agent_calls_are_on_by_default_and_need_runs_too(bare_env):
+    """호출은 실행이라 실행의 스위치도 켜져 있어야 한다 (P46 6.5절)."""
+    assert settings_from_env().agent_calls_on is True
+    bare_env.setenv("DAEGAM_RUNS_ENABLED", "false")
+    assert settings_from_env().agent_calls_on is False
+    bare_env.setenv("DAEGAM_RUNS_ENABLED", "true")
+    bare_env.setenv("DAEGAM_AGENT_CALLS_ENABLED", "false")
+    off = settings_from_env()
+    assert (off.agent_calls_enabled, off.agent_calls_on, off.runs_enabled) == (False, False, True)
+
+
 def test_the_gate_counts_criteria_only_when_turned_on(bare_env):
     """채점 기준은 B6 이 켤 때까지 게이트에 들지 않는다 (P45 11절)."""
     assert settings_from_env().evaluation_gate_criteria is False

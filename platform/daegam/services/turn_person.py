@@ -11,6 +11,8 @@
   소유자가 검사를 지나지 못하거나, 결정에 승인자의 입력이 있거나, 기록이 없으면 승인자 자신의
   위임이고 기록의 소유자가 있으면 `session_owner` 에 적는다. 어느 재개도 Agent 의 이름으로 돌아가지
   않는다.
+  다른 Agent 가 부른 실행의 세션이면 어느 위임이든 그 실행이 적어 둔 뿌리 턴의 한도 종류
+  (`long_bound`)를 싣는다 (P46 6.4절).
 - **소유자 기록**은 런타임이 턴을 받아들였을 때만 적는다. 요청에 세션 id 가 없었거나 답의
   `X-Daegam-Session-Id` 가 요청의 것과 같을 때다. 승인자가 소유자의 이름으로 재개한 결정은
   `expires_at` 만 늘린다.
@@ -148,16 +150,17 @@ class TurnDelegation:
         decisions: Sequence[Any],
         *,
         approver: bool,
+        long_bound: bool | None = None,
     ) -> TurnPlan:
         at = self.now()
         caller = person_of(user)
         record = await self.owners.get(doc.id, session_id)
         if record is None:
             # 소유자를 모른다. 런타임은 소유자가 아닌 결정자를 승인자일 때만 받는다
-            grant = await self._open(doc, caller, "decide", session_id)
+            grant = await self._open(doc, caller, "decide", session_id, long_bound=long_bound)
             return TurnPlan(doc, session_id, at, grant)
         if record.sub == caller.sub:
-            grant = await self._open(doc, caller, "decide", session_id)
+            grant = await self._open(doc, caller, "decide", session_id, long_bound=long_bound)
             return TurnPlan(doc, session_id, at, grant, confirms=caller)
         if not approver:
             # 런타임이 소유자도 승인자도 아닌 결정을 거절한다
@@ -169,6 +172,7 @@ class TurnDelegation:
                 trigger="decide",
                 session_id=session_id,
                 decided_by=caller.sub,
+                long_bound=long_bound,
             )
             if outcome.refused is None:
                 return TurnPlan(doc, session_id, at, outcome.grant, extends=record.sub)
@@ -177,7 +181,9 @@ class TurnDelegation:
                 session_id,
                 outcome.refused,
             )
-        grant = await self._open(doc, caller, "decide", session_id, session_owner=record.sub)
+        grant = await self._open(
+            doc, caller, "decide", session_id, session_owner=record.sub, long_bound=long_bound
+        )
         return TurnPlan(doc, session_id, at, grant)
 
     async def _own_turn(
@@ -202,6 +208,7 @@ class TurnDelegation:
         session_id: str | None,
         *,
         session_owner: str | None = None,
+        long_bound: bool | None = None,
     ) -> OpenedGrant | None:
         """부른 사람 자신의 위임이다. 검사를 지나지 못한 사람은 위임 없이 Agent 의 이름으로 돈다."""
         outcome = await self.grants.open(
@@ -210,6 +217,7 @@ class TurnDelegation:
             trigger=trigger,
             session_id=session_id,
             session_owner=session_owner,
+            long_bound=long_bound,
         )
         return outcome.grant
 

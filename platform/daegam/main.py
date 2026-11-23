@@ -172,6 +172,7 @@ def _add_middleware(app: FastAPI, settings: Settings) -> None:
     # 그 안에서 자기 상한을 세어 "too_large" 리포트를 낸다. 채팅 첨부 업로드는 그보다 작은 경로
     # 상한이다. 이것을 먼저 더해 가장 안쪽에 둔다. 그래야 읽기 전에 끊은 413 도 감사에 남고 보호
     # 헤더를 받는다. 감사와 보호 헤더는 요청 본문을 읽지 않는다
+    from daegam.api.agent_calls import AGENT_CALL_BODY_LIMIT
     from daegam.api.agent_chat import UPLOAD_BODY_LIMIT
     from daegam.api.sandboxes import SANDBOX_BODY_LIMIT
     from daegam.api.skills import IMPORT_BODY_LIMIT
@@ -188,6 +189,7 @@ def _add_middleware(app: FastAPI, settings: Settings) -> None:
             OTLP_BODY_LIMIT,
             TURN_GRANT_BODY_LIMIT,
             SANDBOX_BODY_LIMIT,
+            AGENT_CALL_BODY_LIMIT,
         ],
     )
     # 감사 미들웨어. 저장소는 lifespan 뒤에 생기므로 호출 시점에 app.state 에서 읽는다
@@ -329,6 +331,7 @@ def create_app(
         UI 컨테이너의 /build.json 이 따로 낸다(D52)."""
         return {"api_version": __version__, "api_build": api_build, "release": release}
 
+    from daegam.api.agent_calls import router as agent_calls_router
     from daegam.api.agent_chat import router as agent_chat_router
     from daegam.api.agent_evaluation import router as agent_evaluation_router
     from daegam.api.agent_feedback import router as agent_feedback_router
@@ -394,6 +397,8 @@ def create_app(
         telemetry_router,
         # 런타임이 턴 위임을 갱신하고 끝내는 기계 경로 (P53 4절)
         turn_grants_router,
+        # 부르는 Agent 의 런타임이 다른 Agent 의 실행을 시작하고 묻고 취소하는 기계 경로 (P46 6.3절)
+        agent_calls_router,
         # 런타임이 세션의 코드 실행 샌드박스를 열고 찾고 닫는 기계 경로 (P40 5절)
         sandboxes_router,
         settings_router,

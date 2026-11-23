@@ -26,6 +26,15 @@
 - **잠든 Agent** (P44 8절). 위임을 열기 전에 쉬기의 게이트를 지난다. 실행 시작은 Agent 를 깨우고
   활동을 적는다. 깨우는 중(`agent_waking`, 게이트의 답이든 프록시가 드레인 거절을 바꾼 답이든)이면
   시도로 세지 않고 `Retry-After` 만큼 미룬다.
+- **다른 Agent 가 부른 실행** (P46 6.3·6.4절). 호출 경로가 리스를 건 기록을 만들고 이 워커의
+  `start_run` 을 그 자리에서 부른다. 경로가 `starting` 으로 남긴 기록은 리스가 끝나면 틱이 잡는다.
+  소스가 없어 소스의 다시 보기는 건너뛰고, 사람은 부른 턴의 사람이라 `agent:chat` 과 뿌리 턴의
+  한도로 본다. 사람이 접근을 잃어도 소스를 멈추지 않는다. 상한은 호출의 것이다. 위임은 계기
+  `agent` 로 열고 뿌리 턴의 한도 종류를 싣는다. 사람의 이름으로 돌 수 없으면 Agent 의 이름으로
+  돌리지 않고 `acts_as_unavailable` 로 `failed` 다. 사람 기록이 없는 oidc 의 사람, 거절되거나 만들
+  수 없는 위임, 위임을 받지 않은 파드(그 턴은 멈춘다), 누구의 이름으로 돌았는지 모르는 앞 시도의
+  턴이다. 규칙이 토큰을 주는 대상이 없을 때만 위임 없이 돈다. header 모드는 스케줄 실행처럼 Agent
+  의 이름으로 돈다. 다시 할 시작이 호출이 기다리는 끝을 넘으면 `agent_call_timeout` 으로 끝낸다.
 """
 
 from __future__ import annotations
@@ -58,9 +67,15 @@ from daegam.services.runs.service import (
     RunError,
     RunService,
     SourceKind,
+    caps_of,
 )
 from daegam.services.sandboxes import code_execution_on
-from daegam.services.turn_grants import GrantPerson, OpenedGrant, TurnTokensUnavailable
+from daegam.services.turn_grants import (
+    CALL_TRIGGER,
+    GrantPerson,
+    OpenedGrant,
+    TurnTokensUnavailable,
+)
 from daegam.services.turn_person import (
     DETACHED_HEADER,
     SESSION_HEADER,
@@ -92,7 +107,6 @@ RUN_ID_HEADER = "x-daegam-run-id"
 RUN_EXISTS = "run_exists"
 RUN_LOST = "run_lost"
 RUNS_UNSUPPORTED = "runs_unsupported"
-AGENT_RUN_LIMIT = "agent_run_limit"
 # 샌드박스 실행 몫을 쥔 실행의 상태 (P40 7절). 시작하는 이 실행은 빼고 센다
 SANDBOX_RUN_STATUSES: tuple[RunStatus, ...] = ("running", "waiting_approval")
 EXPIRED = "expired"
@@ -103,6 +117,10 @@ NO_TURN_TOKEN = "no_turn_token"
 GRANT_NOT_ACCEPTED = "grant_not_accepted"
 # 런타임을 부르지 못한 시작의 코드
 RUNTIME_UNREACHABLE = "runtime_unreachable"
+# 다른 Agent 가 부른 실행을 부른 턴의 사람으로 돌릴 수 없다 (P46 6.4절)
+ACTS_AS_UNAVAILABLE = "acts_as_unavailable"
+# 다시 할 시작이 호출이 답을 기다리는 끝을 넘는다 (P46 6.3절)
+AGENT_CALL_TIMEOUT = "agent_call_timeout"
 
 
 @dataclass(frozen=True)
@@ -113,6 +131,11 @@ class _Ended:
     reason: str
     pause: str | None = None
     lost: str | None = None
+
+
+class _ActsAsUnavailable(Exception):
+    """다른 Agent 가 부른 실행을 그 사람의 이름으로 돌릴 수 없다. 실행을 `acts_as_unavailable` 로
+    끝낸다."""
 
 
 class SleepGate(Protocol):
@@ -300,11 +323,13 @@ class RunStartWorker(LeaseWorker[AgentRun]):
             if e.code == "not_deployed":
                 return _Ended(AGENT_UNDEPLOYED)
             return _Ended(e.code, pause=PREREQUISITES_FAILED)
-        cause = await self.service.person.lost(run.acts_as, run.tenant)
+        cause = await self.service.person.lost_for(run)
         if cause is not None:
-            return _Ended(ended_reason(cause), lost=cause)
-        if await self.service.start_cap_error(run.tenant, run.agent_id) is not None:
-            return _Ended(AGENT_RUN_LIMIT)
+            # 다른 Agent 가 부른 실행의 사람은 소스에 묶인 사람이 아니다. 소스는 멈추지 않는다
+            return _Ended(ended_reason(cause), lost=cause if run.caller is None else None)
+        cap = await self.service.start_cap_error(run.tenant, run.agent_id, caps_of(run.source))
+        if cap is not None:
+            return _Ended(cap.code)
         return None
 
     async def _end_before_start(
@@ -331,6 +356,9 @@ class RunStartWorker(LeaseWorker[AgentRun]):
         except TurnTokensUnavailable as e:
             await self._retry_or_fail(run, e.code, now)
             return
+        except _ActsAsUnavailable:
+            await self._fail(run, ACTS_AS_UNAVAILABLE, now)
+            return
         plan = TurnPlan(agent, None, now, grant, confirms=person)
 
         async def call(turn_grant: dict[str, Any] | None) -> ProxyResponse:
@@ -348,8 +376,8 @@ class RunStartWorker(LeaseWorker[AgentRun]):
                 ephemeral=True,
                 turn_grant=turn_grant,
                 run_id=run.id,
-                # 웹훅 본문은 밖에서 온 글이라 런타임 가드의 엄격한 URL 규칙을 받는다 (4절)
-                untrusted=self.service.kind_of(run) is self.service.trigger_kind,
+                # 밖에서 온 글은 런타임 가드의 엄격한 URL 규칙을 받는다 (4절)
+                untrusted=self.service.untrusted(run),
                 approval_choices=rejects,
             )
 
@@ -373,19 +401,30 @@ class RunStartWorker(LeaseWorker[AgentRun]):
     ) -> tuple[ActsAs, GrantPerson | None, OpenedGrant | None]:
         """실행이 누구의 이름으로 도는가 (6절). (실행 이름, 소유자 기록을 적을 사람, 위임). 사람은
         토큰 인증 모드에서이고, oidc 모드는 사람 기록이 있었던 사람만이다. 위임은 열 수 있을 때만
-        이다."""
+        이다. 다른 Agent 가 부른 실행은 Agent 의 이름으로 돌아가는 자리마다 `_ActsAsUnavailable`
+        이고, 규칙이 토큰을 주는 대상이 없을 때만 위임 없이 돈다 (P46 6.4절)."""
         settings = self.service.settings
+        call = run.caller
         if not settings.token_auth:
             return _as_agent(run.acts_as, HEADER_MODE), None, None
         if not await self.service.person.runs_as_person(run.acts_as.sub):
+            if call is not None:
+                raise _ActsAsUnavailable
             return _as_agent(run.acts_as, OIDC_MODE), None, None
         person = GrantPerson(
             sub=run.acts_as.sub, username=run.acts_as.username or "", tv=run.acts_as.tv
         )
         outcome = await self.delegation.grants.open(
-            agent=agent, person=person, trigger="run", session_id=None
+            agent=agent,
+            person=person,
+            trigger="run" if call is None else CALL_TRIGGER,
+            session_id=None,
+            long_bound=call.long_bound if call is not None else None,
+            run_id=run.id,
         )
         if outcome.grant is None:
+            if call is not None and not outcome.no_targets:
+                raise _ActsAsUnavailable
             return _as_agent(run.acts_as, outcome.refused or NO_TURN_TOKEN), person, None
         person_acts = run.acts_as.model_copy(update={"kind": "person", "cause": None})
         return person_acts, person, outcome.grant
@@ -414,6 +453,9 @@ class RunStartWorker(LeaseWorker[AgentRun]):
             await self._fail(run, RUN_LOST, now)
             return
         noted = run.started_at is not None
+        if not noted and run.caller is not None:
+            await self._fail_and_stop(run, session_id, turn_id, now)
+            return
         acts_as = run.acts_as if noted else _as_agent(run.acts_as, RUN_EXISTS)
         grant_id = run.grant_id if noted else None
         await self._running(run, run.session_id or session_id, turn_id, grant_id, acts_as, now)
@@ -440,6 +482,9 @@ class RunStartWorker(LeaseWorker[AgentRun]):
         await proxied.body.aclose()
         if grant is not None and headers.get(TURN_GRANT_HEADER) != grant.id:
             # 위임을 모르는 파드가 받았다. send 가 위임을 끝냈다
+            if run.caller is not None:
+                await self._fail_and_stop(run, session_id, turn_id, now)
+                return
             grant, acts_as = None, _as_agent(acts_as, GRANT_NOT_ACCEPTED)
         grant_id = grant.id if grant is not None else None
         await self._running(run, session_id, turn_id, grant_id, acts_as, now)
@@ -481,9 +526,22 @@ class RunStartWorker(LeaseWorker[AgentRun]):
 
     # -- 다시 하기와 실패 --------------------------------------------------------------------
 
+    async def _fail_and_stop(
+        self, run: AgentRun, session_id: str, turn_id: str, now: datetime
+    ) -> None:
+        """다른 Agent 가 부른 실행의 턴이 그 사람의 위임 없이 열렸다. 실행을 `acts_as_unavailable`
+        로 끝내고 그 턴을 런타임에서 멈춘다 (P46 6.4절)."""
+        await self._fail(run, ACTS_AS_UNAVAILABLE, now)
+        opened = run.model_copy(update={"session_id": session_id, "turn_id": turn_id})
+        await self.service.stop_turns([opened])
+
     async def _retry_or_fail(self, run: AgentRun, code: str, now: datetime) -> None:
         attempts = run.attempts + 1
         at = now + RETRY_BASE * (2 ** (attempts - 1))
+        timeout_at = run.caller.timeout_at if run.caller is not None else None
+        if timeout_at is not None and at > timeout_at:
+            await self._end(run, "failed", AGENT_CALL_TIMEOUT, now, attempts=attempts)
+            return
         if attempts >= MAX_ATTEMPTS or at - run.created_at > RETRY_WINDOW:
             await self._end(run, "failed", code, now, attempts=attempts)
             return
@@ -519,6 +577,8 @@ class RunStartWorker(LeaseWorker[AgentRun]):
 
 
 __all__ = [
+    "ACTS_AS_UNAVAILABLE",
+    "AGENT_CALL_TIMEOUT",
     "GRANT_NOT_ACCEPTED",
     "MAX_ATTEMPTS",
     "MAX_PARALLEL",

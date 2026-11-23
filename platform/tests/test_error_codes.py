@@ -14,6 +14,7 @@ from tests.helpers.error_scan import scan
 
 # 글로 적힌 짝 없이 변수나 dict 로만 나가는 코드다. 각각 어디서 나가는지 적는다
 REACHED_BY_VARIABLE = {
+    "agent_run_limit": "services/runs/service.py RunCaps.error(code=RUN_CAPS.code)",
     # docparse 서비스의 답을 그 상태 그대로 넘긴다(services/docparse.py), zip 검사의 코드
     "archive_too_large": "documents/ooxml.py ARCHIVE_CODES",
     "cluster_rights_missing": "k8s/gates.py tenant_secret_refusal",
