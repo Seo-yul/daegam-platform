@@ -254,12 +254,19 @@ class MongoAuditStore:
     async def get_cursor(self, key: str) -> dict[str, Any] | None:
         return await self.cursors.find_one({"_id": key})
 
-    async def set_cursor(self, key: str, *, since: datetime | None, pod_uid: str | None) -> None:
-        await self.cursors.update_one(
-            {"_id": key},
-            {"$set": {"since": since, "pod_uid": pod_uid, "updated_at": utcnow()}},
-            upsert=True,
-        )
+    async def set_cursor(
+        self,
+        key: str,
+        *,
+        since: datetime | None,
+        pod_uid: str | None,
+        restarts: int | None = None,
+    ) -> None:
+        """restarts 는 읽은 컨테이너의 재시작 수다. None 이면 같은 파드의 적힌 값을 그대로 둔다."""
+        fields: dict[str, Any] = {"since": since, "pod_uid": pod_uid, "updated_at": utcnow()}
+        if restarts is not None:
+            fields["restarts"] = restarts
+        await self.cursors.update_one({"_id": key}, {"$set": fields}, upsert=True)
 
     async def delete_cursors_except(self, prefix: str, keep: set[str]) -> int:
         """사라진 파드의 커서를 지운다. prefix 는 "{cluster_id}/{namespace}/"."""

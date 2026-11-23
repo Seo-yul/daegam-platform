@@ -79,6 +79,14 @@ class Lease:
         )
         return res.matched_count == 1
 
+    async def held(self, name: str, now: datetime | None = None) -> bool:
+        """이 홀더가 만료되지 않은 리스를 쥐고 있는가. 읽기만 하고 기한은 늘리지 않는다."""
+        now = now or utcnow()
+        doc = await self.coll.find_one(
+            {"_id": name, "holder": self.holder, "expires_at": {"$gte": now}}, {"_id": 1}
+        )
+        return doc is not None
+
     async def release(self, name: str) -> None:
         await self.coll.delete_one({"_id": name, "holder": self.holder})
 

@@ -465,6 +465,8 @@ class KubeClient(Protocol):
         *,
         field_selector: str | None = None,
         labels: dict[str, str] | None = None,
+        cached: bool = False,
+        timeout: float | None = None,
     ) -> list[dict[str, Any]]: ...
     def version(self) -> dict[str, Any]: ...
     def can_i(
@@ -488,6 +490,8 @@ class KubeClient(Protocol):
         since_seconds: int | None = None,
         container: str | None = None,
         limit_bytes: int | None = None,
+        previous: bool = False,
+        timeout: float | None = None,
     ) -> str: ...
     def service_route(
         self, namespace: str, service: str, port: int, *, scheme: str = "http"
@@ -899,9 +903,13 @@ class ClusterClient:
         *,
         field_selector: str | None = None,
         labels: dict[str, str] | None = None,
+        cached: bool = False,
+        timeout: float | None = None,
     ) -> list[dict[str, Any]]:
         """`Accept: PartialObjectMetadataList` 로 metadata 만 받는다 (본문 없음). 항목은
-        `{"metadata": {...}}` 다. 403 은 AccessDenied 로 올린다 (화면에 빠진 verb 를 보여 준다)."""
+        `{"metadata": {...}}` 다. 403 은 AccessDenied 로 올린다 (화면에 빠진 verb 를 보여 준다).
+        cached 면 `resourceVersion=0` 이라 API 서버가 etcd 를 읽지 않고 자기 캐시로 답한다 (조금
+        늦은 목록일 수 있다). timeout 은 이 호출의 연결·읽기 시한(초)이다."""
         resource = self._resource(api_version, kind)
         params: dict[str, Any] = {
             "header_params": {"Accept": PARTIAL_METADATA_ACCEPT},
@@ -911,6 +919,10 @@ class ClusterClient:
             params["field_selector"] = field_selector
         if labels:
             params["label_selector"] = label_selector(labels)
+        if cached:
+            params["resource_version"] = "0"
+        if timeout is not None:
+            params["_request_timeout"] = (timeout, timeout)
         try:
             data = self.dyn.request("get", resource.path(namespace=namespace), **params)
         except ForbiddenError as e:
@@ -926,9 +938,18 @@ class ClusterClient:
         since_seconds: int | None = None,
         container: str | None = None,
         limit_bytes: int | None = None,
+        previous: bool = False,
+        timeout: float | None = None,
     ) -> str:
-        """pods/log. python 클라이언트에는 sinceTime 이 없어 since_seconds 로 자른다(초 단위)."""
+        """pods/log. python 클라이언트에는 sinceTime 이 없어 since_seconds 로 자른다(초 단위).
+        previous 면 다시 뜨기 전 컨테이너의 로그다. 그 컨테이너가 없거나 kubelet 이 로그를 버렸으면
+        (400) 파드가 없을 때처럼 빈 문자열이다. timeout 은 이 호출의 연결·읽기 시한(초)이다."""
+        read_timeout = API_READ_TIMEOUT if timeout is None else timeout
         kwargs: dict[str, Any] = {}
+        if previous:
+            kwargs["previous"] = True
+        if timeout is not None:
+            kwargs["_request_timeout"] = (timeout, timeout)
         if since_seconds is not None:
             kwargs["since_seconds"] = max(1, int(since_seconds))
         if container:
@@ -942,17 +963,17 @@ class ClusterClient:
                 name, namespace, _preload_content=False, **kwargs
             )
         except k8s.ApiException as e:
-            if e.status == 404:
+            if e.status == 404 or (previous and e.status == 400):
                 return ""
             raise ClusterUnreachable(f"pods/log {namespace}/{name}: HTTP {e.status}") from e
         try:
             data = resp.data
         except Exception as e:
             # 머리를 받은 뒤 본문 도중에 멈춘 서버. 읽기 시한은 urllib3 의 원래 오류로 올라온다
-            timeout = _timeout_of(e)
-            if timeout is None:
+            stalled = _timeout_of(e)
+            if stalled is None:
                 raise
-            raise _cluster_timeout(f"pods/log {namespace}/{name}", timeout, API_READ_TIMEOUT) from e
+            raise _cluster_timeout(f"pods/log {namespace}/{name}", stalled, read_timeout) from e
         if isinstance(data, bytes):
             return data.decode("utf-8", errors="replace")
         return str(data or "")

@@ -31,17 +31,30 @@ camelCase(auditId, loggedAt) 가 아니라 snake_case 다. 둘 다 받는다.
 바깥 행위자가 앞이다). 다른 클레임은 남기지 않는다 (P53 F0 3번). 수집기는 행위자마다 `sub` 만,
 상한까지 잘라 남긴다(`delegation_chain`).
 
-알려진 유실: 파드별 커서는 마지막으로 본 이벤트 시각이고 pods/log 는 since_seconds(초 단위) 로만
-자르므로 몇 초를 겹쳐 읽고 id 로 중복을 뺀다. 파드가 재시작되면(uid 변경) 처음부터 다시
-읽지만, 이전 파드의 마지막 폴링 이후 줄과 kubelet 로그 로테이션으로 밀려난 줄은 잃는다.
-한 번에 읽는 양은 max_bytes(기본 4 MiB) 까지다. 로그 수집기(Fluent Bit) 연동은 v2.
-push 할 주소를 받은 Agent 파드가 첫 push 없이 STARTUP_GRACE 안에 사라지면 그 줄도 잃는다.
+파드별 커서는 마지막으로 본 이벤트 시각이고 pods/log 는 since_seconds(초 단위) 로만 자르므로 몇
+초를 겹쳐 읽고 id 로 중복을 뺀다. 파드가 바뀌면(uid 변경) 새 파드를 처음부터 읽는다.
+
+사라지는 파드의 마지막 줄은 두 길로 줍는다. 폴링 사이에 `DRAIN_INTERVAL` 마다 도는 짧은 회차
+(`drain_once`)가 파드의 metadata 만 API 서버의 캐시에서 나열해 지워지는 중인 파드
+(deletionTimestamp)를 찾고, 그 파드만 커서부터 한 번 더 읽는다. 새 줄이 나오는 동안은 회차마다
+다시 읽고, 끝나야 할 때를 넘겨 남은 파드와 읽지 못한 파드, 나열이 실패한 클러스터는 다음 폴링까지
+둔다. 컨테이너만 다시 뜬
+파드(uid 는 같고 restartCount 가 늘었다)는 다음 폴링이 앞 컨테이너의 로그(`previous`)를 커서부터
+먼저 읽는다.
+
+알려진 유실: 지우기 시작한 뒤 `DRAIN_INTERVAL` 안에 사라진 파드(강제 삭제, 노드 유실 포함)의 마지막
+폴링 이후 줄, 지워지는 파드가 마지막으로 읽힌 뒤 끝날 때까지 쓴 줄, 짧은 회차가 건너뛴 클러스터나
+읽지 못해 두고 간 파드에서 다음 폴링 전에 사라진 줄, 폴링 사이에 컨테이너가 두 번 넘게 다시 떠
+kubelet 이 버린 로그의 줄, kubelet 로그 로테이션으로 밀려난 줄은 잃는다. 한 번에 읽는 양은
+max_bytes(기본 4 MiB) 까지다. 로그 수집기(Fluent Bit) 연동은 v2. push 할 주소를 받은 Agent 파드가 첫
+push 없이 STARTUP_GRACE 안에 `DRAIN_INTERVAL` 보다 빨리 사라지면 그 줄도 잃는다.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
 from functools import partial
@@ -77,6 +90,22 @@ PROXY_KINDS: frozenset[str] = frozenset({APP_MCPSERVER, "virtualmcpserver", "mcp
 NAME_LABEL = "toolhive-name"
 MAX_BYTES = 4 * 1024 * 1024
 OVERLAP_SECONDS = 5
+# 폴링 사이에 지워지는 중인 파드를 찾는 짧은 회차의 간격(초). 폴링 간격 이상이거나 0 이하면 짧은
+# 회차는 돌지 않는다
+DRAIN_INTERVAL = 2.0
+# 짧은 회차가 네임스페이스마다 나열하는 대상 수의 위 한도. 나열은 라벨 둘(프록시, Agent)에 한 번씩
+# 이라 네임스페이스마다 하면 회차에 2N 번이다. 4곳이면 8번이고 50곳이면 100번(초당 50번)이라,
+# 넘으면 클러스터 전체를 두 번 나열한다. 어느 쪽이든 resourceVersion=0 의 metadata 나열이다
+DRAIN_NAMESPACED_MAX = 4
+# 짧은 회차의 호출 하나의 시한(초)과 클러스터 하나가 한 회차에 쓸 수 있는 시간(초)
+DRAIN_CALL_TIMEOUT = 3.0
+DRAIN_BUDGET = 5.0
+# 짧은 회차가 한 파드를 읽지 못해도 되는 횟수. 채우면 다음 폴링까지 그 파드를 두고 간다
+DRAIN_ATTEMPTS = 2
+# 짧은 회차가 한 클러스터에서 함께 읽는 파드 수
+DRAIN_READS = 4
+# 지워지는 파드가 끝나야 할 때를 지나고도 짧은 회차가 더 읽어 주는 시간
+DRAIN_GRACE_MARGIN = timedelta(seconds=10)
 # 파드 하나의 묶음을 하나도 넣지 못한 연속 폴링 수. 넘으면 그 줄들을 건너뛰고 센다
 STUCK_ATTEMPTS = 3
 # agent 컨테이너가 뜬 뒤 첫 push 를 기다리는 시간. 런타임은 기동을 마친 뒤 인스턴스 토큰이
@@ -212,6 +241,7 @@ class AuditCollector:
         interval: float = 60.0,
         max_bytes: int = MAX_BYTES,
         overlap_seconds: int = OVERLAP_SECONDS,
+        drain_interval: float = DRAIN_INTERVAL,
     ):
         self.store = store
         self.instances = instances
@@ -236,6 +266,17 @@ class AuditCollector:
         self.interval = interval
         self.max_bytes = max_bytes
         self.overlap_seconds = overlap_seconds
+        self.drain_interval = drain_interval
+        # 마지막 폴링이 리스를 쥐고 읽은 대상. 짧은 회차가 이것으로 돈다 (리스를 못 쥐었으면 None)
+        self._targets: list[tuple[Any, str, dict[str, tuple[str, str]]]] | None = None
+        self._last_poll: float | None = None
+        # 짧은 회차가 다음 폴링까지 두고 가는 것: 파드 키 → 읽지 못한 횟수, 그리고 파드 나열이
+        # 실패했거나 시간을 넘긴 클러스터 id
+        self._drained: dict[str, int] = {}
+        self._drain_skip: set[str] = set()
+        # 리스를 확인하지 못했다는 로그를 이번 폴링 주기에 이미 남겼다
+        self._lease_warned = False
+        self.drains = 0
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
         self.runs = 0
@@ -286,31 +327,24 @@ class AuditCollector:
         now = now or utcnow()
         result: dict[str, Any] = {"namespaces": 0, "pods": 0, "events": 0, "errors": []}
         if not await self.lease.acquire(LEASE_NAME, now=now):
+            self._targets = None
             result["skipped"] = "lease"
             return result
         self.runs += 1
-        for cluster, namespace, names in await self.targets():
+        self._drained.clear()
+        self._drain_skip.clear()
+        self._lease_warned = False
+        self._targets = await self.targets()
+        for cluster, namespace, names in self._targets:
             try:
                 client = await run_in_threadpool(self.cluster_service.client_for, cluster)
             except ClusterUnreachable as e:
                 result["errors"].append(f"{cluster.name}: {e}")
                 continue
 
-            # 네임스페이스는 한 테넌트의 것이다(namespace_claimed). 맵에 없는 프록시(다른 테넌트가
-            # 연 허브 항목의 복제본 등)는 그 테넌트로 적고 id 는 비운다
-            owners = {tenant for tenant, _ in names.values()}
-            ns_tenant = next(iter(owners)) if len(owners) == 1 else None
-
-            def tenant_of(
-                pod: dict[str, Any], _names=names, _owner=ns_tenant
-            ) -> tuple[str | None, str | None]:
-                labels = (pod.get("metadata") or {}).get("labels") or {}
-                hit = _names.get(labels.get(NAME_LABEL, "")) or front_owner(labels)
-                return hit if hit else (_owner, None)
-
             try:
                 r = await self.collect_namespace(
-                    client, cluster.id, namespace, tenant_of=tenant_of, now=now
+                    client, cluster.id, namespace, tenant_of=_tenant_of(names), now=now
                 )
             except ClusterUnreachable as e:
                 result["errors"].append(f"{cluster.name}/{namespace}: {e}")
@@ -325,6 +359,171 @@ class AuditCollector:
             result["events"] += r["events"]
         self.last_result = result
         return result
+
+    async def drain_once(self, now: datetime | None = None) -> dict[str, Any]:
+        """폴링 사이의 짧은 회차. 마지막 폴링의 대상 네임스페이스에서 지워지는 중인 파드만 커서부터
+        읽는다. 그 파드가 사라지면 로그를 더 읽을 수 없기 때문이다. 이 레플리카가 리스를 아직 쥐고
+        있을 때만 돌고, 커서는 지우지 않는다(폴링이 지운다).
+
+        클러스터는 함께 돌고 저마다 `DRAIN_BUDGET` 초까지만 쓴다. 파드 나열이 실패했거나 그 시간을
+        넘긴 클러스터는 다음 폴링까지 건너뛴다. 느린 클러스터 하나가 다른 클러스터나 폴링을 늦추지
+        않는다."""
+        now = now or utcnow()
+        result: dict[str, Any] = {"pods": 0, "events": 0, "errors": 0}
+        if not self._targets:
+            return result
+        try:
+            held = await self.lease.held(LEASE_NAME, now=now)
+        except Exception as e:  # noqa: BLE001 - 저장소가 흔들리면 이 회차만 쉰다
+            if not self._lease_warned:
+                # 2초마다 남기지 않는다. 폴링이 다시 돌 때까지 한 번이다
+                self._lease_warned = True
+                logger.warning("audit short pass: lease check failed: %s", error_kind(e))
+            result["errors"] += 1
+            return result
+        if not held:
+            self._targets = None
+            return result
+        self.drains += 1
+        by_cluster: dict[str, tuple[Any, dict[str, dict[str, tuple[str, str]]]]] = {}
+        for cluster, namespace, names in self._targets:
+            if cluster.id not in self._drain_skip:
+                by_cluster.setdefault(cluster.id, (cluster, {}))[1][namespace] = names
+        todo = list(by_cluster.values())
+        outcomes = await asyncio.gather(
+            *(self._drain_cluster(cluster, namespaces, now) for cluster, namespaces in todo),
+            return_exceptions=True,
+        )
+        for (cluster, _), outcome in zip(todo, outcomes, strict=True):
+            if isinstance(outcome, Exception):
+                # 건너뛰므로 폴링 주기마다 클러스터에 한 번만 남는다. 403 도 여기서 보인다
+                self._drain_skip.add(cluster.id)
+                logger.warning(
+                    "audit short pass %s: %s, skipped until the next poll",
+                    cluster.name,
+                    error_kind(outcome),
+                )
+                result["errors"] += 1
+            elif isinstance(outcome, BaseException):
+                raise outcome
+            else:
+                result["pods"] += outcome[0]
+                result["events"] += outcome[1]
+        return result
+
+    async def _drain_cluster(
+        self, cluster: Any, namespaces: dict[str, dict[str, tuple[str, str]]], now: datetime
+    ) -> tuple[int, int]:
+        """한 클러스터의 지워지는 중인 파드를 읽는다. (읽은 파드 수, 새로 넣은 이벤트 수). 파드
+        나열의 실패와 시한 초과만 올린다(그 클러스터를 건너뛴다). 파드 하나의 실패는 올리지 않는다.
+
+        지워지는 파드는 끝날 때까지 회차마다 읽는다. 지우기 시작할 때 처리하던 호출의 줄은 몇 초
+        뒤에 쓰이기 때문이다. 끝나야 할 때(deletionTimestamp, 지우기를 요청한 때에 유예 시간을
+        더한 값)에서 `DRAIN_GRACE_MARGIN` 이 지나도 남은 파드(죽은 노드, finalizer)와
+        `DRAIN_ATTEMPTS` 번 읽지 못한 파드는 다음 폴링에 맡긴다. 읽기는 `DRAIN_READS` 개씩 함께
+        돌고, 늦게 지우기 시작한 파드가 먼저다. 이 클러스터의 시간이 다 되면 남은 읽기는 버린다."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + DRAIN_BUDGET
+
+        async def find() -> tuple[KubeClient, list[tuple[str, dict[str, Any], bool]]]:
+            client = await run_in_threadpool(self.cluster_service.client_for, cluster)
+            found = [
+                (ns, pod, True)
+                for ns, pods in (
+                    await self._terminating(client, {"toolhive": "true"}, namespaces)
+                ).items()
+                for pod in pods
+            ]
+            if self.telemetry is not None:
+                agents = await self._terminating(
+                    client, {LABEL_RESOURCE: AGENT_RESOURCE}, namespaces
+                )
+                found += [(ns, pod, False) for ns, pods in agents.items() for pod in pods]
+            return client, found
+
+        client, found = await asyncio.wait_for(find(), DRAIN_BUDGET)
+        due: list[tuple[datetime, str, str, dict[str, Any], bool]] = []
+        for namespace, pod, is_proxy in found:
+            meta = pod.get("metadata") or {}
+            ends = parse_iso_utc(meta.get("deletionTimestamp"))
+            key = f"{cluster.id}/{namespace}/{meta.get('name')}"
+            if not meta.get("name") or ends is None or now > ends + DRAIN_GRACE_MARGIN:
+                continue
+            if self._drained.get(key, 0) < DRAIN_ATTEMPTS:
+                due.append((ends, key, namespace, pod, is_proxy))
+        due.sort(key=lambda d: (self._drained.get(d[1], 0), -d[0].timestamp(), d[1]))
+        gate = asyncio.Semaphore(DRAIN_READS)
+
+        async def read(key: str, namespace: str, pod: dict[str, Any], is_proxy: bool):
+            async with gate:
+                try:
+                    r = await asyncio.wait_for(
+                        self._collect(
+                            client,
+                            cluster.id,
+                            namespace,
+                            [pod] if is_proxy else [],
+                            [] if is_proxy else [pod],
+                            set(),
+                            now,
+                            tenant_of=_tenant_of(namespaces[namespace]),
+                            read_timeout=DRAIN_CALL_TIMEOUT,
+                        ),
+                        DRAIN_CALL_TIMEOUT + 1,
+                    )
+                except asyncio.CancelledError:
+                    # 이 클러스터의 시간이 다 돼 끊긴 읽기도 읽지 못한 것으로 센다
+                    self._drained[key] = self._drained.get(key, 0) + 1
+                    raise
+                except Exception:  # noqa: BLE001 - 파드 하나의 실패는 그 파드의 횟수로만 센다
+                    r = {"pods": 0, "events": 0}
+                if r["pods"] == 0:
+                    self._drained[key] = self._drained.get(key, 0) + 1
+                return r["pods"], r["events"]
+
+        tasks = [asyncio.create_task(read(*d[1:])) for d in due]
+        pods = events = 0
+        try:
+            if tasks:
+                done, _ = await asyncio.wait(tasks, timeout=max(0.0, deadline - loop.time()))
+                for task in done:
+                    pods += task.result()[0]
+                    events += task.result()[1]
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+        return pods, events
+
+    @staticmethod
+    async def _terminating(
+        client: KubeClient, labels: dict[str, str], namespaces: dict[str, Any]
+    ) -> dict[str, list[dict[str, Any]]]:
+        """대상 네임스페이스에서 라벨이 맞고 지워지는 중인 파드를 네임스페이스별로 모은다. metadata
+        만, API 서버의 캐시에서 받는다. 대상이 `DRAIN_NAMESPACED_MAX` 곳까지면 네임스페이스마다
+        나열하고, 넘으면 클러스터 전체를 한 번 나열해 호출 수가 네임스페이스 수를 따라 늘지 않게
+        한다."""
+        scopes: list[str | None] = (
+            sorted(namespaces) if len(namespaces) <= DRAIN_NAMESPACED_MAX else [None]
+        )
+        out: dict[str, list[dict[str, Any]]] = {}
+        for scope in scopes:
+            listed = await run_in_threadpool(
+                partial(
+                    client.list_metadata,
+                    "v1",
+                    "Pod",
+                    scope,
+                    labels=labels,
+                    cached=True,
+                    timeout=DRAIN_CALL_TIMEOUT,
+                )
+            )
+            for pod in listed:
+                meta = pod.get("metadata") or {}
+                if meta.get("deletionTimestamp") and meta.get("namespace") in namespaces:
+                    out.setdefault(meta["namespace"], []).append(pod)
+        return out
 
     async def _collect_pods(
         self,
@@ -342,6 +541,7 @@ class AuditCollector:
         save_retry: Callable[[list[dict[str, Any]]], Awaitable[int]] | None = None,
         pushing: frozenset[str] = frozenset(),
         settling: frozenset[str] = frozenset(),
+        read_timeout: float | None = None,
     ) -> tuple[int, int]:
         """파드 목록을 커서부터 읽어 저장한다. (읽은 파드 수, 새로 넣은 이벤트 수).
 
@@ -363,7 +563,9 @@ class AuditCollector:
                 key = f"{cluster_id}/{namespace}/{meta['name']}"
                 seen.add(key)
                 if meta["uid"] in pushing:
-                    await self.store.set_cursor(key, since=now, pod_uid=meta["uid"])
+                    await self.store.set_cursor(
+                        key, since=now, pod_uid=meta["uid"], restarts=_restarts(pod, container)
+                    )
                 continue
             extra = stamp(pod, labels)
             if extra is None or not self._has_logs(pod):
@@ -371,12 +573,20 @@ class AuditCollector:
             name = meta["name"]
             try:
                 text, since, uid = await self._read(
-                    client, cluster_id, namespace, pod, seen, now, container=container
+                    client,
+                    cluster_id,
+                    namespace,
+                    pod,
+                    seen,
+                    now,
+                    container=container,
+                    timeout=read_timeout,
                 )
             except Exception as e:  # noqa: BLE001 - 파드 하나의 실패가 다른 파드의 수집을 막지 않는다
                 logger.warning("collector: could not read pod %s: %s", name, error_kind(e))
                 continue
             docs, last_ts = parse(text, uid or name)
+            restarts = _restarts(pod, container)
             for d in docs:
                 d.update(
                     cluster_id=cluster_id, namespace=namespace, pod=name, collected_at=now, **extra
@@ -398,7 +608,7 @@ class AuditCollector:
                 events += saved
                 self.bad_lines += bad
             self._stuck.pop(key, None)
-            await self._advance(cluster_id, namespace, name, uid, since, last_ts, now)
+            await self._advance(cluster_id, namespace, name, uid, since, last_ts, now, restarts)
             read += 1
         return read, events
 
@@ -415,6 +625,34 @@ class AuditCollector:
         두 종류의 합이고 agent_pods·agent_events 가 그중 에이전트 몫이다."""
         now = now or utcnow()
         seen: set[str] = set()
+        agent_pods = await run_in_threadpool(
+            client.list, "v1", "Pod", namespace, {LABEL_RESOURCE: AGENT_RESOURCE}
+        )
+        proxy_pods = await run_in_threadpool(
+            client.list, "v1", "Pod", namespace, {"toolhive": "true"}
+        )
+        result = await self._collect(
+            client, cluster_id, namespace, proxy_pods, agent_pods, seen, now, tenant_of=tenant_of
+        )
+        await self.store.delete_cursors_except(f"{cluster_id}/{namespace}/", seen)
+        return result
+
+    async def _collect(
+        self,
+        client: KubeClient,
+        cluster_id: str,
+        namespace: str,
+        proxy_pods: list[dict[str, Any]],
+        agent_pods: list[dict[str, Any]],
+        seen: set[str],
+        now: datetime,
+        *,
+        tenant_of: TenantOf | None = None,
+        read_timeout: float | None = None,
+    ) -> dict[str, int]:
+        """받은 프록시 파드와 에이전트 파드를 읽어 저장한다. 폴링과 짧은 회차가 같이 쓴다.
+        read_timeout 은 로그 읽기 하나의 시한이다(없으면 클라이언트의 기본값). 짧은 회차는 metadata
+        만 받은 파드를 넘기므로 첫 push 를 기다리는 파드로 걸러지지 않는다."""
 
         def proxy_stamp(pod: dict[str, Any], labels: dict[str, str]) -> dict[str, Any] | None:
             kind = labels.get(PROXY_LABEL)
@@ -423,9 +661,6 @@ class AuditCollector:
             tenant, instance_id = tenant_of(pod) if tenant_of else (None, None)
             return {"tenant": tenant, "instance_id": instance_id, "proxy_kind": kind}
 
-        agent_pods = await run_in_threadpool(
-            client.list, "v1", "Pod", namespace, {LABEL_RESOURCE: AGENT_RESOURCE}
-        )
         pushing = await self._pushing(agent_pods, now)
         settling = self._settling(agent_pods, pushing, now)
 
@@ -441,13 +676,14 @@ class AuditCollector:
             client,
             cluster_id,
             namespace,
-            await run_in_threadpool(client.list, "v1", "Pod", namespace, {"toolhive": "true"}),
+            proxy_pods,
             seen,
             now,
             container=None,
             parse=lambda text, _salt: parse_audit_log(text),
             save=self.store.add_mcp_events,
             stamp=proxy_stamp,
+            read_timeout=read_timeout,
             # 실패한 묶음이 이미 넣은 문서도 다시 셀 시간으로 적는다 (P51 3절)
             save_retry=partial(self.store.add_mcp_events, mark_all=True),
         )
@@ -462,10 +698,10 @@ class AuditCollector:
             parse=lambda text, salt: parse_agent_log(text, salt=salt),
             save=self._save_agent_events,
             stamp=agent_stamp,
+            read_timeout=read_timeout,
             pushing=pushing,
             settling=settling,
         )
-        await self.store.delete_cursors_except(f"{cluster_id}/{namespace}/", seen)
         return {
             "pods": total_pods + agent_read,
             "events": total_events + agent_events,
@@ -530,8 +766,12 @@ class AuditCollector:
         now: datetime,
         *,
         container: str | None = None,
+        timeout: float | None = None,
     ) -> tuple[str, datetime | None, str | None]:
-        """커서부터(겹침 포함) 파드 로그를 읽는다. (본문, 커서 시각, 파드 uid)."""
+        """커서부터(겹침 포함) 파드 로그를 읽는다. (본문, 커서 시각, 파드 uid). 커서를 둔 뒤
+        컨테이너가 다시 떴으면 앞 컨테이너의 로그를 같은 자리부터 먼저 읽어 앞에 붙인다. 그 로그가
+        이미 없으면 빈 문자열이 오고, 다른 실패는 올린다. 그러면 커서도 재시작 수도 그대로라 다음
+        읽기가 다시 해 본다."""
         meta = pod.get("metadata") or {}
         name = meta["name"]
         key = f"{cluster_id}/{namespace}/{name}"
@@ -546,15 +786,22 @@ class AuditCollector:
             if since is None
             else max(1, int((now - since).total_seconds()) + self.overlap_seconds)
         )
-        text = await run_in_threadpool(
+        read = partial(
             client.pod_log,
             name,
             namespace,
             since_seconds=since_seconds,
             container=container,
             limit_bytes=self.max_bytes,
+            timeout=timeout,
         )
-        return text, since, uid
+        before = ""
+        restarts = _restarts(pod, container)
+        known = cursor.get("restarts") if cursor and since is not None else None
+        if known is not None and restarts is not None and restarts > known:
+            before = await run_in_threadpool(partial(read, previous=True))
+        text = await run_in_threadpool(read)
+        return (f"{before}\n{text}" if before else text), since, uid
 
     async def _advance(
         self,
@@ -565,21 +812,32 @@ class AuditCollector:
         since: datetime | None,
         last_ts: datetime | None,
         now: datetime,
+        restarts: int | None = None,
     ) -> None:
-        """마지막 이벤트 시각(없으면 이번 폴링 시각)을 커서로. 겹치는 몇 초는 id 가 거른다."""
+        """마지막 이벤트 시각(없으면 이번 폴링 시각)을 커서로. 겹치는 몇 초는 id 가 거른다.
+        restarts 는 읽은 때의 컨테이너 재시작 수다. 상태 없이 읽었으면(None) 적힌 값을 둔다."""
         new_since = last_ts or since or now
         if last_ts is not None and since is not None and last_ts < since:
             new_since = since
         await self.store.set_cursor(
-            f"{cluster_id}/{namespace}/{name}", since=new_since, pod_uid=uid
+            f"{cluster_id}/{namespace}/{name}", since=new_since, pod_uid=uid, restarts=restarts
         )
 
     # -- 루프 -----------------------------------------------------------------------
 
+    async def _tick(self) -> None:
+        """폴링 간격이 지났으면 폴링을, 아니면 짧은 회차를 돈다."""
+        if self._last_poll is None or time.monotonic() - self._last_poll >= self.interval:
+            self._last_poll = time.monotonic()
+            await self.run_once()
+        else:
+            await self.drain_once()
+
     async def _loop(self) -> None:
+        draining = 0 < self.drain_interval < self.interval
         await run_periodic(
-            self.run_once,
-            interval=self.interval,
+            self._tick if draining else self.run_once,
+            interval=self.drain_interval if draining else self.interval,
             stop=self._stop,
             log=logger,
             label="audit collector loop",
@@ -596,6 +854,34 @@ class AuditCollector:
         await cancel_task(self._task)
         self._task = None
         await self.lease.release(LEASE_NAME)
+
+
+def _tenant_of(names: dict[str, tuple[str, str]]) -> TenantOf:
+    """네임스페이스의 파드에서 (테넌트, 문서 id) 를 찾는 함수. 네임스페이스는 한 테넌트의 것이다
+    (namespace_claimed). 맵에 없는 프록시(다른 테넌트가 연 허브 항목의 복제본 등)는 그 테넌트로 적고
+    id 는 비운다."""
+    owners = {tenant for tenant, _ in names.values()}
+    ns_tenant = next(iter(owners)) if len(owners) == 1 else None
+
+    def tenant_of(pod: dict[str, Any]) -> tuple[str | None, str | None]:
+        labels = (pod.get("metadata") or {}).get("labels") or {}
+        hit = names.get(labels.get(NAME_LABEL, "")) or front_owner(labels)
+        return hit if hit else (ns_tenant, None)
+
+    return tenant_of
+
+
+def _restarts(pod: dict[str, Any], container: str | None) -> int | None:
+    """읽는 컨테이너의 재시작 수. 이름을 받았으면 사이드카가 있어도 그 컨테이너의 것이고, 없으면
+    컨테이너가 하나인 파드의 것이다. 상태가 없거나(metadata 만 받은 파드) 고를 수 없으면 None
+    이다."""
+    statuses = (pod.get("status") or {}).get("containerStatuses") or []
+    if container:
+        statuses = [s for s in statuses if s.get("name") == container]
+    if len(statuses) != 1:
+        return None
+    count = statuses[0].get("restartCount")
+    return count if isinstance(count, int) else None
 
 
 async def _save_each(

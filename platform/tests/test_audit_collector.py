@@ -10,7 +10,11 @@ import json
 from datetime import timedelta
 from typing import Any
 
+from daegam.services import audit_collector as collector_module
 from daegam.services.audit_collector import (
+    DRAIN_ATTEMPTS,
+    DRAIN_CALL_TIMEOUT,
+    DRAIN_NAMESPACED_MAX,
     LEASE_NAME,
     MAX_DELEGATION_CHAIN,
     MAX_DELEGATION_SUB,
@@ -22,6 +26,7 @@ from daegam.services.audit_collector import (
     parse_ts,
 )
 from daegam.store.base import utcnow
+from daegam.store.leases import LEASES
 from tests.helpers.agent_runtime import deployed_agent
 from tests.helpers.consts import DEFAULT_NS, TENANT_HEADER
 from tests.helpers.mcp_servers import clone_and_deploy, mcp_server_env
@@ -548,3 +553,388 @@ def test_a_vmcp_front_pod_is_written_to_its_mcp_server(client, fake_clusters, mo
     assert (f1["tenant"], f1["instance_id"]) == ("default", inst["id"])
     assert f1["proxy_kind"] == "virtualmcpserver"
     assert mongo["mcp_audit_events"].find_one({"_id": "o1"})["instance_id"] is None
+
+
+# -- 사라지는 파드와 다시 뜬 컨테이너 ----------------------------------------------------
+
+
+def _terminate(fake, name: str) -> None:
+    fake.objects[("v1", "Pod", DEFAULT_NS, name)]["metadata"]["deletionTimestamp"] = _iso(utcnow())
+
+
+def test_a_terminating_proxy_pod_is_read_between_polls(client, fake_clusters, mongo):
+    """폴링 사이에 지워지기 시작한 파드는 짧은 회차가 커서부터 한 번 더 읽는다. 살아 있는 파드는
+    읽지 않고, 같은 줄을 두 번 넣지 않는다."""
+    inst, fake = _instance_with_proxy(client, fake_clusters)
+    pod = "mcp-calc-1-7f9-abc"
+    now = utcnow()
+    fake.add_pod_log(DEFAULT_NS, pod, _event("e1", _iso(now - timedelta(seconds=20))), ts=now)
+    col = audit_collector(client)
+    assert client.portal.call(col.drain_once) == {"pods": 0, "events": 0, "errors": 0}
+    assert fake.log_reads == []  # 폴링이 리스를 쥐기 전에는 돌지 않는다
+    assert client.portal.call(col.run_once)["events"] == 1
+
+    # 마지막 폴링 뒤에 쓴 줄. 파드가 살아 있는 동안은 다음 폴링의 몫이다
+    fake.add_pod_log(DEFAULT_NS, pod, _event("e2", _iso(now + timedelta(seconds=1))), ts=now)
+    assert client.portal.call(col.drain_once) == {"pods": 0, "events": 0, "errors": 0}
+    assert len(fake.log_reads) == 1
+
+    fake.add_pod(DEFAULT_NS, "mcp-calc-1-8a1-new", PROXY_LABELS, uid="uid-2")
+    _terminate(fake, pod)
+    assert client.portal.call(col.drain_once) == {"pods": 1, "events": 1, "errors": 0}
+    # 커서부터만 읽었고 새 파드는 건드리지 않았다
+    assert fake.log_reads[-1][1] == pod and fake.log_reads[-1][2] is not None
+    assert len(fake.log_reads) == 2
+    row = mongo["mcp_audit_events"].find_one({"_id": "e2"})
+    assert row["tenant"] == "default" and row["instance_id"] == inst["id"] and row["pod"] == pod
+
+    # 파드가 남아 있으면 다음 회차와 폴링이 다시 읽지만 줄은 늘지 않는다
+    fake.add_pod_log(DEFAULT_NS, pod, _event("e3", _iso(now + timedelta(seconds=2))), ts=now)
+    assert client.portal.call(col.drain_once)["events"] == 1
+    assert client.portal.call(col.drain_once)["events"] == 0
+    assert client.portal.call(col.run_once)["events"] == 0
+    assert mongo["mcp_audit_events"].count_documents({}) == 3
+    # 짧은 회차는 커서를 지우지 않는다. 사라진 파드의 커서는 폴링이 지운다
+    key = f"{inst['cluster_id']}/{DEFAULT_NS}/{pod}"
+    assert mongo["audit_cursors"].find_one({"_id": key}) is not None
+    del fake.objects[("v1", "Pod", DEFAULT_NS, pod)]
+    client.portal.call(col.drain_once)
+    assert mongo["audit_cursors"].find_one({"_id": key}) is not None
+    client.portal.call(col.run_once)
+    assert mongo["audit_cursors"].find_one({"_id": key}) is None
+
+
+def test_the_short_pass_stops_without_the_lease_and_survives_a_failure(
+    client, fake_clusters, mongo
+):
+    _inst, fake = _instance_with_proxy(client, fake_clusters)
+    pod = "mcp-calc-1-7f9-abc"
+    fake.add_pod_log(DEFAULT_NS, pod, _event("e1", _iso(utcnow())))
+    holder = audit_collector(client, holder="pod-a")
+    other = audit_collector(client, holder="pod-b")
+    assert client.portal.call(holder.run_once)["events"] == 1
+    assert client.portal.call(other.run_once) == {
+        "namespaces": 0,
+        "pods": 0,
+        "events": 0,
+        "errors": [],
+        "skipped": "lease",
+    }
+    fake.add_pod_log(DEFAULT_NS, pod, _event("e2", _iso(utcnow())))
+    _terminate(fake, pod)
+    assert client.portal.call(other.drain_once) == {"pods": 0, "events": 0, "errors": 0}
+    fake.unreachable = True
+    assert client.portal.call(holder.drain_once) == {"pods": 0, "events": 0, "errors": 1}
+    # 실패한 클러스터는 다음 폴링까지 건너뛴다. 폴링이 그 줄을 읽는다
+    fake.unreachable = False
+    lists = len(fake.pod_metadata_lists)
+    assert client.portal.call(holder.drain_once) == {"pods": 0, "events": 0, "errors": 0}
+    assert len(fake.pod_metadata_lists) == lists
+    assert client.portal.call(holder.run_once)["events"] == 1
+    assert client.portal.call(holder.drain_once) == {"pods": 1, "events": 0, "errors": 0}
+
+
+def test_a_restarted_container_is_read_from_its_previous_log(client, fake_clusters, mongo):
+    """컨테이너만 다시 뜬 파드는 uid 가 같다. 앞 컨테이너가 마지막 폴링 뒤에 쓴 줄을 그 로그에서
+    커서부터 읽고, 이미 넣은 줄은 다시 넣지 않는다."""
+    inst, fake = _instance_with_proxy(client, fake_clusters)
+    pod = "mcp-calc-1-7f9-abc"
+    fake.set_status(
+        "v1",
+        "Pod",
+        pod,
+        DEFAULT_NS,
+        {"phase": "Running", "containerStatuses": [{"name": "mcp", "restartCount": 0}]},
+    )
+    now = utcnow()
+    fake.add_pod_log(DEFAULT_NS, pod, _event("e1", _iso(now - timedelta(seconds=20))), ts=now)
+    col = audit_collector(client)
+    assert client.portal.call(col.run_once)["events"] == 1
+    key = f"{inst['cluster_id']}/{DEFAULT_NS}/{pod}"
+    assert mongo["audit_cursors"].find_one({"_id": key})["restarts"] == 0
+    assert fake.previous_log_reads == []
+
+    fake.add_pod_log(DEFAULT_NS, pod, _event("e2", _iso(now + timedelta(seconds=1))), ts=now)
+    fake.restart_pod_container(DEFAULT_NS, pod)
+    fake.add_pod_log(DEFAULT_NS, pod, _event("e3", _iso(now + timedelta(seconds=2))), ts=now)
+    assert client.portal.call(col.run_once)["events"] == 2
+    assert [r["_id"] for r in mongo["mcp_audit_events"].find().sort("ts", 1)] == ["e1", "e2", "e3"]
+    assert len(fake.previous_log_reads) == 1 and fake.previous_log_reads[0][2] is not None
+    assert mongo["audit_cursors"].find_one({"_id": key})["restarts"] == 1
+
+    # 재시작 수가 그대로면 앞 로그를 다시 읽지 않는다
+    assert client.portal.call(col.run_once)["events"] == 0
+    assert len(fake.previous_log_reads) == 1
+    # kubelet 이 앞 로그를 버렸어도 지금 컨테이너의 줄은 들어간다
+    fake.restart_pod_container(DEFAULT_NS, pod)
+    del fake.previous_pod_logs[(DEFAULT_NS, pod)]
+    fake.add_pod_log(DEFAULT_NS, pod, _event("e4", _iso(now + timedelta(seconds=3))), ts=now)
+    assert client.portal.call(col.run_once)["events"] == 1
+    assert mongo["mcp_audit_events"].count_documents({}) == 4
+
+
+def test_a_terminating_agent_pod_is_read_before_its_first_push(client, fake_clusters, mongo):
+    """첫 push 를 기다리던 Agent 파드가 지워지기 시작하면 더 기다리지 않고 로그를 읽는다."""
+    agent = deployed_agent(client, fake_clusters, mongo, runtime=False)
+    fake = agent.fake
+    labels = {
+        "daegam.devops.ai.kr/resource": "agent-instance",
+        "daegam.devops.ai.kr/id": agent.id,
+        "daegam.devops.ai.kr/tenant": "default",
+    }
+    pod = fake.add_pod(DEFAULT_NS, "agent-support-7f9-abc", labels, uid="uid-1")
+    pod["spec"] = {"containers": [{"name": "agent", "env": [{"name": "DAEGAM_EVENTS_URL"}]}]}
+    pod["status"]["containerStatuses"] = [
+        {"name": "agent", "restartCount": 0, "state": {"running": {"startedAt": _iso(utcnow())}}}
+    ]
+    fake.add_pod_log(DEFAULT_NS, "agent-support-7f9-abc", AGENT_TOOL_CALL)
+    col = audit_collector(client, agents=client.app.state.agents)
+    assert client.portal.call(col.run_once)["pods"] == 0  # 첫 push 를 기다린다
+    _terminate(fake, "agent-support-7f9-abc")
+    assert client.portal.call(col.drain_once) == {"pods": 1, "events": 1, "errors": 0}
+    assert client.portal.call(col.drain_once)["events"] == 0
+    assert mongo["agent_events"].count_documents({}) == 1
+
+
+def test_the_loop_polls_at_its_interval_and_runs_short_passes_between(client, monkeypatch):
+    col = audit_collector(client, interval=60.0)
+    calls: list[str] = []
+
+    async def poll():
+        calls.append("poll")
+
+    async def drain():
+        calls.append("drain")
+
+    monkeypatch.setattr(col, "run_once", poll)
+    monkeypatch.setattr(col, "drain_once", drain)
+    client.portal.call(col._tick)
+    client.portal.call(col._tick)
+    col._last_poll -= 61  # 폴링 간격이 지났다
+    client.portal.call(col._tick)
+    client.portal.call(col._tick)
+    assert calls == ["poll", "drain", "poll", "drain"]
+
+
+def test_the_short_pass_lists_cached_metadata_in_the_target_namespaces(
+    client, fake_clusters, mongo
+):
+    """짧은 회차의 나열은 대상 네임스페이스의 metadata 를 캐시에서 받는다. 대상이 많으면 클러스터
+    전체를 한 번 나열해 호출 수가 네임스페이스 수를 따라 늘지 않는다."""
+    _inst, fake = _instance_with_proxy(client, fake_clusters)
+    col = audit_collector(client)
+    client.portal.call(col.run_once)
+    assert fake.pod_metadata_lists == []  # 폴링은 파드를 통째로 나열한다
+    client.portal.call(col.drain_once)
+    assert fake.pod_metadata_lists == [
+        (DEFAULT_NS, {"toolhive": "true"}, True, DRAIN_CALL_TIMEOUT),
+        (DEFAULT_NS, {"daegam.devops.ai.kr/resource": "agent-instance"}, True, DRAIN_CALL_TIMEOUT),
+    ]
+
+    fake.pod_metadata_lists.clear()
+    many = {f"ns-{i}": {} for i in range(DRAIN_NAMESPACED_MAX + 1)}
+    client.portal.call(col._terminating, fake, {"toolhive": "true"}, many)
+    assert [scope for scope, *_ in fake.pod_metadata_lists] == [None]
+    fake.pod_metadata_lists.clear()
+    many.popitem()
+    client.portal.call(col._terminating, fake, {"toolhive": "true"}, many)
+    assert [scope for scope, *_ in fake.pod_metadata_lists] == sorted(many)
+
+
+def _terminate_at(fake, name: str, ends) -> None:
+    fake.objects[("v1", "Pod", DEFAULT_NS, name)]["metadata"]["deletionTimestamp"] = _iso(ends)
+
+
+def test_a_terminating_pod_is_read_on_every_short_pass_until_it_should_be_gone(
+    client, fake_clusters, mongo
+):
+    """지우기 시작할 때 처리하던 호출의 줄은 몇 초 뒤에 쓰인다. 새 줄이 없던 회차 뒤에도 계속 읽고,
+    끝나야 할 때에서 여유 시간이 지나도 남은 파드(finalizer, 죽은 노드)만 폴링에 맡긴다."""
+    _inst, fake = _instance_with_proxy(client, fake_clusters)
+    pod = "mcp-calc-1-7f9-abc"
+    col = audit_collector(client)
+    client.portal.call(col.run_once)
+    now = utcnow()
+    _terminate_at(fake, pod, now + timedelta(seconds=30))
+    fake.log_reads.clear()
+    for _ in range(3):
+        assert client.portal.call(col.drain_once) == {"pods": 1, "events": 0, "errors": 0}
+    fake.add_pod_log(DEFAULT_NS, pod, _event("in-flight", _iso(utcnow())))
+    assert client.portal.call(col.drain_once) == {"pods": 1, "events": 1, "errors": 0}
+    assert len(fake.log_reads) == 4
+
+    _terminate_at(fake, pod, now - collector_module.DRAIN_GRACE_MARGIN - timedelta(seconds=1))
+    fake.add_pod_log(DEFAULT_NS, pod, _event("stuck", _iso(utcnow())))
+    assert client.portal.call(col.drain_once) == {"pods": 0, "events": 0, "errors": 0}
+    assert len(fake.log_reads) == 4
+    assert client.portal.call(col.run_once)["events"] == 1  # 폴링은 읽는다
+
+
+def test_pods_that_cannot_be_read_do_not_stop_the_others_or_the_cluster(
+    client, fake_clusters, mongo, monkeypatch
+):
+    """죽은 노드의 파드는 읽기가 시한까지 걸려 실패한다. 그런 파드가 클러스터의 시간을 다 써도 늦게
+    지우기 시작한 성한 파드는 읽히고, 클러스터는 건너뛰지 않는다. 읽지 못한 파드는
+    `DRAIN_ATTEMPTS` 번까지만 읽는다."""
+    import time
+
+    _inst, fake = _instance_with_proxy(client, fake_clusters)
+    healthy = "mcp-calc-1-7f9-abc"
+    dead = [f"mcp-calc-1-dead-{i:02d}" for i in range(12)]
+    for name in dead:
+        fake.add_pod(DEFAULT_NS, name, PROXY_LABELS)
+    col = audit_collector(client)
+    client.portal.call(col.run_once)
+    now = utcnow()
+    for name in dead:
+        _terminate_at(fake, name, now - timedelta(seconds=5))
+    _terminate_at(fake, healthy, now + timedelta(seconds=30))
+    fake.failing_pod_logs.update(dead)
+    fake.pod_log_failure_delay = 0.3
+    fake.add_pod_log(DEFAULT_NS, healthy, _event("healthy", _iso(utcnow())))
+    # 12 개를 4 개씩 0.3 초면 0.9 초라 0.5 초의 시간을 넘긴다
+    monkeypatch.setattr(collector_module, "DRAIN_BUDGET", 0.5)
+    fake.log_reads.clear()
+    started = time.monotonic()
+    assert client.portal.call(col.drain_once) == {"pods": 1, "events": 1, "errors": 0}
+    assert time.monotonic() - started < 0.85
+    assert len(fake.log_reads) < 1 + len(dead)  # 시간이 다 돼 남은 읽기를 버렸다
+
+    lists = len(fake.pod_metadata_lists)
+    for _ in range(DRAIN_ATTEMPTS + 4):
+        assert client.portal.call(col.drain_once)["errors"] == 0
+    assert len(fake.pod_metadata_lists) > lists  # 클러스터는 계속 본다
+    reads = [name for _ns, name, _since in fake.log_reads]
+    assert all(reads.count(name) <= DRAIN_ATTEMPTS for name in dead)
+    settled = len(reads)
+    client.portal.call(col.drain_once)
+    assert len(fake.log_reads) == settled + 1  # 성한 파드만 읽는다
+
+
+def test_a_failed_lease_check_is_logged_once_per_poll_period(
+    client, fake_clusters, mongo, monkeypatch, caplog
+):
+    _inst, _fake = _instance_with_proxy(client, fake_clusters)
+    col = audit_collector(client)
+    client.portal.call(col.run_once)
+
+    async def broken(*_a, **_kw):
+        raise RuntimeError("store down")
+
+    held = col.lease.held
+    monkeypatch.setattr(col.lease, "held", broken)
+    with caplog.at_level("WARNING", logger="daegam.audit.collector"):
+        for _ in range(3):
+            assert client.portal.call(col.drain_once) == {"pods": 0, "events": 0, "errors": 1}
+        assert len([r for r in caplog.records if "lease check failed" in r.message]) == 1
+        monkeypatch.setattr(col.lease, "held", held)
+        client.portal.call(col.run_once)
+        monkeypatch.setattr(col.lease, "held", broken)
+        client.portal.call(col.drain_once)
+        assert len([r for r in caplog.records if "lease check failed" in r.message]) == 2
+
+
+def test_a_slow_cluster_is_cut_off_and_does_not_hold_the_others(
+    client, fake_clusters, mongo, monkeypatch
+):
+    """클러스터마다 한 회차에 쓸 시간이 정해져 있다. 넘긴 클러스터는 다음 폴링까지 건너뛰고, 그동안
+    다른 클러스터의 지워지는 파드는 읽힌다."""
+    import time
+    from types import SimpleNamespace
+
+    class Stub:
+        def __init__(self, delay: float):
+            self.delay = delay
+            self.lists = 0
+
+        def list_metadata(self, _av, _kind, namespace, **_kw):
+            self.lists += 1
+            time.sleep(self.delay)
+            meta = {
+                "name": "mcp-x-1",
+                "namespace": "ns-x",
+                "uid": "uid-x",
+                "labels": PROXY_LABELS,
+                "deletionTimestamp": _iso(utcnow()),
+            }
+            return [{"metadata": meta}] if _kw["labels"] == {"toolhive": "true"} else []
+
+        def pod_log(self, *_a, **_kw):
+            return _event("from-ok", _iso(utcnow()))
+
+    stubs = {"c-slow": Stub(0.6), "c-ok": Stub(0.0)}
+    col = audit_collector(client)
+    client.portal.call(col.run_once)  # 리스를 쥔다
+    monkeypatch.setattr(collector_module, "DRAIN_BUDGET", 0.2)
+    monkeypatch.setattr(col, "cluster_service", SimpleNamespace(client_for=lambda c: stubs[c.id]))
+    col._targets = [(SimpleNamespace(id=cid, name=cid), "ns-x", {}) for cid in ("c-slow", "c-ok")]
+    started = time.monotonic()
+    assert client.portal.call(col.drain_once) == {"pods": 1, "events": 1, "errors": 1}
+    assert time.monotonic() - started < 0.5
+    assert mongo["mcp_audit_events"].find_one({"_id": "from-ok"})["cluster_id"] == "c-ok"
+    # 느린 클러스터는 다음 폴링까지 부르지 않는다
+    time.sleep(0.6)
+    lists = stubs["c-slow"].lists
+    assert client.portal.call(col.drain_once)["errors"] == 0
+    assert stubs["c-slow"].lists == lists
+
+
+def test_the_short_pass_stops_when_another_replica_took_the_lease(client, fake_clusters, mongo):
+    _inst, fake = _instance_with_proxy(client, fake_clusters)
+    col = audit_collector(client, holder="pod-a")
+    client.portal.call(col.run_once)
+    _terminate(fake, "mcp-calc-1-7f9-abc")
+    mongo[LEASES].update_one({"_id": LEASE_NAME}, {"$set": {"holder": "pod-b"}})
+    assert client.portal.call(col.drain_once) == {"pods": 0, "events": 0, "errors": 0}
+    assert fake.pod_metadata_lists == [] and fake.log_reads[1:] == []
+
+
+def test_a_failed_previous_log_read_is_retried(client, fake_clusters, mongo):
+    """앞 컨테이너의 로그를 읽지 못하면(없다는 답이 아닌 실패) 재시작 수를 적지 않는다. 다음 읽기가
+    그 로그를 다시 읽는다."""
+    inst, fake = _instance_with_proxy(client, fake_clusters)
+    pod = "mcp-calc-1-7f9-abc"
+    fake.set_status(
+        "v1",
+        "Pod",
+        pod,
+        DEFAULT_NS,
+        {"phase": "Running", "containerStatuses": [{"name": "mcp", "restartCount": 0}]},
+    )
+    now = utcnow()
+    col = audit_collector(client)
+    client.portal.call(col.run_once)
+    fake.add_pod_log(DEFAULT_NS, pod, _event("old", _iso(now + timedelta(seconds=1))), ts=now)
+    fake.restart_pod_container(DEFAULT_NS, pod)
+    fake.add_pod_log(DEFAULT_NS, pod, _event("new", _iso(now + timedelta(seconds=2))), ts=now)
+    key = f"{inst['cluster_id']}/{DEFAULT_NS}/{pod}"
+
+    fake.previous_log_fails = True
+    assert client.portal.call(col.run_once) == {
+        "namespaces": 1,
+        "pods": 0,
+        "events": 0,
+        "errors": [],
+    }
+    assert mongo["audit_cursors"].find_one({"_id": key})["restarts"] == 0
+    fake.previous_log_fails = False
+    assert client.portal.call(col.run_once)["events"] == 2
+    assert mongo["audit_cursors"].find_one({"_id": key})["restarts"] == 1
+    assert mongo["mcp_audit_events"].count_documents({"_id": {"$in": ["old", "new"]}}) == 2
+
+
+def test_restart_count_of_the_container_that_is_read():
+    restarts = collector_module._restarts
+    pod = {
+        "metadata": {},
+        "status": {
+            "containerStatuses": [
+                {"name": "agent", "restartCount": 2},
+                {"name": "sidecar", "restartCount": 7},
+            ]
+        },
+    }
+    assert restarts(pod, "agent") == 2
+    assert restarts(pod, "sidecar") == 7
+    assert restarts(pod, None) is None  # 어느 컨테이너를 읽는지 모른다
+    assert restarts({"metadata": {"name": "p"}}, "agent") is None
