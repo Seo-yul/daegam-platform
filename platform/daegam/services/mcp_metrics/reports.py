@@ -31,6 +31,7 @@ from daegam.audit.mcp_metrics import (
 )
 from daegam.audit.store import MCP_PROMPT_GET, MCP_RESOURCE_READ, MCP_TOOL_CALL
 from daegam.k8s.gates import Feature, passing_features
+from daegam.k8s.templates.vmcp import CODE_MODE_TOOL
 from daegam.services.advertised_names import advertised_tools, advertised_tools_of
 from daegam.services.data_plane_auth import KIND_GATEWAY, missed_gates
 from daegam.services.mcp_metrics.rollup import counted_from
@@ -83,10 +84,15 @@ class McpMetricsReports:
         return out
 
     async def gateway(self, doc: Gateway, *, window: str, tz: str) -> dict[str, Any]:
-        """Gateway 하나의 메트릭. 이름은 배포 스냅샷이 광고하는 Tool 이고 백엔드별 행이 더 있다."""
+        """Gateway 하나의 메트릭. 이름은 배포 스냅샷이 광고하는 Tool 이고 백엔드별 행이 더 있다.
+        도는 렌더가 code mode 를 실었으면(`Gateway.code_mode_applied`) 스크립트 Tool 도 이름에
+        든다. 스크립트 하나는 vMCP 감사에 그 이름의 호출 한 건으로 남기 때문이다(P56 6.6절). 이름이
+        없으면 이름 없는 행에 든다."""
         if (hit := self._cache.get((doc.id, window, tz))) is not None:
             return hit
         names = set(advertised_tools(doc)) if doc.deployed_revision is not None else set()
+        if doc.code_mode_applied:
+            names.add(CODE_MODE_TOOL)
         snapshot = {b.workload: b for b in doc.deployed_backends}
         out = await self._report(doc.id, window, tz, names, backends=snapshot)
         out["source"]["audit"] = await self._gateway_audit(doc)

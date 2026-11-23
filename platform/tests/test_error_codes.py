@@ -29,6 +29,12 @@ REACHED_BY_VARIABLE = {
     "validation_error": "FastAPI 의 검증 응답을 부르는 이름",
     "rule_names_unknown_tool": "services/tool_rules.py check_rule_keys(code=)",
     "rule_names_unknown_gateway_tool": "services/tool_rules.py check_rule_keys(code=)",
+    "code_mode_exposed": "services/gateway_code_mode.py CodeModeVerdict.error",
+    "code_mode_not_read_only": "services/gateway_code_mode.py CodeModeVerdict.error",
+    "code_mode_owner_cedar": "services/gateway_code_mode.py CodeModeVerdict.error",
+    "code_mode_reserved_name": "services/gateway_code_mode.py CodeModeVerdict.error",
+    "code_mode_unknown_names": "services/gateway_code_mode.py CodeModeVerdict.error",
+    "code_mode_toolhive_old": "services/gateway_code_mode.py toolhive_refusal",
 }
 
 

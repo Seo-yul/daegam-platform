@@ -40,6 +40,8 @@ CTX="${KUBE_CONTEXT:-k3d-daegam}"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/daegam-f0-p54.XXXXXX")"
 # F0 도구의 포트. lib/e2e_ports.sh 의 표에 없는 자리이고 F0 도구와 함께 사라진다
 API_PORT="${E2E_API_PORT:-19090}"; OIDC_PORT="${E2E_OIDC_PORT:-19091}"
+# vMCP 앞단의 /api/backends/health 를 읽는 port-forward 의 로컬 포트(front_lists_echo)
+HEALTH_PORT="${E2E_FRONT_HEALTH_PORT:-19100}"
 TENANT="${F0_TENANT:-f0-front}"
 OTHER="${F0_OTHER_TENANT:-f0-front-x}"
 MCP_CLIENT_NAME="daegam-f0-p54"
@@ -59,9 +61,12 @@ S3_HOST="f0-s3.e2e.local"; S3_PROBE_HOST="f0-s3-probe.e2e.local"
 MCP_GROUP="mcp-$TENANT"; T_GROUP="daegam-$TENANT"
 SPIKE_URL="http://mcp-calculator-proxy.${SPIKE_NS}.svc.cluster.local:8080/mcp"
 NS=""; S1_ID=""; S1_K8S=""
+PF_HEALTH=""   # front_lists_echo 가 여는 상태 port-forward 의 루프 pid. 신호로 끝나도 정리가 닫는다
 
 cleanup() {
   f0_restore_mode
+  # stop_pf 는 WORK 의 pid·멈춤 파일을 쓰므로 WORK 를 지우기 전에 닫는다
+  stop_pf "$PF_HEALTH" "$HEALTH_PORT"
   rm -rf "$WORK"
 }
 on_exit cleanup
@@ -289,6 +294,15 @@ f0_1_rows() {
   f0_block "F0.1 $mode" "$F0_OUT/f0.1-$mode-compare.md"
   # 프록시 앞단이 허용 토큰으로 답하지 않았으면 두 앞단이 같이 실패해도 "같다" 로 읽히므로 멈춘다
   [ "$rc" = 0 ] || die "F0.1-$mode" "the proxy front did not answer the allowed token (BASELINE INVALID above)"
+  # vMCP 앞단이 Tool 을 프록시 앞단과 다르게 알리면 Tool 에 기대는 행(목록 항목, 호출, 30초 넘는 호출, 거절된 호출)은 앞단을
+  # 재지 못한 것이다. 그 원인을 읽을 진단을 남기고 실패로 센다. 다른 모드의 행은 이어서 잰다
+  local want got
+  want="$(tool_names "$F0_OUT/f0.1-$mode-proxy.json")"
+  got="$(tool_names "$F0_OUT/f0.1-$mode-vmcp.json")"
+  if [ "$got" != "$want" ]; then
+    vmcp_diag "F0.1 $mode" "$NS" "front-$S1_K8S" "app.kubernetes.io/instance=$S1_K8S"
+    record_fail "F0.1-$mode" "the vMCP front lists [$got], the proxy front [$want]; see diag-front-$S1_K8S.txt"
+  fi
 }
 
 # rebuild_front STEP -> 모드를 바꾼 뒤 플랫폼이 다시 렌더한 프록시 앞단을 기다리고 그것으로 vMCP 앞단을 다시 만든다.
@@ -344,10 +358,67 @@ f0_1_oidc() {
   f0_restore_mode
 }
 
+# front_lists_echo STEP HOST OUT VMCP -> 시험 Ingress HOST 로 vMCP 앞단(NS 의 VMCP)이 echo 를 알릴 때까지 5초 간격으로
+# 12번 본다. 마지막 목록을 FRONT_TOOLS 에 남기고 echo 가 있으면 0 이다. 새 vMCP 파드의 첫 상태 확인이 실패하면 ToolHive
+# 0.53 은 그 백엔드를 다음 확인(30초 뒤)까지 라우팅하지 않으므로, 바꾸기 전에 백엔드가 라우팅될 때까지 기다린다. 시도마다
+# 목록과 함께 status.discoveredBackends(30초마다 쓰는 사본)와 vMCP 의 /api/backends/health(라우팅이 읽는 실시간 상태)를
+# 결과 줄로 남긴다. B1 의 바꾸기 조건(실시간 상태의 healthy·degraded, P54 6절)이 실제 라우팅과 맞는지 그 줄로 본다
+front_lists_echo() {
+  local step="$1" host="$2" out="$3" vmcp="$4" i rc=1
+  FRONT_TOOLS=""
+  # 시험 Ingress 는 노출 경로(/mcp, /.well-known)만 잇는다. 상태 경로는 vMCP Service 를 port-forward 해 읽는다
+  start_pf "$NS" "svc/vmcp-$vmcp" "${HEALTH_PORT}:4483"; PF_HEALTH="$PF_PID"
+  wait_port "$HEALTH_PORT" 10 || true
+  for ((i = 1; i <= 12; i++)); do
+    # 지난 시도의 파일이 남아 있으면 이번 시도가 실패해도 그 목록을 읽는다
+    rm -f "$out"
+    f0_tool probe --url "http://$host/mcp" --ip "$LB_IP" --rows session --out "$out" >/dev/null 2>&1 || true
+    FRONT_TOOLS="$(tool_names "$out")"
+    f0_note "$step" "try $i of 12: vMCP front lists [$FRONT_TOOLS]; status.discoveredBackends $(front_backends "$vmcp"); /api/backends/health $(front_live_health)"
+    case " $FRONT_TOOLS " in *" echo "*) rc=0; break ;; esac
+    [ "$i" = 12 ] || sleep 5
+  done
+  stop_pf "$PF_HEALTH" "$HEALTH_PORT"; PF_HEALTH=""
+  return "$rc"
+}
+
+# front_live_health -> port-forward 한 vMCP 앞단의 GET /api/backends/health 에서 백엔드마다 "이름=상태 failures=N
+# check=시각 error=분류" 를 찍는다. 읽지 못하거나 모양이 다르면(Status 가 없거나 문자열이 아닌 값) 그렇다고 찍고 받은
+# 키를 보인다. 실제 상태처럼 보이는 값을 지어내지 않는다. curl 이 실패하면 port-forward 를 다시 붙여, 갈아 끼운 파드에
+# 묶인 채 끊긴 것(curl 52 등)이 다음 시도까지 살아나게 한다. f0_redact 를 거친다
+front_live_health() {
+  local raw rc=0
+  raw="$(curl -sS --max-time 3 "http://127.0.0.1:$HEALTH_PORT/api/backends/health" 2>&1)" || rc=$?
+  [ "$rc" = 0 ] || restart_pf "$HEALTH_PORT"
+  printf '%s' "$raw" | python3 -c 'import json, sys
+raw = sys.stdin.read()
+try:
+    d = json.loads(raw)
+    rows = []
+    for name, s in sorted((d.get("backends") or {}).items()):
+        status = s.get("Status") if isinstance(s, dict) else None
+        if isinstance(status, str) and status:
+            rows.append("%s=%s failures=%s check=%s error=%s" % (name, status, s.get("ConsecutiveFailures"),
+                        str(s.get("LastCheckTime") or "-")[:19], s.get("LastErrorCategory") or "-"))
+        else:
+            shape = sorted(s) if isinstance(s, dict) else type(s).__name__
+            rows.append("%s=no Status, got %s" % (name, shape))
+    print("; ".join(rows) if rows else "monitoring_enabled=%s, no backends" % d.get("monitoring_enabled"))
+except Exception as e:
+    print("unreadable (%s): %s" % (type(e).__name__, " ".join(raw.split())[:160]))' | f0_redact
+}
+
+# front_backends VMCP -> NS 의 VirtualMCPServer VMCP 의 status.discoveredBackends 를 "이름=상태" 로 찍는다
+front_backends() {
+  "${K[@]}" -n "$NS" get virtualmcpserver "$1" \
+    -o jsonpath='{range .status.discoveredBackends[*]}{.name}={.status} {end}' 2>/dev/null || echo "unreadable"
+}
+
 # ---------- F0.2 ----------
 
 f0_2() {
   local k8s url code_blocked code_open code_proxy switch_at deleted_at proxy_svc policy rc=0 i name_old name_new
+  local dropped cut since
   measured_server F0.2 f0-handover "$(exposure_tls "$S2_HOST" "$CERT_MANAGER_TLS")"
   k8s="$MS_K8S"; url="https://$S2_HOST/mcp"
   cert_ready F0.2 "$MS_ID"
@@ -369,6 +440,14 @@ f0_2() {
   code_open="$(traefik_status "http://$S2_PROBE_HOST/mcp" 24)"
   # 옛 앞단과 새 앞단은 initialize 의 serverInfo.name 으로 가른다(loop, lag). 둘이 같으면 라우팅 지연을 잴 수 없다
   name_new="$(server_name "http://$S2_PROBE_HOST/mcp")"
+  # 두 kind 를 고르는 정책 아래에서도 시험 Ingress 로 닿지 않으면 아래의 목록 확인이 아무것도 읽지 못한다
+  [ "$code_open" = 200 ] \
+    || die F0.2 "the vMCP front does not answer through Traefik with the both-kinds policy (proxy-only policy -> $code_blocked, both-kinds policy -> $code_open)"
+  # 루프가 부르는 echo 를 vMCP 앞단이 바꾸기 전에 알려야 바꾼 뒤의 실패를 넘김의 실패로 읽을 수 있다
+  if ! front_lists_echo F0.2 "$S2_PROBE_HOST" "$F0_OUT/f0.2-front-before.json" "front-$k8s"; then
+    vmcp_diag F0.2 "$NS" "front-$k8s" "app.kubernetes.io/instance=$k8s"
+    die F0.2 "the vMCP front does not list echo in 12 tries before the switch, so the handover cannot be measured; see diag-front-$k8s.txt"
+  fi
   policy="$("${K[@]}" -n "$NS" get networkpolicy "f0-expose-both-$k8s" -o jsonpath='{.spec.podSelector}')"
   "${K[@]}" -n "$NS" delete networkpolicy "daegam-expose-$k8s" >/dev/null
   sleep 5
@@ -398,7 +477,30 @@ f0_2() {
   sleep 30
   f0_loop_stop "$WORK" f0.2 "$switch_at" "$deleted_at" || rc=$?
   f0_block F0.2 "$F0_OUT/lag-f0.2.txt"
-  [ "$rc" = 0 ] || die F0.2 "the call loop has no successful call before the switch (BASELINE INVALID above)"
+  [ "$rc" != 3 ] || die F0.2 "the call loop has no successful call before the switch (BASELINE INVALID above)"
+  [ "$rc" = 0 ] || die F0.2 "the lag summary of the call loop failed (exit $rc), so the switch cannot be judged"
+  # 12절의 막대(404, 503, 끊긴 호출)는 바꾼 뒤에 시작해 새 앞단에서 연 세션의 실패만 본다(f0_tool lag 의 dropped).
+  # 바꾸기 전의 실패와 바꾸기에 걸친 세션의 404 는 F0.3 과 릴리스 노트의 몫이다. 하나라도 있으면 진단을 남기고 실패로 센다
+  dropped="$(sed -n 's/^dropped calls after the switch: \([0-9][0-9]*\).*/\1/p' "$F0_OUT/lag-f0.2.txt" | head -n 1)"
+  [ -n "$dropped" ] || die F0.2 "lag-f0.2.txt has no 'dropped calls after the switch' line"
+  if [ "$dropped" != 0 ]; then
+    vmcp_diag F0.2 "$NS" "front-$k8s" "app.kubernetes.io/instance=$k8s"
+    record_fail F0.2 "$dropped calls dropped after the switch (lag-f0.2.txt)"
+  fi
+  # 바꾼 때 옛 앞단에서 연 세션의 호출이 답을 받지 못했거나 5xx 를 받은 것도 막대가 보는 끊긴 호출이다(lag 의 cut).
+  # 옛 앞단 쪽의 실패라 vMCP 진단 대신 Traefik 의 로그 끝을 남긴다
+  cut="$(sed -n 's/^calls cut at the switch: \([0-9][0-9]*\).*/\1/p' "$F0_OUT/lag-f0.2.txt" | head -n 1)"
+  [ -n "$cut" ] || die F0.2 "lag-f0.2.txt has no 'calls cut at the switch' line"
+  if [ "$cut" != 0 ]; then
+    # 워크플로가 Traefik 의 접근 로그를 켠다(머리는 빼고). 바꾸기 5초 전부터 300줄로, 바꾼 때 앞뒤의 요청이 어느 백엔드로
+    # 갔고 어떻게 끝났는지 본다. 루프는 세션마다 요청을 몇 개씩 보내므로 로그 끝만 보면 바꾼 때가 빠진다
+    since="$(python3 -c 'import datetime, sys
+print(datetime.datetime.fromtimestamp(float(sys.argv[1]) - 5, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))' "$switch_at")"
+    "${K[@]}" -n "$TRAEFIK_NS" logs "deploy/$TRAEFIK_SVC" --since-time="$since" 2>&1 | head -n 300 | f0_redact \
+      >"$F0_OUT/diag-traefik.txt" || true
+    f0_block F0.2 "$F0_OUT/diag-traefik.txt"
+    record_fail F0.2 "$cut calls cut at the switch (lag-f0.2.txt, diag-traefik.txt)"
+  fi
   cert_state "$k8s" "$S2_HOST" >"$F0_OUT/f0.2-cert-after.txt"
   f0_block "F0.2 before" "$F0_OUT/f0.2-cert-before.txt"
   f0_block "F0.2 after" "$F0_OUT/f0.2-cert-after.txt"
@@ -438,6 +540,11 @@ f0_3() {
     [ -n "$new" ] && break
     sleep 5
   done
+  # 새 세션의 호출은 vMCP 앞단이 백엔드를 라우팅할 때만 SDK 의 동작을 잰다. F0.2 처럼 바꾸기 전에 echo 를 기다린다
+  if ! front_lists_echo F0.3 "$S3_PROBE_HOST" "$F0_OUT/f0.3-front-before.json" "front-$k8s"; then
+    vmcp_diag F0.3 "$NS" "front-$k8s" "app.kubernetes.io/instance=$k8s"
+    die F0.3 "the vMCP front does not list echo in 12 tries before the switch, so the new session cannot be measured; see diag-front-$k8s.txt"
+  fi
   "${K[@]}" -n "$NS" delete ingress "f0-probe-$k8s" >/dev/null
   f0_note F0.3 "serverInfo.name: proxy front '$old', vMCP front '$new'"
   { [ -n "$new" ] && [ "$new" != "$old" ]; } \
@@ -469,6 +576,11 @@ f0_3() {
   [ "$(json_of "$F0_OUT/f0.3-session.json" 'next((s.get("ok") for s in d["steps"] if s["step"] == "call before the switch"), False)')" = True ] \
     || die F0.3 "the session's call before the switch failed, so the steps after it say nothing about the switch"
   f0_note F0.3 "session opened on the proxy front (serverInfo $old); after the switch Traefik answered as $name; the same session called three times, then a new session"
+  # 새 세션의 호출이 실패하면 그것은 SDK 의 동작이 아니라 vMCP 앞단의 실패다. 진단을 남기고 실패로 센다
+  if [ "$(json_of "$F0_OUT/f0.3-session.json" 'next((s.get("ok") for s in d["steps"] if s["step"] == "new session: call"), False)')" != True ]; then
+    vmcp_diag F0.3 "$NS" "front-$k8s" "app.kubernetes.io/instance=$k8s"
+    record_fail F0.3 "a new session on the vMCP front could not call echo, so the vMCP front itself failed; see diag-front-$k8s.txt"
+  fi
 }
 
 # ---------- F1 ----------
@@ -677,13 +789,15 @@ case "$mode" in
     f0_server_up F0
     f0_rest_backend F0 f0-rest
     for item in "${items[@]}"; do
+      before="$FAILED"
       case "$item" in
         f0.1) f0_1_header; f0_1_local; f0_header_connect F0.1; f0_1_oidc; f0_header_connect F0.1 ;;
         f0.2) f0_2 ;;
         f0.3) f0_3 ;;
         *) die F0 "unknown item $item (f0.1 f0.2 f0.3)" ;;
       esac
-      pass "$(tr '[:lower:]' '[:upper:]' <<<"$item")" "results in $F0_OUT"
+      # 항목 안에서 실패로 센 행(record_fail)이 있으면 PASS 를 찍지 않는다. 종료 코드는 finish 가 정한다
+      [ "$FAILED" != "$before" ] || pass "$(tr '[:lower:]' '[:upper:]' <<<"$item")" "results in $F0_OUT"
     done
     ;;
   f1)

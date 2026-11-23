@@ -87,6 +87,8 @@ class GatewayBody(BaseModel):
     runtime: GatewayRuntime = Field(default_factory=GatewayRuntime)
     # resources·prompts 를 내보일지 (P50 13절). POST 에서 없으면 둘 다 끄고 PUT 에서 없으면 그대로다
     surface: GatewaySurface | None = None
+    # code mode (P56 6.2절). POST 에서 없으면 끄고 PUT 에서 없으면 그대로다
+    code_mode: bool | None = None
 
 
 class GatewayBasicPatch(BaseModel):
@@ -120,12 +122,16 @@ class PublishBody(BaseModel):
 
 def _spec(body: GatewayBody, current: GatewaySpec | None = None) -> GatewaySpec:
     """본문의 정의. surface 를 보내지 않으면 PUT 은 저장된 값을 그대로 두고, POST 는 둘 다 끈다.
-    그래야 표면을 모르는 클라이언트의 저장이 열린 표면을 닫지 않는다. backend 가 timeout_seconds 를
-    보내지 않으면 PUT 은 같은 허브 항목의 저장된 값을 그대로 둔다."""
+    그래야 표면을 모르는 클라이언트의 저장이 열린 표면을 닫지 않는다. code_mode 도 같다. backend 가
+    timeout_seconds 를 보내지 않으면 PUT 은 같은 허브 항목의 저장된 값을 그대로 둔다."""
     if body.surface is not None:
         surface: GatewaySurface = body.surface
     else:
         surface = current.surface if current is not None else GatewaySurface()
+    if body.code_mode is not None:
+        code_mode = body.code_mode
+    else:
+        code_mode = current.code_mode if current is not None else False
     backends = body.backends
     if current is not None:
         # tool_rules 도 같다. 규칙을 모르는 클라이언트의 저장이 규칙을 지우지 않는다 (P52 1절)
@@ -150,6 +156,7 @@ def _spec(body: GatewayBody, current: GatewaySpec | None = None) -> GatewaySpec:
         authz_policy=body.authz_policy,
         runtime=body.runtime,
         surface=surface,
+        code_mode=code_mode,
     )
 
 

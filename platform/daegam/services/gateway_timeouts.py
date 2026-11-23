@@ -16,6 +16,8 @@ vMCP 는 백엔드(Entry)마다 `spec.config.operational.timeouts.perWorkload[<E
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 from daegam.store.base import TIMEOUT_MAX_SECONDS
 from daegam.store.gateways import GatewayBackendSnapshot
 from daegam.store.mcp_servers import MCP_DEFAULT_TIMEOUT_SECONDS, MCPServer
@@ -23,6 +25,8 @@ from daegam.store.mcp_servers import MCP_DEFAULT_TIMEOUT_SECONDS, MCPServer
 # Agent 런타임이 도구 호출에 거는 기본 타임아웃(초). agent-runtime/runtime/mcp.py 의
 # DEFAULT_TOOL_TIMEOUT_SECONDS 와 같다
 AGENT_TOOL_TIMEOUT_SECONDS = 60
+# code mode 의 스크립트 하나가 도는 ToolHive 의 고정된 1분 (P56 6.4절)
+SCRIPT_MINUTE_SECONDS = 60
 # 내부 항목의 기본값이 MCP Server 의 backend 타임아웃 위에 두는 틈(초)
 INTERNAL_MARGIN_SECONDS = 5
 
@@ -48,6 +52,13 @@ def snapshot_timeout(backend: GatewayBackendSnapshot) -> int:
 def per_workload(backends: list[GatewayBackendSnapshot]) -> dict[str, str]:
     """vMCP `operational.timeouts.perWorkload`. 키는 Entry 이름이고 값은 Go duration 글이다."""
     return {b.workload: f"{snapshot_timeout(b)}s" for b in backends}
+
+
+def call_timeout(backends: Iterable[GatewayBackendSnapshot]) -> str:
+    """code mode 의 `toolCallTimeout` (P56 6.4절). Gateway 의 가장 긴 백엔드 타임아웃이고 스크립트
+    하나가 도는 ToolHive 의 고정된 1분을 넘지 않는다. 더 크게 적어도 안쪽 호출은 그 1분 안이다."""
+    seconds = max((snapshot_timeout(b) for b in backends), default=SCRIPT_MINUTE_SECONDS)
+    return f"{min(seconds, SCRIPT_MINUTE_SECONDS)}s"
 
 
 def rendered_timeouts(

@@ -1,10 +1,11 @@
-"""P54·P54b F0 의 시험 서버. scripts/f0 의 다른 파일과 함께 F0 측정 동안만 둔다.
+"""P54·P54b·P56 F0 의 시험 서버. scripts/f0 의 다른 파일과 함께 F0 측정 동안만 둔다.
 
 플랫폼 이미지(fastmcp·uvicorn 이 든 venv)에 ConfigMap 으로 얹어 돈다(scripts/f0/lib.sh 의
 f0_server_up). 한 프로세스가 두 포트를 연다. 클러스터 밖의 서버를 흉내 내는 자리라 인증이 없다.
 
   :8080  /mcp        streamable HTTP MCP. Tool add·echo·slow·fail, 리소스 f0://note, 프롬프트 greet
-         /rest/...   P54 F0.1 의 MCP Server(mcp-runtime)가 부르는 REST 백엔드 echo·slow·fail
+         /rest/...   MCP Server(mcp-runtime)가 부르는 REST 백엔드. echo·slow·fail(P54 F0.1),
+                     big(P56 F0.6)
          /healthz
   :8081  /sse        같은 MCP 서버의 SSE 전송 (P54b F0.4)
 
@@ -30,6 +31,8 @@ HTTP_PORT = 8080
 SSE_PORT = 8081
 # slow 가 기다리는 상한(초). 호출이 클러스터 안에 오래 남지 않게 한다
 MAX_SLOW_SECONDS = 120.0
+# big 이 내는 글의 상한(KiB). P56 F0.6 은 1 MiB 결과 열 개를 부른다
+MAX_BIG_KIB = 4096
 
 mcp = FastMCP("daegam-f0")
 
@@ -90,6 +93,16 @@ async def rest_slow(request: Request) -> JSONResponse:
     return JSONResponse({"slept": seconds})
 
 
+@mcp.custom_route("/rest/big", methods=["GET"])
+async def rest_big(request: Request) -> JSONResponse:
+    try:
+        kib = int(request.query_params.get("kib", "1"))
+    except ValueError:
+        kib = 1
+    kib = min(max(kib, 0), MAX_BIG_KIB)
+    return JSONResponse({"kib": kib, "data": "x" * (kib * 1024)})
+
+
 @mcp.custom_route("/rest/fail", methods=["GET"])
 async def rest_fail(request: Request) -> JSONResponse:
     return JSONResponse({"error": "f0 backend failure"}, status_code=500)
@@ -101,7 +114,8 @@ async def healthz(request: Request) -> JSONResponse:
 
 
 def rest_spec(base_url: str) -> dict[str, Any]:
-    """REST 백엔드의 OpenAPI 3. operationId 가 mcp-runtime 의 Tool 이름(echo·slow·fail)이 된다."""
+    """REST 백엔드의 OpenAPI 3. operationId 가 mcp-runtime 의 Tool 이름(echo·slow·fail·big)이 된다.
+    모두 GET 이라 mcp-runtime 이 readOnlyHint 를 단다."""
 
     def query(name: str, kind: str) -> dict[str, Any]:
         return {"name": name, "in": "query", "required": True, "schema": {"type": kind}}
@@ -135,6 +149,14 @@ def rest_spec(base_url: str) -> dict[str, Any]:
             },
             "/rest/fail": {
                 "get": {"operationId": "fail", "summary": "Always answer 500", "responses": ok}
+            },
+            "/rest/big": {
+                "get": {
+                    "operationId": "big",
+                    "summary": "Answer with kib KiB of text",
+                    "parameters": [query("kib", "integer")],
+                    "responses": ok,
+                }
             },
         },
     }

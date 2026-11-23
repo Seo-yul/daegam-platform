@@ -15,10 +15,18 @@ from daegam.auth.principal import Principal
 from daegam.config.resolve import image_digest
 from daegam.errors import ServiceError
 from daegam.k8s.templates.vmcp import CODE_MODE_TOOL
+from daegam.services.advertised_names import plan_conflicts
 from daegam.services.cedar_check import CedarCheckUnavailable, parse_statements
+from daegam.services.gateway_code_mode import (
+    CodeModeVerdict,
+    code_mode_verdict,
+    toolhive_refusal,
+)
 from daegam.services.gateway_plan import (
+    backend_snapshot_of,
     entry_name,
     priority_unknown_warning,
+    spec_of_revision,
     tool_names_of,
     unknown_names_hint,
 )
@@ -26,7 +34,7 @@ from daegam.services.hub import HubService, proxied
 from daegam.services.platform_tools import check_backends, require_same_cluster
 from daegam.services.published_backends import owner_forbids, published_source
 from daegam.services.rule_compile import source_forbids
-from daegam.services.tool_effects import ToolEffectLoader
+from daegam.services.tool_effects import SourceTools, ToolEffectLoader, without_script
 from daegam.services.tool_pins import PINNED_AGENTS_KEEP_TOOLS, pin_states, pins_behind
 from daegam.services.tool_rules import (
     ToolRuleError,
@@ -36,8 +44,10 @@ from daegam.services.tool_rules import (
     check_rule_keys,
     gateway_rule_keys,
 )
+from daegam.services.turn_gates import owner_cedar
 from daegam.store.agents import Agent, MongoAgentStore
-from daegam.store.gateways import Gateway, GatewaySpec, MongoGatewayStore
+from daegam.store.clusters import Cluster
+from daegam.store.gateways import Gateway, GatewayRevision, GatewaySpec, MongoGatewayStore
 from daegam.store.hub import PLATFORM_KIND, PUBLISHED_KIND, HubItem
 
 MAX_BACKENDS = 20  # 넘으면 경고 (vMCP 는 세션마다 백엔드 전부에 tools/list 를 보낸다)
@@ -256,6 +266,79 @@ class GatewayValidator:
                 "be pinned",
                 hub_item_id=item.id,
             )
+
+    # -- code mode (P56 6.2절) -----------------------------------------------------------
+
+    async def definition_sample(
+        self,
+        sample_id: str,
+        tenant: str,
+        name: str,
+        rev: GatewayRevision,
+        items: dict[str, HubItem],
+    ) -> Gateway:
+        """저장 때 code mode 판정이 읽는 스냅샷. 배포 스냅샷과 같은 행(`backend_snapshot_of`)과
+        충돌 계획으로 짓고, 클러스터의 상태(URL, Ready)는 읽지 않는다. 판정은 그것을 보지 않는다."""
+        resolved = await self.hub.resolve_origins(list(items.values()))
+        snapshots = [
+            backend_snapshot_of(
+                name,
+                b,
+                items[b.hub_item_id],
+                resolved,
+                tenant=tenant,
+                error_cls=self.error_cls,
+            )
+            for b in rev.backends
+        ]
+        sample = Gateway(
+            id=sample_id,
+            tenant=tenant,
+            name=name,
+            spec=spec_of_revision(rev),
+            revision=rev.revision,
+            revisions=[rev],
+            deployed_revision=rev.revision,
+            deployed_backends=snapshots,
+        )
+        sample.deployed_conflict_resolution, sample.tool_overrides, _warnings = plan_conflicts(
+            snapshots, rev.conflict_resolution
+        )
+        return sample
+
+    async def code_mode_verdict(
+        self, doc: Gateway, sample: Gateway
+    ) -> tuple[CodeModeVerdict, SourceTools]:
+        """(판정, 그 판정이 읽은 광고 이름과 효과). sample 은 판정할 스냅샷이고, 노출과 소유자
+        Cedar 는 doc 에서 읽는다(배포·재배포는 메모리에 얹은 새 노출을 읽는다). 이 Gateway 가 자기
+        렌더로 내는 스크립트는 빼고 판정한다(`without_script`)."""
+        tools = without_script((await self.tool_effects.load({sample.id: sample}, {}))[sample.id])
+        found = code_mode_verdict(
+            tools,
+            exposed=doc.exposure.enabled,
+            owner_cedar=owner_cedar(doc),
+            unknown_backends=[
+                b.hub_item_name
+                for b in sample.deployed_backends
+                if not (b.exposed_names() or b.tools)
+            ],
+        )
+        return found, tools
+
+    async def require_code_mode(
+        self, doc: Gateway, sample: Gateway, *, cluster: Cluster | None = None
+    ) -> None:
+        """code mode 를 켠 리비전을 판정이 거절하면 422 다. sample 은 그 리비전을 배포할(또는
+        배포하는) 스냅샷이다. cluster 를 주면(배포·재배포) ToolHive 판도 본다."""
+        rev = sample.deployed
+        if rev is None or not rev.code_mode:
+            return
+        found, _tools = await self.code_mode_verdict(doc, sample)
+        if not found.ok:
+            raise self.error_cls(422, **found.error())
+        refusal = toolhive_refusal(cluster) if cluster is not None else None
+        if refusal is not None:
+            raise self.error_cls(422, **refusal)
 
     async def check_rules(
         self,

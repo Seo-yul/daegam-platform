@@ -286,6 +286,9 @@ def _local(
 # 비서가 고치지 않는 Tool 규칙 (P52 1절). 누가 부를지는 사람이 화면에서 정한다. 보내지 않은 규칙은
 # 저장된 것이 그대로 남으므로 비서의 정의 저장이 규칙을 지우지 않는다
 _RULE_FIELDS = ("backends.tool_rules",)
+# 비서가 아직 켜지 않는 Gateway 의 code mode (P56 6.2절). 화면이 켜는 A3 까지 감춘다. 보내지 않은
+# 칸은 저장된 값이 그대로 남는다(`api/gateways.py` `_spec`)
+_GATEWAY_HIDDEN = (*_RULE_FIELDS, "code_mode")
 # 배포 게이트를 건너뛰는 본문 칸 (P45 12절). 비서는 게이트를 건너뛰지 않으므로, 새 내용은 지난 평가
 # 실행이 있어야 비서의 배포 도구로 배포된다
 SKIP_EVALUATION = "skip_evaluation"
@@ -592,7 +595,7 @@ TOOLS: tuple[ToolSpec, ...] = (
         "write",
         "허브 항목을 묶어 Gateway 를 draft 로 만든다. 배포는 deploy_gateway 다.",
         kind="gateway",
-        hidden_fields=_RULE_FIELDS,
+        hidden_fields=_GATEWAY_HIDDEN,
     ),
     _t(
         "update_gateway",
@@ -601,7 +604,7 @@ TOOLS: tuple[ToolSpec, ...] = (
         "write",
         "Gateway 정의를 고쳐 새 리비전을 만든다. 배포 핀은 그대로다.",
         kind="gateway",
-        hidden_fields=_RULE_FIELDS,
+        hidden_fields=_GATEWAY_HIDDEN,
     ),
     _t(
         "clone_gateway",

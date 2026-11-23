@@ -39,7 +39,11 @@ def _marked_server(**rules: Any) -> SourceTools:
     return server_source(_server(tool_rules=rules).deployed, {("bp", 1): _version()})
 
 
-def _item(rules: dict[str, Any] | None = None, item_id: str = "hi-mail") -> HubItem:
+def _item(
+    rules: dict[str, Any] | None = None,
+    item_id: str = "hi-mail",
+    names: list[str] | None = None,
+) -> HubItem:
     return HubItem.model_validate(
         {
             "id": item_id,
@@ -49,7 +53,7 @@ def _item(rules: dict[str, Any] | None = None, item_id: str = "hi-mail") -> HubI
             "kind": "image",
             "cluster_id": "c1",
             "k8s": HubK8s(kind="MCPServer", name="mail", namespace="ns").model_dump(),
-            "tool_names": ["send_mail", "list_mail"],
+            "tool_names": names if names is not None else ["send_mail", "list_mail"],
             "tool_rules": rules or {},
         }
     )

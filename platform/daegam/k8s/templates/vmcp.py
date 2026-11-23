@@ -330,6 +330,7 @@ def render_vmcp(
     audit: bool = False,  # 감사 이벤트를 남긴다 (P50 4절). 게이트를 지난 클러스터에서만 켠다
     timeouts: dict[str, str] | None = None,  # Entry 이름 → 호출 타임아웃 (P50 7절)
     static_backends: dict[str, str] | None = None,  # Entry 이름 → 서비스 토큰 MCPExternalAuthConfig
+    code_mode: dict[str, Any] | None = None,  # spec.config.codeMode (P56 6.4절). 없으면 끈다
 ) -> dict[str, Any]:
     """VirtualMCPServer.
     priority 모드는 접두사 없이 backends 순으로 우선순위를 주고
@@ -389,6 +390,9 @@ def render_vmcp(
     }
     if audit:
         spec["config"]["audit"] = {"enabled": True, "eventTypes": list(VMCP_AUDIT_EVENT_TYPES)}
+    if code_mode is not None:
+        # 걸음 수와 동시 호출 수는 ToolHive 의 기본값을 두고 toolCallTimeout 만 적는다 (P56 6.4절)
+        spec["config"]["codeMode"] = dict(code_mode)
     # vMCP 이미지는 ToolHive 의 것이라 uid 를 정하지 않되 seccomp 는 파드 수준에서 닫는다. ToolHive
     # 는 spec.resources 를 읽지 않고 늘 기본값을 넣으므로 자원은 podTemplateSpec 의 vmcp 컨테이너에
     # 적는다. 리비전 값이 없으면 고정값이다(실측 33MiB 에 ToolHive 기본 128Mi 요청은 크다, D54)

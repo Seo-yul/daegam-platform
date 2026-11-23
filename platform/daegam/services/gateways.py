@@ -21,6 +21,7 @@ from starlette.concurrency import run_in_threadpool
 from daegam.audit.store import MongoAuditStore
 from daegam.auth.cedar import (
     GATEWAY_TARGET,
+    READ_ONLY_HINT_FORBID,
     consumer_forbid,
     consumer_tools_only,
     delegation_forbid,
@@ -33,7 +34,6 @@ from daegam.auth.hub_access import (
 from daegam.auth.principal import Principal
 from daegam.auth.rbac import ROLES_CLAIM
 from daegam.auth.rule_cedar import closing_forbid, consumer_clause, published_fence
-from daegam.auth.signer import FETCH_SERVER_ID, SEARCH_SERVER_ID
 from daegam.config.resolve import EffectiveConfig, ProfileRuntime, resolve_effective
 from daegam.errors import ServiceError
 from daegam.k8s.client import AccessDenied, ClusterUnreachable, KubeClient
@@ -66,7 +66,12 @@ from daegam.k8s.templates.svc_token import (
     render_external_auth_config,
     render_svc_token_secret,
 )
-from daegam.k8s.templates.vmcp import anonymous_policies, published_pins, vmcp_policies
+from daegam.k8s.templates.vmcp import (
+    anonymous_policies,
+    published_pins,
+    vmcp_cluster_url,
+    vmcp_policies,
+)
 from daegam.services.advanced_edit import AdvancedEditor
 from daegam.services.advertised_names import gateway_exposed_name, plan_conflicts
 from daegam.services.authz_configs import (
@@ -89,9 +94,16 @@ from daegam.services.exposure import (
     exposure_to_input,
     gateway_expose_docs,
 )
+from daegam.services.gateway_code_mode import (
+    CodeModeState,
+    closed_warning,
+    code_mode_toolhive_ok,
+    hidden_warning,
+)
 from daegam.services.gateway_entries import GatewayEntries
+from daegam.services.gateway_plan import backend_server_id as plan_server_id
 from daegam.services.gateway_plan import (
-    entry_name,
+    backend_snapshot_of,
     gateway_k8s_name,
     spec_of_revision,
     surface_forbids,
@@ -100,6 +112,7 @@ from daegam.services.gateway_plan import (
 )
 from daegam.services.gateway_status import GatewayStatusView
 from daegam.services.gateway_timeouts import (
+    call_timeout,
     default_timeout,
     rendered_timeouts,
 )
@@ -116,7 +129,6 @@ from daegam.services.instance_base import (
 from daegam.services.instance_status import read_deployment
 from daegam.services.issuer_switch import names_idp
 from daegam.services.outside_headers import EntryHeaders, HeaderPlan
-from daegam.services.platform_tools import is_fetch
 from daegam.services.published_backends import (
     PublishedBackends,
     as_rules,
@@ -137,7 +149,7 @@ from daegam.services.rule_compile import (
 from daegam.services.shared_clones import SharedClones
 from daegam.services.svc_tokens import SvcTokens
 from daegam.services.tenancy import TenancyService
-from daegam.services.tool_effects import ToolEffectLoader
+from daegam.services.tool_effects import SourceTools, ToolEffectLoader
 from daegam.services.tool_rules import (
     RULES_DIGEST_BEHIND,
     RULES_NOT_ENFORCED,
@@ -169,15 +181,20 @@ from daegam.store.gateways import (
     MongoGatewayStore,
     PublishedRender,
 )
-from daegam.store.hub import PLATFORM_KIND, PUBLISHED_KIND, HubItem, replicated
+from daegam.store.hub import PUBLISHED_KIND, HubItem, replicated
 from daegam.store.mcp_servers import MCPServer, MongoMCPServerStore
 from daegam.store.tool_rules import AnyRule, has_caller_rule, holds_rules
+from daegam.ttl_cache import TTLCache
 
 logger = logging.getLogger("daegam.gateways")
 
 
 # 백엔드 하나의 (스냅샷, 규칙 지문의 서버 id, 원래 이름의 규칙) (P52 2절)
 BackendRules = tuple[GatewayBackendSnapshot, str, dict[str, AnyRule]]
+# 플랫폼이 code mode Gateway 의 vMCP 를 나열한 이름을 기억하는 시간(초)과 Gateway 수 (P56 6.3절).
+# 상태 읽기와 목록이 Gateway 마다 나열을 기다리지 않게 한다
+VMCP_LISTING_SECONDS = 60.0
+VMCP_LISTING_ENTRIES = 1000
 
 
 class GatewayError(ServiceError):
@@ -185,25 +202,9 @@ class GatewayError(ServiceError):
 
 
 def backend_server_id(item: HubItem, tenant: str) -> str | None:
-    """Entry 의 토큰이 여는 우리 서버의 id (P50 9절). 이 테넌트의 항목이면 그 항목의 서버
-    (`HubItem.server_id`)이고 토큰을 받지 않는 종류는 None 이다. 다른 테넌트의 image 는 이
-    네임스페이스의 공유 복제본이 서버라 provision 이 그 기록의 id 를 적는다(`_apply_shared_clones`).
-    다른 테넌트의 internal 에는 토큰을 내지 않고 422 cross_tenant_unsupported 다. 플랫폼 fetch 는
-    fetch audience 의 열쇠(`FETCH_SERVER_ID`)이고 search 는 search audience 의
-    열쇠(`SEARCH_SERVER_ID`)다 (P39b 12·13절)."""
-    if item.kind == PLATFORM_KIND:
-        return FETCH_SERVER_ID if is_fetch(item) else SEARCH_SERVER_ID
-    if item.kind not in TOKEN_BACKEND_KINDS:
-        return None
-    if item.tenant == tenant:
-        return item.server_id
-    if item.kind == "image":
-        return None
-    raise GatewayError(
-        422,
-        "cross_tenant_unsupported",
-        f"hub item {item.name} reaches a server of tenant {item.tenant}",
-    )
+    """`gateway_plan.backend_server_id` 를 이 서비스의 오류로 부른다. Entry 토큰이 같은 꼴로
+    받는다(`GatewayTokens`)."""
+    return plan_server_id(item, tenant, GatewayError)
 
 
 class GatewayService(ExposureValidationMixin, BaseInstanceService[Gateway]):
@@ -224,7 +225,14 @@ class GatewayService(ExposureValidationMixin, BaseInstanceService[Gateway]):
     # 스냅샷은 비어 있던 서버 id 를 채운 것을 저장한다 (9절)
     # 게시된 Gateway 는 그 렌더가 이름 댄 소비자와 규칙 출처를 함께 저장한다 (P57 6.2절)
     consumer_fields = frozenset(
-        {"deployed_conflict_resolution", "tool_overrides", "deployed_backends", "published_render"}
+        {
+            "deployed_conflict_resolution",
+            "tool_overrides",
+            "deployed_backends",
+            "published_render",
+            # 적용한 vMCP 가 code mode 를 실었는가 (P56 6.3절)
+            "code_mode_applied",
+        }
     )
 
     def __init__(
@@ -255,6 +263,10 @@ class GatewayService(ExposureValidationMixin, BaseInstanceService[Gateway]):
         self.cluster_service = cluster_service
         # 내부 홉의 서비스 토큰 발급 창구 (D41). wiring 이 준다
         self.svc_tokens = svc_tokens
+        # code mode 를 켠 Gateway 마다 플랫폼이 vMCP 를 나열한 이름 (P56 6.3절, `_vmcp_listing`)
+        self._listings: TTLCache[str, tuple[frozenset[str] | None]] = TTLCache(
+            VMCP_LISTING_SECONDS, max_entries=VMCP_LISTING_ENTRIES
+        )
         # P8: host_conflict 검사는 MCP Server 와 Agent 의 host 도 본다(D27, D42). 참조 가드는
         # ReferenceService 가 센다
         self.mcp_instances = mcp_instances
@@ -374,11 +386,14 @@ class GatewayService(ExposureValidationMixin, BaseInstanceService[Gateway]):
         rev: GatewayRevision,
         features: frozenset[Feature],
         owner: dict[str, Any] | None,
+        *,
+        code_mode: bool = False,
     ) -> tuple[dict[str, Any], dict[str, Any] | None]:
         """(vMCP incomingAuth, 정책을 실은 MCPAuthzConfig). 토큰 인증 모드면 oidcConfigRef +
         Cedar, header 모드면 anonymous 다. 둘 다 리비전이 끈 표면을 Cedar forbid 로 막는다 (P50
-        13절). 노출했으면 oidcConfigRef.resourceUrl 에 external_url 을 넣는다 (D22). 입력은 소비자
-        판과 같은 함수에서 온다 (P32 8절).
+        13절). code_mode 면 맨 뒤에 힌트 forbid 를 더한다 (P56 6.3절). 노출했으면
+        oidcConfigRef.resourceUrl 에 external_url 을 넣는다 (D22). 입력은 소비자 판과 같은 함수에서
+        온다 (P32 8절).
 
         G8 게이트를 지난 클러스터는 정책을 `<vMCP 이름>-authz` 에 싣고 참조한다(설정이 None 이
         아니다). 게이트를 지나지 못하면 오늘의 꼴인 인라인이다. CRD 가 authzConfig 와 authzConfigRef
@@ -402,11 +417,14 @@ class GatewayService(ExposureValidationMixin, BaseInstanceService[Gateway]):
                 consumer_tools_only(target),
             ]
         roles_claim = ROLES_CLAIM if roles else None
+        permit = None
+        if auth.token_auth and auth.binds_delegation:
+            permit = delegation_permit(target, doc.tenant)
+            forbids.append(delegation_forbid(target, doc.tenant))
+        if code_mode:
+            # 힌트 forbid 는 다른 forbid 뒤에 둔다 (P56 6.3절 둘째 층)
+            forbids.append(READ_ONLY_HINT_FORBID)
         if auth.token_auth:
-            permit = None
-            if auth.binds_delegation:
-                permit = delegation_permit(target, doc.tenant)
-                forbids.append(delegation_forbid(target, doc.tenant))
             policies = vmcp_policies(
                 tenant_group=auth.tenant_group,
                 agent_client_ids=list(auth.agent_client_ids),
@@ -501,6 +519,7 @@ class GatewayService(ExposureValidationMixin, BaseInstanceService[Gateway]):
             out["warnings"].extend(await self._rule_warnings(doc))
             out["warnings"].extend(await self.published.warnings(doc))
             out["warnings"].extend(await self._header_warnings(doc))
+            out["warnings"].extend(await self._code_mode_warnings(doc))
         except ServiceError:
             # 클러스터 문서가 없으면 상태가 그 줄을 따로 낸다. 규칙 경고는 보탤 것이 없다
             pass
@@ -575,9 +594,13 @@ class GatewayService(ExposureValidationMixin, BaseInstanceService[Gateway]):
         rev = rules_rev(await super().want_rev(doc, ts), await self._rules_mark(doc))
         if doc.state == "draft" or doc.k8s is None:
             return rev
-        # 외부 서버 헤더의 판과 consume 경계 (P86 6.2절). 그런 백엔드가 없으면 표시가 없다
+        # 외부 서버 헤더의 판과 consume 경계 (P86 6.2절), code mode 판정의 지문 (P56 6.3절). 그런
+        # 백엔드나 code mode 가 없으면 표시가 없다
         return marked_rev(
-            rev, **await self.published.marks(doc), **await self.entry_headers.marks(doc)
+            rev,
+            **await self.published.marks(doc),
+            **await self.entry_headers.marks(doc),
+            **await self._code_mode_marks(doc),
         )
 
     async def _rules_mark(self, doc: Gateway) -> str | None:
@@ -820,14 +843,19 @@ class GatewayService(ExposureValidationMixin, BaseInstanceService[Gateway]):
             )
         backends = []
         ruled = {b.hub_item_id for b in rev.backends if holds_rules(b.tool_rules.values())}
+        # code mode 는 이 렌더의 판정이 받아들일 때만 싣는다. 아니면 오늘의 렌더다. 힌트
+        # forbid 는 code mode 를 실은 vMCP 가 도는 동안 남는다 (P56 6.3절, `_code_mode_render`)
+        code_on, hint = await self._code_mode_render(doc, rev)
         for b in doc.deployed_backends:
             ov = doc.tool_overrides.get(b.workload) or {}
-            # Gateway 규칙이 이름 댄 백엔드는 모두 골랐어도 배포 스냅샷의 Tool 만 내놓는다.
-            # 백엔드가 이름을 바꾸거나 더한 Tool 은 다시 배포할 때까지 나타나지 않는다 (P52 1절)
-            names = (b.tools or b.tool_names) if b.hub_item_id in ruled else b.tools
-            if b.kind == PUBLISHED_KIND and self.token_auth:
-                # 토큰 인증의 게시된 백엔드는 늘 스냅샷의 이름에서 execute_tool_script 를 뺀 것만
-                # 내놓는다. 그 스크립트 안의 호출은 이 Gateway 의 규칙을 지나지 않는다 (P57 6.2절)
+            # Gateway 규칙이 이름 댄 백엔드와 code mode 를 켠 Gateway 의 백엔드는 모두 골랐어도
+            # 배포 스냅샷의 Tool 만 내놓는다. 백엔드가 이름을 바꾸거나 더한 Tool 은 다시 배포할
+            # 때까지 나타나지 않는다 (P52 1절, P56 6.3절 첫째 층)
+            names = (b.tools or b.tool_names) if b.hub_item_id in ruled or code_on else b.tools
+            if b.kind == PUBLISHED_KIND:
+                # 게시된 백엔드는 어느 인증 모드에서든 스냅샷의 이름에서 execute_tool_script 를 뺀
+                # 것만 내놓는다. 그 스크립트 안의 호출은 이 Gateway 의 규칙을 지나지 않고, 다시
+                # 광고하면 이 Gateway 의 code mode 와도 겹친다 (P57 6.2절, P56 6.3절)
                 names = published_pins(b)
             backends.append(
                 {
@@ -838,7 +866,9 @@ class GatewayService(ExposureValidationMixin, BaseInstanceService[Gateway]):
                     "overrides": {tool: {"name": new} for tool, new in ov.items()},
                 }
             )
-        incoming, authz_config = await self._incoming_auth(doc, rev, features, owner)
+        incoming, authz_config = await self._incoming_auth(
+            doc, rev, features, owner, code_mode=hint
+        )
         if authz_config is not None:
             # 설정을 먼저 적용하고 받아들여지기를 기다린 뒤 vMCP 를 적용한다 (`_apply_docs`)
             docs.append(authz_config)
@@ -872,6 +902,11 @@ class GatewayService(ExposureValidationMixin, BaseInstanceService[Gateway]):
                 # G5 정적 백엔드. 게이트를 지나지 못한 클러스터는 오늘의 꼴(discovered)이다
                 # (P50 2절)
                 static_backends=(auth_configs if Feature.STATIC_BACKENDS in features else None),
+                code_mode=(
+                    {"enabled": True, "toolCallTimeout": call_timeout(doc.deployed_backends)}
+                    if code_on
+                    else None
+                ),
             )
         )
         return docs
@@ -908,10 +943,13 @@ class GatewayService(ExposureValidationMixin, BaseInstanceService[Gateway]):
         resolved = await self.hub.resolve_origins(list(items.values()))
         for b in rev.backends:
             item = items[b.hub_item_id]
-            workload = entry_name(gateway_name, item.name)
-            # 스냅샷에 베끼는 값도 원본에서 계산한 것이다 (D49). 스냅샷 자체는 적용한 CR 과 짝인
-            # 기록이라 그 뒤로 얼어 있는다
-            tool_names = tool_names_of(item, resolved)
+            # 이름·필터·종류·Entry 이름·서버는 저장 때의 code mode 판정과 같은 행에서 온다
+            # (`backend_snapshot_of`). 스냅샷에 베끼는 값도 원본에서 계산한 것이다 (D49). 스냅샷
+            # 자체는 적용한 CR 과 짝인 기록이라 그 뒤로 얼어 있는다
+            row = backend_snapshot_of(
+                gateway_name, b, item, resolved, tenant=tenant, error_cls=GatewayError
+            )
+            workload, tool_names = row.workload, row.tool_names
             server = origin_server(resolved, item)
             st = await self.hub.status(item, server=server)
             ready = bool(st.get("ready")) and not st.get("error")
@@ -943,22 +981,20 @@ class GatewayService(ExposureValidationMixin, BaseInstanceService[Gateway]):
                 clone_kind = item.k8s.kind
                 url = proxy_service_url(clone_name, namespace, remote=item.kind == "remote")
             snapshots.append(
-                GatewayBackendSnapshot(
-                    hub_item_id=item.id,
-                    hub_item_name=item.name,
-                    kind=item.kind,
-                    workload=workload,
-                    url=url,
-                    transport=item.source.transport or "streamable-http",
-                    tools=list(b.tools),
-                    tool_names=tool_names,
-                    shared_source_id=item.id if shared_foreign else None,
-                    clone_kind=clone_kind,
-                    clone_name=clone_name,
-                    timeout_seconds=b.timeout_seconds or await self._default_timeout(item, server),
-                    server_id=backend_server_id(item, tenant),
-                    # 인증이 있는 entry 항목의 종류 (P86 6.2절). 종류는 바뀌지 않는다
-                    auth_kind=item.auth.kind if item.kind == "entry" and item.auth else None,
+                row.model_copy(
+                    update={
+                        "url": url,
+                        "transport": item.source.transport or "streamable-http",
+                        # 도달 확인이 알게 된 이름이다
+                        "tool_names": tool_names,
+                        "shared_source_id": item.id if shared_foreign else None,
+                        "clone_kind": clone_kind,
+                        "clone_name": clone_name,
+                        "timeout_seconds": b.timeout_seconds
+                        or await self._default_timeout(item, server),
+                        # 인증이 있는 entry 항목의 종류 (P86 6.2절). 종류는 바뀌지 않는다
+                        "auth_kind": item.auth.kind if item.kind == "entry" and item.auth else None,
+                    }
                 )
             )
         if require_ready and not ok:
@@ -988,6 +1024,103 @@ class GatewayService(ExposureValidationMixin, BaseInstanceService[Gateway]):
         )
         warnings.extend(w for w in plan_warnings if w not in warnings)
 
+    # -- code mode (P56 6.3절) -----------------------------------------------------------
+    # 판정과 422 는 `GatewayValidator` 의 것이다. 여기는 렌더, 렌더 표시, 상태 경고다
+
+    async def _code_mode_state(self, doc: Gateway, rev: GatewayRevision) -> CodeModeState | None:
+        """렌더할 리비전의 code mode 판정 (6.3절 셋째 층). 배포 스냅샷과 지금의 표시로 다시 판정하고
+        클러스터의 ToolHive 판을 본다. 리비전이 code mode 를 켜지 않았으면 None 이다. 렌더, 렌더
+        표시, 상태 경고가 함께 읽는다. 클러스터 문서를 읽지 못하면 판을 모르는 것과 같다. 표시를
+        짓다가 그 문서의 재적용 틱이 멈추지 않게 하려는 것이다."""
+        if not rev.code_mode:
+            return None
+        found, tools = await self.validator.code_mode_verdict(doc, doc)
+        try:
+            toolhive = code_mode_toolhive_ok(await self._cluster_of(doc))
+        except ServiceError:
+            toolhive = False
+        return CodeModeState(found, toolhive, tools)
+
+    async def _code_mode_render(self, doc: Gateway, rev: GatewayRevision) -> tuple[bool, bool]:
+        """(codeMode 를 싣는가, 힌트 forbid 를 싣는가). 정책 설정은 vMCP 보다 먼저 적용되고
+        받아들여지기를 기다리므로(`apply_docs`), code mode 를 빼는 렌더도 마지막으로 성공한 vMCP
+        적용이 code mode 를 실었으면(`code_mode_applied`) 힌트 forbid 를 둔다. 그 vMCP 적용이
+        성공한 뒤의 렌더가 forbid 를 뺀다. 그래서 code mode 를 든 vMCP 가 forbid 없는 정책으로 도는
+        때가 없다."""
+        state = await self._code_mode_state(doc, rev)
+        on = state is not None and state.on
+        return on, on or doc.code_mode_applied
+
+    async def _code_mode_marks(self, doc: Gateway) -> dict[str, str]:
+        """판에 얹는 code mode 의 표시. 판정의 지문과 까닭이라, 서버나 항목의 표시가 바뀌거나
+        ToolHive 판이 바뀌면 다음 틱에 다시 렌더된다(P50 의 속도). 닫는 중(앞 적용이 code mode 를
+        실었는데 이번 렌더가 뺀다)이면 그 표시가 붙어, vMCP 적용이 성공해 기록이 바뀐 뒤 한 번 더
+        렌더되어 forbid 가 빠진다. code mode 를 켠 적 없는 Gateway 는 표시가 없어 판이 오늘과
+        같다."""
+        state = await self._code_mode_state(doc, self._pinned(doc))
+        if state is None and not doc.code_mode_applied:
+            return {}
+        mark = state.mark() if state is not None else "off"
+        if doc.code_mode_applied and not (state is not None and state.on):
+            mark += ":closing"
+        return {"code_mode": mark}
+
+    async def _code_mode_warnings(self, doc: Gateway) -> list[str]:
+        """code mode 의 상태 경고 (6.3절). 렌더가 code mode 를 뺐으면 그 까닭
+        (`code_mode_closed`)이고, 켰으면 플랫폼이 vMCP 를 나열해 힌트 forbid 가 숨긴
+        Tool(`code_mode_tools_hidden`)이다."""
+        if doc.state == "draft" or doc.k8s is None:
+            return []
+        state = await self._code_mode_state(doc, self._pinned(doc))
+        if state is None:
+            return []
+        if not state.on:
+            return [closed_warning(state)]
+        hidden = await self._hidden_by_hint(doc, state.tools)
+        return [hidden_warning(hidden)] if hidden else []
+
+    async def _hidden_by_hint(self, doc: Gateway, tools: SourceTools) -> list[str]:
+        """광고할 이름 가운데 플랫폼이 vMCP 를 나열했을 때 없는 것. 플랫폼의 나열도 힌트 forbid 를
+        만나므로, 서버가 `readOnlyHint: true` 를 알리지 않는 Tool 이 빠진다. 누가 부를지의 규칙이
+        있는 이름은 플랫폼에게도 닫힐 수 있어 세지 않는다. 나열을 모르면 빈 목록이다
+        (`_vmcp_listing`)."""
+        listed = await self._vmcp_listing(doc)
+        if listed is None:
+            return []
+        return [n for n in (tools.names or ()) if n not in listed and n not in tools.ruled]
+
+    async def _vmcp_listing(self, doc: Gateway) -> frozenset[str] | None:
+        """플랫폼이 이 Gateway 의 vMCP 를 나열한 이름. 상태 읽기마다 기다리지 않게 Gateway 마다
+        `VMCP_LISTING_SECONDS` 동안 기억한다(실패도). header 모드의 vMCP 는 토큰 없이 받고, 토큰
+        인증은 플랫폼이 vMCP 를 부르는 토큰(`SvcTokens.vmcp_bearer`)을 싣는다. 그 토큰을 낼 수
+        없거나(IdP 를 믿는 oidc) 나열이 실패하면 None 이다. 토큰은 로그에 남기지 않는다."""
+        if (hit := self._listings.get(doc.id)) is not None:
+            return hit[0]
+        listed: frozenset[str] | None = None
+        try:
+            headers: dict[str, str] = {}
+            tokens = self.svc_tokens
+            if self.token_auth:
+                bearer = None
+                if tokens is not None and tokens.available:
+                    bearer = await tokens.vmcp_bearer(doc.tenant)
+                if bearer is None:
+                    raise LookupError("the platform cannot call this vMCP")
+                headers = {"Authorization": f"Bearer {bearer}"}
+            k8s = self._k8s(doc)
+            client = await self.client_for_doc(doc)
+            url = vmcp_cluster_url(k8s.name, k8s.namespace)
+            listed = frozenset(await self.hub.tool_lister(client, url, headers))
+        except Exception as e:  # noqa: BLE001 - 나열하지 못하면 경고를 보탤 수 없다
+            logger.debug("could not list the vMCP of gateway %s: %s", doc.id, type(e).__name__)
+        self._listings.put(doc.id, (listed,))
+        return listed
+
+    @staticmethod
+    def _carries_code_mode(vmcp: dict[str, Any]) -> bool:
+        """적용한 vMCP 가 code mode 를 실었는가."""
+        return "codeMode" in ((vmcp.get("spec") or {}).get("config") or {})
+
     # -- 정의: 저장·리비전·복제·미리보기 ------------------------------------------------------
 
     async def create(
@@ -1005,7 +1138,7 @@ class GatewayService(ExposureValidationMixin, BaseInstanceService[Gateway]):
         if await self.gateways.get_by_name(tenant, name) is not None:
             raise GatewayError(409, "name_conflict", f"gateway {name!r} already exists")
         spec = normalized_gateway_rules(spec)
-        _items, warnings = await self.validator.validate_spec(
+        items, warnings = await self.validator.validate_spec(
             tenant, spec, name=name, principal=principal
         )
         doc = Gateway(
@@ -1018,6 +1151,11 @@ class GatewayService(ExposureValidationMixin, BaseInstanceService[Gateway]):
             exposure=exposure_from_input(exposure),
             updated_by=user_sub,
         )
+        if spec.code_mode:
+            sample = await self.validator.definition_sample(
+                doc.id, tenant, name, doc.current, items
+            )
+            await self.validator.require_code_mode(doc, sample)
         try:
             await self.gateways.create(doc)
         except DuplicateKeyError as e:
@@ -1045,7 +1183,7 @@ class GatewayService(ExposureValidationMixin, BaseInstanceService[Gateway]):
                 "rules_owner_cedar",
                 "this Gateway runs Cedar saved in its overrides, so Tool rules cannot apply",
             )
-        _items, warnings = await self.validator.validate_spec(
+        items, warnings = await self.validator.validate_spec(
             doc.tenant,
             spec,
             name=doc.name,
@@ -1053,6 +1191,12 @@ class GatewayService(ExposureValidationMixin, BaseInstanceService[Gateway]):
             self_id=doc.id,
             before=spec_of_revision(doc.current),
         )
+        if spec.code_mode:
+            rev = GatewayRevision(revision=doc.revision + 1, **spec.model_dump())
+            sample = await self.validator.definition_sample(
+                doc.id, doc.tenant, doc.name, rev, items
+            )
+            await self.validator.require_code_mode(doc, sample)
         before = doc.revision
         doc.display_name = display_name
         doc.spec = spec
@@ -1135,6 +1279,7 @@ class GatewayService(ExposureValidationMixin, BaseInstanceService[Gateway]):
             require_ready=False,
         )
         self._plan(sample, rev, warnings)
+        await self.validator.require_code_mode(doc, sample)
         docs = await self._render_docs(sample, rev, effective, definition_id=doc.id)
         return {
             "cluster_id": cluster.id,
@@ -1198,6 +1343,8 @@ class GatewayService(ExposureValidationMixin, BaseInstanceService[Gateway]):
             revision=rev.revision,
         )
         self._plan(doc, rev, warnings)
+        # `_stamp_deploying` 이 메모리에 얹은 노출을 판정이 읽는다
+        await self.validator.require_code_mode(doc, doc, cluster=cluster)
         warnings += await self.validator.pinned_names_warning(doc)
         async with self._host_claimed(doc), self.entries.claimed(doc):
             await self._transition(doc, {"draft"}, action="deploy")
@@ -1241,6 +1388,8 @@ class GatewayService(ExposureValidationMixin, BaseInstanceService[Gateway]):
         applied = await apply_docs(
             client, docs, self.editor.stored_final(doc, docs[-1]), GatewayError
         )
+        # vMCP 적용이 성공했다. 다음 렌더가 힌트 forbid 를 둘지 이것으로 정한다 (P56 6.3절)
+        doc.code_mode_applied = self._carries_code_mode(docs[-1])
         uid = (applied.get("metadata") or {}).get("uid")
         doc.k8s_uid = uid
         if uid:
@@ -1300,6 +1449,9 @@ class GatewayService(ExposureValidationMixin, BaseInstanceService[Gateway]):
             GatewayError,
             authz_wait=REAPPLY_AUTHZ_WAIT_SECONDS,
         )
+        # 설정을 기다리다 멈추거나 vMCP 적용이 실패하면 여기 오지 않아 기록이 그대로다. 그러면 다음
+        # 렌더도 힌트 forbid 를 둔다 (P56 6.3절)
+        doc.code_mode_applied = self._carries_code_mode(docs[-1])
         await self._drop_left_out_headers(doc, client, headers)
         if doc.exposure.enabled:
             effective = EffectiveConfig.model_validate(doc.effective_config)
@@ -1488,6 +1640,7 @@ class GatewayService(ExposureValidationMixin, BaseInstanceService[Gateway]):
         doc.deployed_revision = rev.revision
         doc.deployed_backends = snapshots
         self._plan(doc, rev, warnings)
+        await self.validator.require_code_mode(doc, doc, cluster=cluster)
         warnings += await self.validator.pinned_names_warning(doc)
         doc.effective_config = effective.model_dump(mode="json")
         self._start_deployment(doc)

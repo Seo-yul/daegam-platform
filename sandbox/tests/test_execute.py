@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import re
 import socket
 import threading
 import time
@@ -162,11 +163,14 @@ def test_exited_detached_processes_leave_room_for_a_new_command(sandbox: Sandbox
 
 @pytest.mark.skipif(not LINUX, reason="RLIMIT_NPROC 은 리눅스에서 잰다")
 def test_the_process_limit_holds(sandbox: Sandbox) -> None:
-    out = sandbox.execute("ulimit -u; ulimit -f; ulimit -c")["output"].split()
-    assert out[0] == "256"
-    # sh 의 ulimit -f 는 512 바이트 블록이다
-    assert out[1] == str((128 << 20) // 512)
-    assert out[2] == "0"
+    # 명령을 돌리는 /bin/sh 는 리눅스에서 dash 라 ulimit -u 가 없다. 커널이 보는 한도를 읽는다
+    limits = {}
+    for line in sandbox.execute("cat /proc/self/limits")["output"].splitlines()[1:]:
+        name, soft, hard = re.match(r"(.+?)\s{2,}(\S+)\s+(\S+)", line).groups()
+        limits[name] = (soft, hard)
+    assert limits["Max processes"] == ("256", "256")
+    assert limits["Max file size"] == (str(128 << 20), str(128 << 20))
+    assert limits["Max core file size"] == ("0", "0")
 
 
 def test_a_file_cannot_outgrow_the_size_limit(sandbox: Sandbox) -> None:

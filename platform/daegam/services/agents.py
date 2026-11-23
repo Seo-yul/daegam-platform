@@ -69,6 +69,7 @@ from daegam.k8s.templates.common import (
 from daegam.k8s.templates.svc_token import secret_value
 from daegam.services import agent_features, agent_graph, agent_tool_safety, agent_web
 from daegam.services.advanced_edit import AdvancedEditor
+from daegam.services.agent_code_mode import attach_code_mode, code_mode_issues
 from daegam.services.agent_features import (
     DETACHED_TURNS,
     REDIS_TLS,
@@ -289,13 +290,15 @@ async def _best_effort(doc: Agent, what: str, step: Awaitable[object]) -> None:
 async def _analyze(spec: AgentSpec, ctx: GraphContext) -> tuple[Analysis, list[Issue]]:
     """그래프 검증에 웹 Tool 의 규칙(`agent_web.web_issues`), 바깥 표시의 경고
     (`agent_tool_safety.safety_issues`), 내장 Tool 과 이름이 같은 Tool 의 경고
-    (`tool_pins.builtin_name_issues`)를 더한 (분석, 이슈)다. 저장 앞의 검증과 배포·재배포가 같은
+    (`tool_pins.builtin_name_issues`), code mode 스크립트의 선택과 중복
+    (`agent_code_mode.code_mode_issues`)을 더한 (분석, 이슈)다. 저장 앞의 검증과 배포·재배포가 같은
     것을 본다."""
     analysis = await run_in_threadpool(agent_graph.analyze, spec, ctx)
     web = await run_in_threadpool(agent_web.web_issues, spec, ctx)
     safety = await run_in_threadpool(agent_tool_safety.safety_issues, spec, ctx)
     builtin = builtin_name_issues(spec, ctx)
-    return analysis, [*analysis.issues, *web, *safety, *builtin]
+    code_mode = await run_in_threadpool(code_mode_issues, spec, ctx)
+    return analysis, [*analysis.issues, *web, *safety, *builtin, *code_mode]
 
 
 class AgentService(ExposureValidationMixin, AgentRollbackMixin, BaseInstanceService[Agent]):
@@ -1735,6 +1738,7 @@ class AgentService(ExposureValidationMixin, AgentRollbackMixin, BaseInstanceServ
         try:
             document = await run_in_threadpool(agent_graph.compile, doc, rev, ctx)
             document = apply_pins(document, rev, ctx.tool_pins, ctx.source_tools)
+            document = attach_code_mode(document, rev, ctx)
             if doc.evaluation_run is not None:
                 document = _hold_evaluation_writes(document, rev, ctx)
             if agent_features.WEB_GUARD in allowed and (refs := unpinned_sources(document)):

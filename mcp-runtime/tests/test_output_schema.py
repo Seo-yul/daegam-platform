@@ -105,7 +105,7 @@ async def test_output_schema_stripped_even_with_descriptions(rest_backend):
     mcp = _server(rest_backend, profile)
     async with Client(mcp) as c:
         by_name = {t.name: t for t in await c.list_tools()}
-    assert by_name["ok_json"].description == "JSON 을 돌려준다"
+    assert by_name["ok_json"].description.split("\n")[0] == "JSON 을 돌려준다"
     assert all(t.outputSchema is None for t in by_name.values())
 
 

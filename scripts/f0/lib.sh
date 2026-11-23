@@ -1,7 +1,7 @@
 # shellcheck shell=bash
 # shellcheck disable=SC2034  # 남기는 전역은 이 파일을 읽는 스크립트가 읽는다
-# P54·P54b F0 도구가 함께 쓰는 한 벌. `. "$HERE/lib.sh"` 로 읽는다. 이 폴더(scripts/f0)와 .github/workflows/p54-f0.yml
-# 은 F0 측정 동안만 둔다 (P54 12·13절, P54b 11·12절).
+# P54·P54b·P56 F0 도구가 함께 쓰는 한 벌. `. "$HERE/lib.sh"` 로 읽는다. 이 폴더(scripts/f0)와 .github/workflows 의
+# p54-f0.yml·p56-f0.yml 은 F0 측정 동안만 둔다 (P54 12·13절, P54b 11·12절, P56 8·9절).
 #
 # 부르는 쪽이 lib/e2e_exit.sh 와 lib/e2e_json.sh 를 먼저 읽고, HERE(이 폴더)·ROOT·CTX·WORK·API_PORT·OIDC_PORT·TENANT·
 # MCP_CLIENT_NAME 을 둔 뒤 읽는다. e2e 게이트의 한 벌(scripts/lib)을 그대로 읽어 쓰고, 종료 코드와 STEP 줄은
@@ -20,6 +20,14 @@
 # f0_header_connect STEP         header 모드의 플랫폼에 붙는다 (PF_API, 빈 AUTH)
 # f0_server_up STEP              daegam-f0 에 시험 서버(f0_server.py)를 플랫폼과 같은 이미지로 띄운다. 주소는 F0_HTTP·F0_SSE
 #                                (클러스터 안)이다
+# f0_server_log ITEM             시험 서버의 로그 끝을 F0_OUT/diag-f0-mcp.txt 에 남기고 찍는다
+# f0_redact                      표준 입력에서 자격 증명처럼 보이는 값을 지워 내보낸다(redact.sh. 지우는 것은 그 파일 머리)
+# tool_names FILE                f0_tool probe 결과 FILE 의 tools/list 이름을 정렬해 공백으로 이어 찍는다. 파일이나 행이 없으면
+#                                빈 줄이다
+# vmcp_diag ITEM NS VMCP [SELECTOR [SELECTOR_NS]]
+#                                vMCP 가 백엔드를 어떻게 보는지 F0_OUT/diag-VMCP.txt 에 남기고 찍는다. VirtualMCPServer 의
+#                                status(discoveredBackends), vMCP 파드 로그 중 감사 이벤트가 아닌 줄, SELECTOR 가 고르는
+#                                백엔드 파드의 로그(SELECTOR_NS, 기본 NS)다. 모두 f0_redact 를 거친다
 # f0_server_scale STEP N         시험 서버의 레플리카를 N 으로 두고 그만큼 Ready 이거나 0 이 될 때까지 기다린다
 # f0_rest_backend STEP NAME      시험 서버의 REST 백엔드를 Backend API NAME 으로 올리고 BACKEND_API_ID·BACKEND_API_VERSION 을
 #                                남긴다(lib/e2e_api.sh upload_backend_api)
@@ -30,8 +38,9 @@
 #                                f0_tool loop 를 뒤에서 돌린다. 기록은 F0_OUT/loop-NAME.jsonl, pid 와 멈춤 파일은 DIR 이다.
 #                                F0_TOKEN 이 있으면 그 토큰으로 부른다
 # f0_loop_stop DIR NAME SWITCH_AT [DELETED_AT]
-#                                멈추고 SWITCH_AT 을 바꾼 때로 본 lag 요약을 F0_OUT/lag-NAME.txt 에 쓴다. 요약을 쓰지 못할
-#                                때만 줄을 찍는다
+#                                멈추고 SWITCH_AT 을 바꾼 때로 본 lag 요약을 F0_OUT/lag-NAME.txt 에 쓴다. lag 의 종료
+#                                코드를 돌려준다. 3 은 바꾸기 전에 된 호출이 없다는 뜻이고, 그 밖의 0 아닌 값은 요약이
+#                                실패한 것이라 줄도 찍는다
 # hub_item STEP NAME KIND URL TRANSPORT [ACCESS_JSON]
 #                                허브 항목을 만들고(409 는 그 이름의 항목을 잇는다) ITEM_ID 를 남긴다. remote 면 READY_TIMEOUT
 #                                까지 Ready 를 기다리고 그 phase 를 ITEM_PHASE 에 남긴다(Ready 가 아니어도 멈추지 않는다. 부르는
@@ -110,6 +119,37 @@ f0_block() { # ITEM FILE
 }
 
 f0_tool() { "${LAB_PY[@]}" "$HERE/f0_tool.py" "$@"; }
+
+f0_redact() { bash "$HERE/redact.sh"; }
+
+tool_names() { # FILE
+  json_of "$1" '" ".join(sorted(t["name"] for t in ((d.get("rows") or {}).get("tools/list") or {}).get("tools") or []))' \
+    2>/dev/null || true
+}
+
+vmcp_diag() { # ITEM NS VMCP [SELECTOR [SELECTOR_NS]]
+  local item="$1" ns="$2" vmcp="$3" sel="${4:-}" sel_ns="${5:-$2}" out="$F0_OUT/diag-$3.txt"
+  {
+    echo "VirtualMCPServer $ns/$vmcp status:"
+    "${K[@]}" -n "$ns" get virtualmcpserver "$vmcp" -o jsonpath='{.status}' 2>&1 || true
+    echo
+    echo
+    echo "vMCP pod log, lines that are not audit events (last 150):"
+    "${K[@]}" -n "$ns" logs -l "app.kubernetes.io/name=virtualmcpserver,app.kubernetes.io/instance=$vmcp" \
+      --tail=3000 2>&1 | grep -v -e '"audit_id"' -e '"auditId"' | tail -n 150 || true
+    if [ -n "$sel" ]; then
+      echo
+      echo "backend pods in $sel_ns ($sel), last 100 lines each:"
+      "${K[@]}" -n "$sel_ns" logs -l "$sel" --all-containers --prefix --tail=100 2>&1 || true
+    fi
+  } | f0_redact >"$out"
+  f0_block "$item" "$out"
+}
+
+f0_server_log() { # ITEM
+  "${K[@]}" -n "$F0_NS" logs deploy/f0-mcp --tail=150 2>&1 | f0_redact >"$F0_OUT/diag-f0-mcp.txt" || true
+  f0_block "$1" "$F0_OUT/diag-f0-mcp.txt"
+}
 
 f0_now() { python3 -c 'import time; print(f"{time.time():.3f}")'; }
 
@@ -208,7 +248,7 @@ f0_loop_start() { # DIR NAME URL TOOL ARGS
 }
 
 f0_loop_stop() { # DIR NAME SWITCH_AT [DELETED_AT]
-  local dir="$1" name="$2" pid i
+  local dir="$1" name="$2" pid i rc=0
   touch "$dir/stop-$name"
   pid="$(cat "$dir/pid-$name" 2>/dev/null || true)"
   for ((i = 0; i < 30; i++)); do
@@ -216,7 +256,9 @@ f0_loop_stop() { # DIR NAME SWITCH_AT [DELETED_AT]
     sleep 1
   done
   f0_tool lag --loop "$F0_OUT/loop-$name.jsonl" --switch-at "$3" ${4:+--deleted-at "$4"} >"$F0_OUT/lag-$name.txt" \
-    || echo "!! lag summary of loop $name failed (see $F0_OUT/loop-$name.log)"
+    || rc=$?
+  [ "$rc" = 0 ] || [ "$rc" = 3 ] || echo "!! lag summary of loop $name failed with exit $rc (see $F0_OUT/loop-$name.log)"
+  return "$rc"
 }
 
 hub_item() { # STEP NAME KIND URL TRANSPORT [ACCESS_JSON]
@@ -289,13 +331,18 @@ f1_next_round() {
 f1_mark_install() { f0_now >"$F1_STATE/install-at-r$(f1_get round)"; }
 
 f1_stop_loops() { # PHASE NAME...
-  local phase="$1" round name loop
+  local phase="$1" round name loop rc
   shift
   round="$(f1_get round)"
   for name in "$@"; do
     loop="$name-r$round"
-    f0_loop_stop "$F1_STATE" "$loop" "$(cat "$F1_STATE/install-at-r$round")" \
-      || f1_fail "$phase" "$loop: no call succeeded before the install, so its failures say nothing about the install"
+    rc=0
+    f0_loop_stop "$F1_STATE" "$loop" "$(cat "$F1_STATE/install-at-r$round")" || rc=$?
+    case "$rc" in
+      0) ;;
+      3) f1_fail "$phase" "$loop: no call succeeded before the install, so its failures say nothing about the install" ;;
+      *) f1_fail "$phase" "$loop: the lag summary failed (exit $rc)" ;;
+    esac
     f0_block "F1 $phase $loop (switch = the install's start)" "$F0_OUT/lag-$loop.txt"
   done
 }

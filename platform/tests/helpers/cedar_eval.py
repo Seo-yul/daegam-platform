@@ -52,10 +52,12 @@ def evaluate(
     role_claim: str | None = None,
     server: str = "srv",
     action: str = "call_tool",
+    tool_attrs: Mapping[str, Any] | None = None,
 ) -> Verdict:
     """claims 를 실은 토큰이 tool 을 부를 수 있는가. ToolHive 처럼 오류가 있으면 거절이다. action 은
     ToolHive 의 액션 이름이다(`read_resource`, `get_prompt`). 그때 tool 은 그 리소스나 프롬프트의
-    이름으로 읽는다."""
+    이름으로 읽는다. tool_attrs 는 ToolHive 가 광고한 Tool 의 annotations 에서 싣는 속성이다
+    (`readOnlyHint` 등, P56 6.3절). 광고 밖의 이름은 속성이 없다."""
     sub = claims["sub"]
     assert isinstance(sub, str), "ToolHive 는 sub 가 문자열이 아닌 토큰을 Cedar 전에 거절한다"
     attrs = {f"claim_{k}": _value(v) for k, v in claims.items() if v is not None}
@@ -69,7 +71,7 @@ def evaluate(
         *({"uid": {"type": "THVGroup", "id": g}, "attrs": {}, "parents": []} for g in groups),
         {
             "uid": {"type": "Tool", "id": tool},
-            "attrs": {},
+            "attrs": dict(tool_attrs or {}),
             "parents": [{"type": "MCP", "id": server}],
         },
         {"uid": {"type": "MCP", "id": server}, "attrs": {}, "parents": []},

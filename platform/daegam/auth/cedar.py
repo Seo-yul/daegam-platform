@@ -199,6 +199,16 @@ def forbid_action_policy(action: str) -> str:
     return f"forbid(principal, action == Action::{_quote(action)}, resource);"
 
 
+# code mode 를 켠 vMCP 의 힌트 forbid (P56 6.3절 둘째 층). 서버가 `readOnlyHint: true` 를 알리지
+# 않는 Tool 은 직접 호출과 스크립트 안의 호출 모두에서 숨고 거절된다. 광고 밖의 이름은 ToolHive 가
+# 표시 없이 판정하므로 함께 막힌다. 클레임을 읽지 않고 `has` 뒤에 `==` 만 견주므로 어느 토큰으로도
+# 오류 없이 평가된다. 가상 Tool(`execute_tool_script`)은 Cedar 엔티티가 없어 닿지 않는다
+READ_ONLY_HINT_FORBID = (
+    'forbid(principal, action == Action::"call_tool", resource) '
+    "unless { resource has readOnlyHint && resource.readOnlyHint == true };"
+)
+
+
 # 위임 토큰(턴 토큰, P53)이 자기 대상을 적는 값의 꼴이다. 대상 하나에만 묶인다 (P53 1절). 발급
 # (`services/turn_grants.py`)과 정책이 이 꼴을 함께 쓴다. MCP Server 의 토큰은 audience 로 묶이므로
 # 그 값을 읽는 정책은 아직 없다

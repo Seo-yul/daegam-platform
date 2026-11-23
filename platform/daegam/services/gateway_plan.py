@@ -10,17 +10,22 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 from daegam.auth.cedar import forbid_action_policy
+from daegam.auth.signer import FETCH_SERVER_ID, SEARCH_SERVER_ID
+from daegam.errors import ServiceError
 from daegam.k8s.merge import Path, vmcp_locked_paths
 from daegam.k8s.templates import proxy_service_url
+from daegam.k8s.templates.svc_token import TOKEN_BACKEND_KINDS
+from daegam.services.platform_tools import is_fetch
 from daegam.services.tenancy import k8s_name
 from daegam.store.gateways import (
     Gateway,
+    GatewayBackend,
     GatewayBackendSnapshot,
     GatewayRevision,
     GatewaySpec,
     GatewaySurface,
 )
-from daegam.store.hub import HubItem, is_derived
+from daegam.store.hub import PLATFORM_KIND, HubItem, is_derived
 
 PREFIX_WARNING = (
     "some backends have no tool_names; falling back to prefix mode "
@@ -116,3 +121,52 @@ def tool_names_of(item: HubItem, resolved: Mapping[str, Any]) -> list[str]:
     origin = resolved.get(item.id)
     names = origin.tool_names if origin is not None else None
     return list(names if names is not None else item.tool_names)
+
+
+def backend_server_id(item: HubItem, tenant: str, error_cls: type[ServiceError]) -> str | None:
+    """Entry 의 토큰이 여는 우리 서버의 id (P50 9절). 이 테넌트의 항목이면 그 항목의 서버
+    (`HubItem.server_id`)이고 토큰을 받지 않는 종류는 None 이다. 다른 테넌트의 image 는 이
+    네임스페이스의 공유 복제본이 서버라 provision 이 그 기록의 id 를 적는다(`_apply_shared_clones`).
+    다른 테넌트의 internal 에는 토큰을 내지 않고 422 cross_tenant_unsupported 다. 플랫폼 fetch 는
+    fetch audience 의 열쇠(`FETCH_SERVER_ID`)이고 search 는 search audience 의
+    열쇠(`SEARCH_SERVER_ID`)다 (P39b 12·13절)."""
+    if item.kind == PLATFORM_KIND:
+        return FETCH_SERVER_ID if is_fetch(item) else SEARCH_SERVER_ID
+    if item.kind not in TOKEN_BACKEND_KINDS:
+        return None
+    if item.tenant == tenant:
+        return item.server_id
+    if item.kind == "image":
+        return None
+    raise error_cls(
+        422,
+        "cross_tenant_unsupported",
+        f"hub item {item.name} reaches a server of tenant {item.tenant}",
+    )
+
+
+def backend_snapshot_of(
+    gateway_name: str,
+    backend: GatewayBackend,
+    item: HubItem,
+    resolved: Mapping[str, Any],
+    *,
+    tenant: str,
+    error_cls: type[ServiceError],
+    **deployed: Any,
+) -> GatewayBackendSnapshot:
+    """정의의 백엔드 하나를 스냅샷 행으로 옮긴다. 이름(`tool_names_of`), 필터, 종류, Entry
+    이름(`entry_name`), 서버 id 를 정한다. 배포는 클러스터에서 읽은 칸(url, 복제본, 타임아웃,
+    인증 종류)과 도달 확인으로 알게 된 이름을 deployed 로 덮고, 저장 때의 code mode 판정은 덮지
+    않는다. 두 경로가 같은 이름으로 판정하게 하려는 것이다 (P56 6.2절)."""
+    fields: dict[str, Any] = {
+        "hub_item_id": item.id,
+        "hub_item_name": item.name,
+        "kind": item.kind,
+        "workload": entry_name(gateway_name, item.name),
+        "url": "",
+        "tools": list(backend.tools),
+        "tool_names": tool_names_of(item, resolved),
+        "server_id": backend_server_id(item, tenant, error_cls),
+    }
+    return GatewayBackendSnapshot(**{**fields, **deployed})

@@ -483,8 +483,11 @@ def test_proxy_mode_items_stay_refused_under_token_auth(local_admin, fake_cluste
 def test_header_mode_keeps_an_anonymous_entry_and_no_marks(client, fake_clusters, mongo):
     _items, p, pub, c, fake = _env(client, fake_clusters)
     tools = vmcp_of(fake, "gw-c")["spec"]["config"]["aggregation"]["tools"]
-    assert {"workload": _row(c)["workload"]} in tools
-    assert _row(c).get("bound_to") is None
+    # header 모드에서도 게시된 백엔드는 스냅샷의 이름에서 execute_tool_script 를 뺀 것만 내놓는다
+    # (P56 6.3절)
+    row = _row(c)
+    assert {"workload": row["workload"], "filter": published_pins(SimpleNamespace(**row))} in tools
+    assert row.get("bound_to") is None
     service = client.app.state.gateway_service
     assert client.portal.call(service.published.marks, _stored(mongo, c["id"])) == {}
     assert client.portal.call(service.published.marks, _stored(mongo, p["id"])) == {}

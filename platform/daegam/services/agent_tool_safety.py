@@ -6,13 +6,14 @@
 
 - **바깥 표시.** 우리 mcp-runtime 의 Tool(백엔드 종류 `internal`)은 기본이 안쪽이고, 그 밖의
   백엔드(`image`·`remote`·`entry`)의 Tool 은 기본이 바깥이다. tools 노드의 `outside` 가 Tool 마다
-  기본값을 바꾼다. 웹 Tool 과 백엔드 종류를 모르는 이름은 늘 바깥이다. 바깥 서비스의 Tool 에서
-  표시를 끄면 경고 `outside_mark_off` 다.
+  기본값을 바꾼다. 웹 Tool, 백엔드 종류를 모르는 이름과 code mode 의 스크립트(종류 `script`)는 늘
+  바깥이다. 스크립트가 닿는 Tool 은 Agent 의 배포 뒤에도 바뀌기 때문이다(P56 6.5절). 바깥 서비스의
+  Tool 에서 표시를 끄면 경고 `outside_mark_off` 다.
 - **읽기 표시.** 바깥 내용 뒤의 승인 규칙이 쓰는 효과(`tool_effects.node_effects` 의 tool_safety)가
   `read` 거나 웹 Tool 이면 읽기다. 캔버스의 읽기 전용 표시는 서버가 읽기 여부를 알려 주지 않는
   Tool(`image`·`remote`·`entry`)에서만 읽기로 바꾸고 경고 `read_only_by_canvas` 를 낸다. `internal`
   Tool 의 표시는 저장된 채 효과가 없다(화면이 적용되지 않았다고 보인다). 백엔드 종류를 모르는 이름은
-  핀이 읽기라고 해도 읽기가 아니다.
+  핀이 읽기라고 해도 읽기가 아니다. 스크립트는 읽기이고 어느 캔버스 표시도 받지 않는다.
 - **memory 노드가 없는 그래프.** 승인을 받을 수 없으므로 런타임이 바깥 내용 뒤의 쓰기를 거절한다.
   읽기라고 알 수 없는 Tool 이 하나라도 있으면 경고 `outside_writes_refused` 다. 첨부는 어느
   그래프에든 올 수 있으므로 웹 Tool 이 없는 그래프도 이 경고를 받는다. 원본에 memory 노드가 있던
@@ -38,6 +39,7 @@ from daegam.services.tool_effects import (
     EFFECT_WEB,
     EFFECT_WRITE,
     ORIGIN_INTERNAL,
+    ORIGIN_SCRIPT,
     canvas_mark_applies,
     known_read,
     node_effects,
@@ -61,9 +63,10 @@ class NodeMarks:
 
 
 def _inside(name: str, node: WebNode) -> bool:
-    """결과가 바깥 내용이 아닌가. 웹 Tool 과 백엔드 종류를 모르는 이름은 늘 바깥이다."""
+    """결과가 바깥 내용이 아닌가. 웹 Tool, 백엔드 종류를 모르는 이름과 스크립트는 노드의 표시와
+    상관없이 늘 바깥이다(모듈 머리)."""
     origin = node.tools.origins.get(name)
-    if origin is None or node.tools.effect(name) == EFFECT_WEB:
+    if origin in (None, ORIGIN_SCRIPT) or node.tools.effect(name) == EFFECT_WEB:
         return False
     override = node.data.outside.get(name)
     return origin == ORIGIN_INTERNAL if override is None else not override
