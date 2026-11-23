@@ -16,6 +16,7 @@ from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import parse_qs, urlsplit
 
 import jwt
 import pytest
@@ -26,6 +27,8 @@ from daegam.auth.rbac import idp_group, role_group
 from daegam.config import Settings, settings_from_env
 from daegam.k8s.templates.agent import (
     AGENT_CLIENT_SECRET_ENV,
+    CONFIG_URL_ENV,
+    GATEWAY_AUTH_QUERY,
     GATEWAY_TOKEN_ENV,
     GATEWAY_TOKEN_KEY,
     IdpVerifier,
@@ -533,6 +536,58 @@ def test_switching_moves_an_agents_gateway_source_onto_a_gateway_token_and_back(
         assert agent.id in run_data_plane_auth(app)["reapplied"]
     env = pod_env()
     assert GATEWAY_TOKEN_ENV not in env and AGENT_CLIENT_SECRET_ENV in env
+
+
+def test_a_pod_gets_the_gateway_auth_of_its_own_template_from_either_mode(
+    client, settings, fake_clusters, fake_secrets, mongo
+):
+    """믿는 발급자를 바꾸는 동안에는 두 모드의 플랫폼 파드가 함께 init 받기에 답한다. 새 템플릿의
+    파드가 옛 모드의 파드에서 문서를 받아도 그 문서의 Gateway 소스 인증은 그 파드의 env 에 있는
+    비밀을 가리킨다. 아니면 런타임이 `tool_secret_missing` 으로 뜨지 못하고, init 은 다시 돌지
+    않으므로 그 파드는 지워질 때까지 그대로다."""
+    agent = deployed_agent(client, fake_clusters, mongo, runtime=False)
+    oauth = {"client_id": "bot", "secret_name": "bot", "token_url": "http://idp/t", "scope": "mcp"}
+    mongo["tenant_settings"].insert_one(
+        {"_id": "default", "tenant": "default", "agent_oauth": oauth, "agent_client_ids": ["bot"]}
+    )
+    fake, k8s = agent.fake, agent.doc["k8s"]
+
+    def pod() -> tuple[str | None, dict[str, str]]:
+        """렌더한 파드의 init 주소가 실은 Gateway 소스 인증과 메인 컨테이너의 env."""
+        spec = fake.get("apps/v1", "Deployment", k8s["name"], k8s["namespace"])["spec"]
+        template = spec["template"]["spec"]
+        query = parse_qs(urlsplit(env_map(template["initContainers"][0])[CONFIG_URL_ENV]).query)
+        return query.get(GATEWAY_AUTH_QUERY, [None])[0], env_map(template["containers"][0])
+
+    def secret_envs(app, asked: str | None) -> set[str]:
+        """그 플랫폼이 asked 를 실은 init 받기에 내는 문서에서 Gateway 소스의 비밀 env."""
+        service, store = app.app.state.agent_service, app.app.state.agents
+
+        async def fetch() -> dict:
+            doc = await store.get(agent.id)
+            return await service.fetch_config(doc, {}, gateway_auth=asked)
+
+        tools = app.portal.call(fetch)["tools"]
+        return {t["auth"]["secret_env"] for t in tools if t["source"]["kind"] == "gateway_instance"}
+
+    with api_client(_oidc_app(settings, fake_clusters, fake_secrets, "platform")) as old:
+        skip_start_check(old.app)
+        assert agent.id in run_data_plane_auth(old)["reapplied"]
+        bearer, bearer_env = pod()
+        assert bearer == "bearer" and secret_envs(old, bearer) == {GATEWAY_TOKEN_ENV}
+        with api_client(_oidc_app(settings, fake_clusters, fake_secrets, "idp")) as new:
+            skip_start_check(new.app)
+            assert agent.id in run_data_plane_auth(new)["reapplied"]
+            asked, env = pod()
+            assert asked == "oauth" and AGENT_CLIENT_SECRET_ENV in env
+            assert GATEWAY_TOKEN_ENV not in env
+            # 새 템플릿의 파드는 어느 모드의 플랫폼 파드에서 받아도 client credentials 다
+            assert secret_envs(new, asked) == secret_envs(old, asked) == {AGENT_CLIENT_SECRET_ENV}
+            # 아직 남은 옛 템플릿의 파드가 다시 떠도 자기 env 의 토큰을 가리키는 문서를 받는다
+            assert secret_envs(new, bearer) == {GATEWAY_TOKEN_ENV} <= set(bearer_env)
+            # 종류를 알리지 않는 옛 렌더의 파드는 답하는 플랫폼의 모드를 따른다
+            assert secret_envs(new, None) == {AGENT_CLIENT_SECRET_ENV}
+            assert secret_envs(old, None) == {GATEWAY_TOKEN_ENV}
 
 
 def test_a_gateway_rule_names_an_agent_only_once_gateways_trust_the_platform(

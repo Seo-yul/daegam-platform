@@ -197,6 +197,12 @@ LLM_TOKEN_KEY = "llm_token"
 # init 주소의 경로 쿼리 (P38 6절). 없으면 직접 경로다
 LLM_QUERY = "llm"
 LLM_GATEWAY_ROUTE = "gateway"
+# init 주소의 Gateway 소스 인증 쿼리. 그 템플릿이 env 로 실은 인증이다. bearer 는
+# DAEGAM_GATEWAY_TOKEN, oauth 는 DAEGAM_AGENT_CLIENT_SECRET 이고, Gateway 소스를 인증 없이 부르는
+# 템플릿에는 없다
+GATEWAY_AUTH_QUERY = "gateway_auth"
+GATEWAY_AUTH_BEARER = "bearer"
+GATEWAY_AUTH_OAUTH = "oauth"
 MCP_TOKEN_ENV = "DAEGAM_MCP_TOKEN"
 GATEWAY_TOKEN_ENV = "DAEGAM_GATEWAY_TOKEN"
 # agent_oauth 의 client secret 을 담는 env (docs/guide/agents.md 5절). 컴파일이 agent.json 에
@@ -256,12 +262,22 @@ def sandbox_env(platform_internal_url: str, agent_id: str) -> dict[str, Any]:
     return {"name": SANDBOX_URL_ENV, "value": f"{api_base(platform_internal_url)}{path}"}
 
 
-def agent_json_url(platform_internal_url: str, agent_id: str, *, gateway: bool = False) -> str:
+def agent_json_url(
+    platform_internal_url: str,
+    agent_id: str,
+    *,
+    gateway: bool = False,
+    gateway_auth: str | None = None,
+) -> str:
     """init 이 받는 `agent.json` 의 주소다. 렌더가 이 값 하나를 init env 로 내리므로 주소에 무엇을
     더할 때는 여기만 고친다. 게이트웨이 경로의 템플릿은 `?llm=gateway` 를 붙인다 (P38 6절). 그
-    템플릿의 파드는 다시 떠도 그 경로의 문서를 받는다."""
+    템플릿의 파드는 다시 떠도 그 경로의 문서를 받는다. Gateway 소스의 인증을 env 로 실은 템플릿은
+    그 종류를 `gateway_auth` 로 붙인다. 믿는 발급자를 바꾸는 동안 옛 모드의 플랫폼 파드가 받기에
+    답해도 그 파드의 env 에 맞는 문서를 받는다."""
     url = f"{agent_config_base(platform_internal_url, agent_id)}/{CONFIG_FILE}"
-    return f"{url}?{LLM_QUERY}={LLM_GATEWAY_ROUTE}" if gateway else url
+    query = {LLM_QUERY: LLM_GATEWAY_ROUTE if gateway else None, GATEWAY_AUTH_QUERY: gateway_auth}
+    asked = "&".join(f"{k}={v}" for k, v in query.items() if v)
+    return f"{url}?{asked}" if asked else url
 
 
 # init 컨테이너가 런타임 이미지 안에서 `python -c` 로 도는 받기 스크립트다(D65). 표준 라이브러리만
@@ -936,7 +952,12 @@ def render_agent_deployment(
         main=agent_container,
         effective=effective,
         extra_volumes=tuple(ca_volumes),
-        **_init_container_args(inst, effective, config_env),
+        **_init_container_args(
+            inst,
+            effective,
+            config_env,
+            gateway_auth=template_gateway_auth(gateway_token, agent_oauth),
+        ),
     )
     if inst.turn_drain_seconds is not None:
         # grace 는 결정의 drain 으로 정한다. overrides 가 grace 를 정하면 그 값이 덮고 drain 이
@@ -970,8 +991,20 @@ def render_agent_deployment(
     }
 
 
+def template_gateway_auth(gateway_token: bool, agent_oauth: AgentOAuth | None) -> str | None:
+    """이 템플릿이 env 로 실은 Gateway 소스 인증의 종류다. 플랫폼이 낸 토큰이면 bearer, client
+    credentials 면 oauth 이고, 둘 다 싣지 않으면 None 이다."""
+    if gateway_token:
+        return GATEWAY_AUTH_BEARER
+    return GATEWAY_AUTH_OAUTH if agent_oauth is not None else None
+
+
 def _init_container_args(
-    inst: Agent, effective: EffectiveConfig, config_env: dict[str, Any]
+    inst: Agent,
+    effective: EffectiveConfig,
+    config_env: dict[str, Any],
+    *,
+    gateway_auth: str | None = None,
 ) -> dict[str, Any]:
     """init 컨테이너 몫의 `config_fetch_pod` 인자다. init 은 이 Agent 의 런타임 이미지로 메인과 같은
     pull 정책으로 돈다(D65). 이미지가 아는 기능 이름의 원천이 그 이미지다. `agent.json` 은
@@ -983,7 +1016,9 @@ def _init_container_args(
         config_env,
         {
             "name": CONFIG_URL_ENV,
-            "value": agent_json_url(platform_url, inst.id, gateway=inst.llm_route.gateway),
+            "value": agent_json_url(
+                platform_url, inst.id, gateway=inst.llm_route.gateway, gateway_auth=gateway_auth
+            ),
         },
         {"name": CONFIG_BASE_ENV, "value": agent_config_base(platform_url, inst.id)},
         {"name": AGENT_IMAGE_ENV, "value": image},

@@ -171,7 +171,8 @@ RENDER_EPOCHS: dict[str, int] = {
     # 3: overrides 가 파드 템플릿에 단 app.kubernetes.io/name: mcpserver 를 뺀다 (T67)
     # 4: 준비 검사가 첫 1초부터 2초마다이고 실패 문턱이 15다. 깨운 파드가 곧 Service 에 든다
     #    (P44 8절)
-    KIND_AGENT: 4,
+    # 5: Gateway 소스가 있는 Agent 의 init 주소가 파드가 실은 Gateway 인증 방식을 싣는다
+    KIND_AGENT: 5,
     # 1: 원격 프록시의 역할 없는 ServiceAccount (P50 10절)
     # 2: 0.52 클러스터에서 image 항목의 테넌트 울타리 (P50 11절)
     # 3: image 항목의 백엔드 파드의 라벨 (T67)

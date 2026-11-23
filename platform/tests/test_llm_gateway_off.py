@@ -3,7 +3,8 @@
 묶음 A(F1~F4)는 게이트웨이로 호출을 하나도 보내지 않는다. 그래서 Agent 의 Deployment·토큰
 Secret·Service·NetworkPolicy 렌더는 이 단계 앞 커밋의 렌더와 바이트까지 같아야 한다. 스냅샷은
 그 커밋에서 `tests/helpers/agent_pod_snapshot.py` 가 낸 값이다. 그 뒤 일부러 바꾼 것은 스냅샷에도
-옮겼다. P44 8절의 준비 검사(첫 1초부터 2초마다, 실패 문턱 15)다.
+옮겼다. P44 8절의 준비 검사(첫 1초부터 2초마다, 실패 문턱 15)와, Gateway 소스가 있는 파드의 init
+주소가 싣는 Gateway 인증 방식이다.
 """
 
 from __future__ import annotations

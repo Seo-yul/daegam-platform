@@ -211,7 +211,7 @@
         },
         {
          "name": "DAEGAM_AGENT_CONFIG_URL",
-         "value": "http://daegam-platform.daegam-system.svc:9000/api/agents/ag-1/agent.json"
+         "value": "http://daegam-platform.daegam-system.svc:9000/api/agents/ag-1/agent.json?gateway_auth=bearer"
         },
         {
          "name": "DAEGAM_CONFIG_BASE_URL",

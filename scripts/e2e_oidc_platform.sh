@@ -558,6 +558,22 @@ chat_once() { # -> ok 이면 관리자의 채팅이 Add 결과 7 을 받았다
     echo "fail:$code"
   fi
 }
+# 수렴하지 못했을 때 정리 앞에 남긴다. 정리가 파드를 지우므로 워크플로의 진단 단계는 이것을 보지 못한다. 테넌트
+# 네임스페이스의 파드와, 준비되지 않은 Agent 파드마다 init 이 받은 Tool 소스의 인증 종류, init 과 메인 컨테이너가 끝난
+# 까닭과 마지막 로그다. 값(토큰, 비밀)은 찍지 않는다
+switch_report() {
+  local pod
+  echo "--- pods in $AG_NS (switch did not converge)"
+  "${K[@]}" -n "$AG_NS" get pods -o wide 2>&1 || true
+  for pod in $("${K[@]}" -n "$AG_NS" get pods -l daegam.devops.ai.kr/resource=agent-instance \
+    -o jsonpath='{range .items[?(@.status.containerStatuses[0].ready==false)]}{.metadata.name}{"\n"}{end}' 2>/dev/null); do
+    echo "--- $AG_NS/$pod"
+    "${K[@]}" -n "$AG_NS" get pod "$pod" -o jsonpath='{range .status.initContainerStatuses[*]}init {.name} restarts={.restartCount} {.lastState.terminated.message}{"\n"}{end}{range .status.containerStatuses[*]}{.name} restarts={.restartCount} last={.lastState.terminated.reason}/{.lastState.terminated.exitCode} {.lastState.terminated.message}{"\n"}{end}' 2>&1 || true
+    "${K[@]}" -n "$AG_NS" get pod "$pod" -o jsonpath='{range .spec.initContainers[*].env[?(@.name=="DAEGAM_AGENT_CONFIG_URL")]}init url {.value}{"\n"}{end}' 2>&1 || true
+    "${K[@]}" -n "$AG_NS" logs "$pod" -c agent --previous --tail=40 2>&1 || "${K[@]}" -n "$AG_NS" logs "$pod" -c agent --tail=40 2>&1 || true
+  done
+}
+
 # timed_switch STEP VALUE WANT -> 발급자를 VALUE 로 바꾸고 수렴까지 잰다. WANT 는 "idp_gw pat_gw pat_front pat_agent chat"
 # 의 기대값이다. 수렴의 초는 SWITCH_SECONDS, 채팅이 끊긴 초는 CHAT_DOWN 에 남는다
 timed_switch() {
@@ -584,7 +600,7 @@ timed_switch() {
   echo "  timeline ($value; seconds idp_gw pat_gw pat_front pat_agent chat pending):"
   sed 's/^/    /' "$WORK/timeline-$value"
   CHAT_DOWN="${first_fail:+${first_fail}s..${last_fail}s}"
-  [ -n "$SWITCH_SECONDS" ] || die "$step" "switching to $value did not converge to '$want' within $((SWITCH_BAR + 120))s"
+  [ -n "$SWITCH_SECONDS" ] || { switch_report; die "$step" "switching to $value did not converge to '$want' within $((SWITCH_BAR + 120))s"; }
   [ "$SWITCH_SECONDS" -le "$SWITCH_BAR" ] || die "$step" "switching to $value converged after ${SWITCH_SECONDS}s, over the bar of ${SWITCH_BAR}s"
 }
 
