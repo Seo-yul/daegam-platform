@@ -105,6 +105,8 @@ PROVIDER_REJECTED = "llm_gateway_provider_rejected"
 PAUSED = "llm_gateway_paused"
 RATELIMIT_UNAVAILABLE = "llm_ratelimit_unavailable"
 IMAGES_MISSING = "llm_gateway_images_missing"
+# 렌더한 것을 클러스터에 적용하거나 파드를 읽다가 실패했다. 다음 틱이 다시 한다
+APPLY_FAILED = "llm_gateway_apply_failed"
 REVOCATIONS_LARGE = "llm_gateway_revocations_large"
 # 이 동기화가 게이트웨이 네임스페이스에서 부르는 동사 가운데 플랫폼 ClusterRole 에 없는 것. P63
 # 뒤로 ClusterRole 에는 Secret 동사가 없다. 이름으로 읽고(get), SSA 로 쓰고(create·patch),
@@ -359,12 +361,34 @@ class LlmGateway:
             state.reason, state.synced_at = e.code, now
             await self.store.put(state)
             return {"failed": [e.code]}
-        paused = await self._paused(client)
-        await self._apply(client, ps, images, desired, state, paused=paused)
-        await self._settle(client, ps, desired, state, now, paused=paused)
+        try:
+            paused = await self._paused(client)
+            await self._apply(client, ps, images, desired, state, paused=paused)
+            await self._settle(client, ps, desired, state, now, paused=paused)
+        except Exception:
+            await self._store_apply_failure(state, now)
+            raise
+        if state.reason == APPLY_FAILED:
+            # 실패가 덮어쓴 까닭이 아직 서 있으면(파드가 버린 리비전) 그것으로 되돌린다
+            state.reason = CONFIG_REJECTED if state.rejected_rev else None
         state.synced_at = now
         await self.store.put(state)
         return {"synced": [state.desired_rev or ""]}
+
+    async def _store_apply_failure(self, state: LlmGatewayState, now: datetime) -> None:
+        """적용이 실패한 틱의 까닭과 시각을 남긴다. 까닭이 없으면 상태 API 가 한 번도 맞추지 않은
+        것처럼 읽히고, 원인은 플랫폼 로그에만 남는다.
+
+        저장된 문서에 까닭과 시각, 그리고 `_prepare` 가 이미 클러스터에 해 둔 것(네임스페이스
+        표시)만 옮긴다. 이 틱이 메모리에서 바꾼 나머지는 적용이 끝나지 않았으므로 버린다. 저장이
+        실패해도 원래 오류를 가리지 않는다."""
+        try:
+            stored = await self.store.get()
+            stored.rendered, stored.activated_at = state.rendered, state.activated_at
+            stored.reason, stored.synced_at = APPLY_FAILED, now
+            await self.store.put(stored)
+        except Exception:  # noqa: BLE001  원래 오류가 올라가야 한다
+            logger.exception("llm gateway: could not store the apply failure")
 
     def _images(self) -> LlmGatewayImages:
         """설치 env 의 이미지 넷. 끈 채 옮겨 가는 동안 배포가 이미지를 비웠으면 렌더하지 않는다."""

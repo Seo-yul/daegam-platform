@@ -17,6 +17,7 @@ from daegam.k8s.client import decode_secret_data
 from daegam.k8s.labels import LABEL_PLATFORM_ID
 from daegam.k8s.templates import llm_gateway as tpl
 from daegam.services.llm_gateway import (
+    APPLY_FAILED,
     CONFIG_REJECTED,
     NAMESPACE_MISSING,
     NAMESPACE_TAKEN,
@@ -516,5 +517,36 @@ def test_token_cleanup_runs_even_when_the_gateway_cannot_render(settings, why):
             await rig.store.put((await rig.store.get()).model_copy(update={"rendered": True}))
         out = await rig.gw.sync()
         assert out["llm_cleanup"] == ["ag-1"] and tokens.settled == 1
+
+    run_db(settings, go)
+
+
+def test_a_failed_apply_leaves_a_reason_and_the_next_tick_clears_it(settings):
+    """적용이 실패한 틱도 까닭과 시각을 남긴다. 남기지 않으면 상태가 한 번도 맞추지 않은 것처럼
+    읽힌다. 오류는 그대로 올라가 리컨실 로그에 남고, 다음 틱이 적용하면 까닭이 사라진다."""
+    fake = gateway_namespace()
+    real_apply = fake.apply
+
+    def refuse(obj, **kwargs):
+        if obj["kind"] == "NetworkPolicy":
+            raise RuntimeError("the cluster refused the policy")
+        return real_apply(obj, **kwargs)
+
+    async def go(db):
+        rig = await make_rig(db, fake)
+        fake.apply = refuse
+        with pytest.raises(RuntimeError, match="refused the policy"):
+            await rig.gw.sync()
+        state = await rig.store.get()
+        assert (state.reason, state.synced_at) == (APPLY_FAILED, rig.now[0])
+        # 네임스페이스는 이미 표시했으므로 끌 때 치울 수 있게 렌더한 것으로 남긴다
+        assert state.rendered and state.activated_at is not None
+        # 끝나지 않은 적용의 리비전은 남기지 않는다
+        assert state.desired_rev is None
+        fake.apply = real_apply
+        rig.tick()
+        assert "synced" in await rig.gw.sync()
+        state = await rig.store.get()
+        assert (state.reason, state.synced_at) == (None, rig.now[0])
 
     run_db(settings, go)

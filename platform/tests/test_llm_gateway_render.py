@@ -8,6 +8,7 @@ https://raw.githubusercontent.com/agentgateway/agentgateway/v1.5.0/schema/config
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import shutil
 import subprocess
@@ -458,6 +459,27 @@ def test_the_gateway_goes_out_only_to_dns_the_limit_service_and_public_443():
             "ports": [{"protocol": "TCP", "port": 8080}],
         }
     ]
+
+
+def test_every_except_of_a_policy_lies_strictly_inside_its_cidr():
+    """API 서버는 `cidr` 의 진부분집합이 아닌 `except` 를 422 로 거절하고, 그러면 게이트웨이의
+    객체가 하나도 적용되지 않는다."""
+    blocks = [
+        peer["ipBlock"]
+        for doc in _workloads()
+        if doc["kind"] == "NetworkPolicy"
+        for rule in doc["spec"].get("egress", []) + doc["spec"].get("ingress", [])
+        for peer in rule.get("to", []) + rule.get("from", [])
+        if "ipBlock" in peer
+    ]
+    assert {b["cidr"] for b in blocks} >= {"0.0.0.0/0", "2000::/3"}
+    for block in blocks:
+        cidr = ipaddress.ip_network(block["cidr"])
+        for net in map(ipaddress.ip_network, block.get("except", [])):
+            assert net.version == cidr.version and net != cidr and net.subnet_of(cidr), (
+                block["cidr"],
+                str(net),
+            )
 
 
 def test_the_limit_service_and_redis_talk_only_to_each_other():
