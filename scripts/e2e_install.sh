@@ -176,6 +176,21 @@ hub_tools() {
   done
   die "$2" "GET /hub/$1/tools -> $code, not listed: $(cat "$WORK/body")"
 }
+# wait_tools HUB_ID WANT STEP: 플랫폼이 그 항목에서 한 tools/list 가 WANT 와 같아질 때까지 5초마다 180초 본다. 막 굴러 나온
+# vMCP 는 Ready 여도 첫 백엔드 initialize 가 거절되면(새 파드의 IP 가 프록시의 NetworkPolicy 에 들기 전이다) 다음 상태
+# 검사(30초 간격)까지 백엔드가 없고, 그동안의 tools/call 은 세션이 끊겨 턴이 MCPError 로 끝난다
+wait_tools() {
+  local i code="" got=""
+  for ((i = 0; i < 36; i++)); do
+    code="$(api GET "/hub/$1/tools" || true)"
+    if [ "$code" = "200" ] && [ "$(jq_ 'd["listed"]')" = "True" ]; then
+      got="$(jq_ 'sorted(t["name"] for t in d["tools"])')"
+      [ "$got" = "$2" ] && return 0
+    fi
+    sleep 5
+  done
+  die "$3" "GET /hub/$1/tools -> $code, tools '$got' (want $2) for 180s: $(cat "$WORK/body")"
+}
 # check_resources NS -> 모든 파드의 init·본 컨테이너에 cpu·memory requests·limits 가 있는지. 한 줄 요약을 찍고 빠지면 1
 check_resources() {
   "${K[@]}" -n "$1" get pods -o json | python3 -c '
@@ -844,6 +859,9 @@ else
   wait_auth_reapplied "${AUTH[1]#Authorization: Bearer }" "$TT_ROLLED_AT" || die 8t "the data plane still shows pending re-renders after turn tokens were turned on"
   # 재적용이 끝났다는 틱 뒤에도 오퍼레이터가 vMCP 를 굴리는 중일 수 있고, 그동안의 호출은 곧 지워질 옛 파드가 받는다
   wait_workloads_rolled "$TENANT_NS" || die 8t "workloads in $TENANT_NS were still rolling 300s after the re-render"
+  # 굴러 나온 vMCP 와 프록시가 백엔드까지 닿는 것을 본 뒤에 턴을 연다. 워크로드가 Ready 인 것만으로는 모자란다
+  wait_tools "$GWPUB" "$TOOLS_WANT" 8t
+  wait_tools "$HMS" "$TOOLS_WANT" 8t
   TURN_MSG="$(stub_call get_pets '{}')"
   turn_with_target 8t "$TT_GW_AG_ID" gateway_instance "$GW_ID"
   GW_SINCE="$TURN_SINCE"; GW_UNTIL="$TURN_UNTIL"; GW_TRIES="$TURN_TRIES"
