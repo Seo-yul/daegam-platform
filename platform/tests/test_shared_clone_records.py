@@ -23,7 +23,7 @@ from tests.helpers.clusters import register_cluster
 from tests.helpers.consts import EXT_URL, GV, HUB, OTHER_NS
 from tests.helpers.hub import (
     clone_name_of,
-    other_tenant_gateway,
+    gateway_on_remote_clone,
     shared_env,
 )
 from tests.helpers.workers import (
@@ -41,9 +41,7 @@ def _record(mongo, item_id: str) -> dict:
 def _deployed(client, fake_clusters):
     """다른 테넌트가 shared remote 항목 하나를 쓰는 Gateway 를 배포한다. (항목, 배포, 가짜)."""
     _cid, _items, shared, fake = shared_env(client, fake_clusters)
-    _profile, r = other_tenant_gateway(client, shared)
-    assert r.status_code == 201, r.text
-    return shared, r.json(), fake
+    return shared, gateway_on_remote_clone(client, shared), fake
 
 
 def test_a_retried_deploy_outside_the_boundary_renders_the_recorded_source(

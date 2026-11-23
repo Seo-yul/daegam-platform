@@ -158,11 +158,11 @@ describe("hub catalog import (P55 8절)", () => {
     });
   });
 
-  it("keeps the catalog name when a remote becomes an entry, and drops it once the address changes", async () => {
+  it("imports a remote as an entry item with its catalog name", async () => {
     const user = userEvent.setup();
     render(<TestApp initialPath="/hub/new?catalog=docs" />);
     await waitFor(() => expect(screen.getByTestId("hub-url")).toHaveValue("https://docs.example.com/mcp"));
-    await selectValue(user, "hub-kind", "entry");
+    expect(screen.getByTestId("hub-kind")).toHaveValue("entry");
     await user.type(screen.getByTestId("hub-name"), "-2");
     await user.click(screen.getByTestId("save-button"));
     await screen.findByTestId("hub-detail-page");
@@ -250,7 +250,7 @@ describe("hub catalog import (P55 8절)", () => {
     const offered = async () => within(await openSelect(user, "hub-transport")).getAllByRole("option").map((o) => o.getAttribute("data-value"));
     expect(await offered()).toEqual(["", "streamable-http", "sse"]);
     await user.keyboard("{Escape}");
-    await selectValue(user, "hub-kind", "remote");
+    await selectValue(user, "hub-kind", "entry");
     expect(screen.getByTestId("hub-transport")).toHaveValue("");
     expect(await offered()).toEqual(["", "streamable-http"]);
   });

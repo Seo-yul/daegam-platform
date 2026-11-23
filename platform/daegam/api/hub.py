@@ -35,7 +35,7 @@ from daegam.auth.hub_access import (
 )
 from daegam.auth.principal import Principal
 from daegam.names import validate_display_name, validate_name
-from daegam.services.hub import HubService
+from daegam.services.hub import CREATABLE_KINDS, HubService
 from daegam.services.hub_tools import origin_server
 from daegam.services.outside_headers import HeaderInput
 from daegam.store.hub import HubEnvVar, HubItem, HubSecretEnvVar, HubSource, is_derived
@@ -107,7 +107,8 @@ class HubCreate(BaseModel):
 
     name: str
     display_name: str | None = None  # 없으면 name (D24)
-    kind: Literal["remote", "entry", "image"]
+    # 만들 수 있는 종류다. 다른 값은 서비스가 422 invalid_kind 로 답하도록 문자열로 받는다
+    kind: str = Field(json_schema_extra={"enum": list(CREATABLE_KINDS)})
     # 접근 정책 (D23). 생략하면 빈 정책(게시 테넌트 소속 전원이 보고 developer 이상이 고르고
     # 관리한다). 다른 테넌트나 `*` 를 넣는 것은 hub:share(platform-admin)다
     access: Access | None = None

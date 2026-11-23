@@ -48,7 +48,7 @@ from tests.helpers.cedar_eval import allowed, evaluate
 from tests.helpers.consts import DEFAULT_NS, GV, GW
 from tests.helpers.gateways import cedar_policies, gateway_up, vmcp_of
 from tests.helpers.http import detail_code
-from tests.helpers.hub import hub_env
+from tests.helpers.hub import hub_env, stored_proxy_publish
 from tests.helpers.svc_tokens import claims_of, make_svc_tokens
 from tests.helpers.workers import run_data_plane_auth
 
@@ -474,9 +474,10 @@ def test_proxy_mode_items_stay_refused_under_token_auth(local_admin, fake_cluste
     p = gateway_up(
         local_admin, items, name="p", backends=[{"hub_item_id": items["calculator"]["id"]}]
     )
-    r = local_admin.post(f"{GW}/{p['id']}/publish", json={"name": "p-pub", "mode": "proxy"})
+    r = local_admin.post(f"{GW}/{p['id']}/publish", json={"name": "p-pub"})
     assert r.status_code == 201, r.text
-    body = {"name": "c", "backends": [{"hub_item_id": r.json()["id"]}]}
+    pub = stored_proxy_publish(local_admin, r.json())
+    body = {"name": "c", "backends": [{"hub_item_id": pub["id"]}]}
     assert detail_code(local_admin.post(GW, json=body)) == (422, "published_proxy_unsupported")
 
 

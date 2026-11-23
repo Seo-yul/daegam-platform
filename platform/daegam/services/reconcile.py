@@ -9,8 +9,9 @@ Gateway(`gateways`)와 Agent(`agents`) 는 같은 리스 안에서 뒤이어 처
 그 뒤로 같은 리스 안에서 단계들이 차례로 돈다. 클러스터 점검(클러스터마다 한 시간에 한 번, P50 2절:
 preflight 와 ToolHive CR 의 Strict dry run. 한 틱의 시간을 넘기면 남은 클러스터는 다음 틱이 잇는다),
 공유 복제본 스윕(P50 1절), 서비스 토큰 스윕(한 시간에 한 번, D41), 인자 조건의 기록(P52 4절),
-인증 재적용(P32 8절), 그리고 배선이 `steps` 로 넘긴 단계(접근 정리와 개인 토큰 키 pool 채우기, P32
-4절·7절, 기동 뒤 15분 동안 JWKS 를 받지 못한 검증기 다시 띄우기, T24)다.
+프록시를 두던 허브 항목 옮기기(P54b 7절), 인증 재적용(P32 8절), 그리고 배선이 `steps` 로 넘긴
+단계(접근 정리와 개인 토큰 키 pool 채우기, P32 4절·7절, 기동 뒤 15분 동안 JWKS 를 받지 못한 검증기
+다시 띄우기, T24)다.
 한 단계의 예외는 로그로 접히고 다음 단계를 막지 않는다. 결과 키는 `<단계 이름>_<단계가 낸 키>` 다.
 
 모든 단계가 SSA·결정적 이름이라 재실행이 안전하다. 레플리카가 여럿이면 `reconcile_leases` 컬렉션의
@@ -131,6 +132,7 @@ class Reconciler:
         cluster_service: ClusterService | None = None,
         cluster_check_interval: float = 3600.0,
         condition_sweep: Step | None = None,
+        entry_conversion: Step | None = None,
         steps: Sequence[tuple[str, Step]] = (),
     ):
         self.instances = instances
@@ -157,6 +159,10 @@ class Reconciler:
         # P52 4절: 인자 조건이 있는 서버의 파드가 조건을 지키는지 적는다. 인증 재적용보다 먼저 돌아,
         # 기록이 바뀐 서버를 같은 틱에 다시 렌더한다
         self.condition_sweep = condition_sweep
+        # P54b 7절: 프록시를 두던 허브 항목을 Gateway 의 Entry 가 주소를 직접 부르는 꼴로 옮긴다
+        # (`EntryConversion.run`). 인증 재적용보다 먼저 돌아, 스냅샷을 고쳐 쓴 Gateway 를 같은 틱에
+        # 다시 렌더한다
+        self.entry_conversion = entry_conversion
         # 그 밖의 단계. 이름과 함수이고 위의 단계 뒤에 적힌 순서대로 돈다
         self.extra_steps = list(steps)
         # 지난 틱에 잠금 표가 거부한 배포본과 렌더하지 못해 판정하지 않은 배포본. 목록이 바뀔 때만
@@ -287,6 +293,8 @@ class Reconciler:
             steps.append(("svc_tokens", lambda now: self._sweep_svc_tokens(sweeper, now)))
         if self.condition_sweep is not None:
             steps.append(("conditions", self.condition_sweep))
+        if self.entry_conversion is not None:
+            steps.append(("conversion", self.entry_conversion))
         if self.auth_reapply is not None:
             steps.append(("auth", self.auth_reapply.run))
         steps.append(("overrides", self._audit_stored_overrides))

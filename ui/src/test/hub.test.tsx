@@ -6,7 +6,7 @@ import { stubPlainHttpCopy } from "./clipboard";
 import { submitConfirm } from "./confirm";
 import { DEPLOY_POLL_MS } from "@/lib/deployment";
 import { HttpResponse, apiError, countExact, http, hubItemFixture, hubSharedReadOnly, hubState, lastRequest, meDeveloper, reference, referencesState, resetReferencesState, server } from "./msw";
-import { selectValue } from "./select";
+import { openSelect, selectValue } from "./select";
 import { advanceClock, tickingClock } from "./timers";
 
 /**
@@ -37,18 +37,23 @@ describe("mcp hub", () => {
     expect(within(remote).getByTestId("hub-tools-weather")).toHaveTextContent("아직 모름");
   });
 
-  it("registers a remote item with url, and an image item with port and tools_filter", async () => {
+  it("registers an entry item with url and transport, and offers no remote kind", async () => {
     const user = userEvent.setup();
     render(<TestApp initialPath="/hub/new" />);
+    const kinds = within(await openSelect(user, "hub-kind")).getAllByRole("option");
+    expect(kinds.map((o) => o.getAttribute("data-value"))).toEqual(["entry", "image"]);
+    await user.keyboard("{Escape}");
     await user.type(screen.getByTestId("hub-name"), "ext");
     await user.type(screen.getByTestId("hub-url"), "https://mcp.example.com/mcp");
+    await selectValue(user, "hub-transport", "streamable-http");
     await user.click(screen.getByTestId("save-button"));
     expect(await screen.findByTestId("hub-detail-page")).toBeInTheDocument();
     expect(lastRequest("POST", "/hub")?.body).toEqual({
       name: "ext",
-      kind: "remote",
+      kind: "entry",
       cluster_id: null,
       url: "https://mcp.example.com/mcp",
+      transport: "streamable-http",
     });
   });
 
@@ -339,13 +344,15 @@ describe("mcp hub", () => {
     await selectValue(user, "access-view-role", "developer");
     await user.type(screen.getByTestId("hub-name"), "ext");
     await user.type(screen.getByTestId("hub-url"), "https://mcp.example.com/mcp");
+    await selectValue(user, "hub-transport", "streamable-http");
     await user.click(screen.getByTestId("save-button"));
     await screen.findByTestId("hub-detail-page");
     expect(lastRequest("POST", "/hub")?.body).toEqual({
       name: "ext",
-      kind: "remote",
+      kind: "entry",
       cluster_id: null,
       url: "https://mcp.example.com/mcp",
+      transport: "streamable-http",
       access: {
         view: { tenants: [], roles: ["developer"], groups: [] },
         consume: { tenants: [], roles: [], groups: [] },

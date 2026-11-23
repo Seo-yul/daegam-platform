@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # P8 F2·F7 e2e against the real (orbstack) cluster. Assumes `make deploy-local` (platform in-cluster,
 # header mode, home cluster ingress{class traefik, allow_unauthenticated true}) and the P1 spike
-# (mock-soap, calculator proxy in daegam-spike) are up. Traefik must be installed (IngressClass
+# (mock-soap, the calculator MCP server in daegam-spike) are up. Traefik must be installed (IngressClass
 # `traefik`, LoadBalancer Service traefik/traefik); the script reads its IP and pins hosts with
 # `curl --resolve`, so the gate never touches /etc/hosts (STEP 9i's registry helper does, scripts/hub_e2e_registry.sh).
 #
-# Gate (STEP 1~18 + 4b·8c·8r·9h·9i·16b, 10 은 비어 있다): MCP Servers calculator[Add, Divide] + orders 저장·배포, published to the hub
-#   by hand (D23), hub remote (spike proxy) → Gateways A (calculator[Add] + orders all), B (calculator[Divide]) 저장·배포 →
-#   A tools/list == [Add, CreateOrder, GetOrder], B == [Divide], no remote tools, no prefixes,
+# Gate (STEP 1~18 + 4b·8c·8r·9e·9h·9i·16b, 10 은 비어 있다): MCP Servers calculator[Add, Divide] + orders 저장·배포, published to the hub
+#   by hand (D23), hub entry (spike server) → Gateways A (calculator[Add] + orders all), B (calculator[Divide]) 저장·배포 →
+#   A tools/list == [Add, CreateOrder, GetOrder], B == [Divide], no entry tools, no prefixes,
 #   A Add(3,4)=7, B Add not found, A Subtract not found, CR names gw-<name> + daegam.devops.ai.kr/id labels,
-#   redeploy keeps the name, publish (entry) → C consumes, publish (proxy),
+#   redeploy keeps the name, publish → C consumes, 다른 테넌트의 Gateway 가 entry 항목을 자기 Entry 로 부른다,
 #   exposure: A 의 복제본을 http 로, calculator 의 복제본을 https 로 (vMCP 앞단 뒤), 422 namespace_not_allowed,
 #   메트릭은 거친 곳마다 한 번 세고 노출 앞단은 세지 않는다, delete cleans up, code mode Gateway, cleanup.
 #   단계 번호는 다른 문서가 가리키므로 당기지 않는다. 순환 참조의 422 cycle 과 노출 host 중복의 409 host_conflict 는 API
@@ -20,7 +20,8 @@
 #   STEP 1   backend apis calculator + orders
 #   STEP 2   mcp servers calculator + orders 저장 → 배포 → Ready
 #   STEP 3   배포해도 허브에 자동 등재되지 않는다; POST /mcp-servers/{id}/publish x2 (201, hub_item on the
-#            document, audit publish_server) + remote (spike proxy) + refresh-tools
+#            document, audit publish_server) + entry (spike server, CR 없음). 그 Service 가 테넌트의 네임스페이스가 아니라
+#            refresh-tools 는 422 entry_address_refused(service_namespace)이고 Tools 탭은 listed false 다
 #   STEP 4   gateways A, B 정의 저장 (draft); unpublishing a referenced item -> 409 in_use [A, B]
 #   STEP 4b  GET /{리소스}/{id}/references (D43): 허브 항목은 A·B 를, calculator 는 그 항목과 A·B 를 답한다
 #   STEP 5   gateways A, B 배포 → Ready
@@ -30,11 +31,16 @@
 #   STEP 8r  header 모드의 Tool 규칙(P52 2절): B 의 Divide 에 "developer 이상만" 규칙을 둔 리비전을 재배포하면 B 의 상태가
 #            rules_not_enforced 를 내고, header 모드는 부를 수 있는 대상을 렌더하지 않으므로 B 는 여전히 Divide 를 보인다.
 #            규칙을 걷은 리비전을 재배포하면 경고가 사라진다
-#   STEP 9   publish A (entry) → C consumes; C tools == A advertised; C Add == 7; A unaffected
+#   STEP 9   publish A → C consumes; C tools == A advertised; C Add == 7; A unaffected
+#   STEP 9e  entry 항목의 주소를 Gateway 가 직접 부른다: 다른 테넌트의 Gateway eb 가 STEP 3 의 spike 항목을 자기
+#            MCPServerEntry 로 부르고(Add == 7), 스냅샷 행에 복제본이 없고 두 네임스페이스에 hub-·shared- MCPRemoteProxy 가
+#            없으며 remote 복제본 기록이 늘지 않는다. 플랫폼이 직접 부르는 refresh-tools 는 다른 테넌트 네임스페이스의
+#            Service(service_namespace)와 DAEGAM_ENTRY_PRIVATE_ALLOW 밖의 사설 주소(url_private)를 422
+#            entry_address_refused 로 거절한다
 #   STEP 9h  외부 서버의 고정 헤더(P86): 테넌트 네임스페이스의 header-echo 에 header 항목을 등록, 틀린 값은 header_refused,
 #            맞는 값이 Gateway h 를 거쳐 서버에 전달되고, 바꾼 값은 재적용 뒤에 전달되며, 다른 테넌트 Gateway 의 사본은
 #            consume 에서 빼면 없어지고, 항목을 뺀 h 에는 사본이 없다
-#   STEP 11  publish A (proxy) → MCPRemoteProxy Ready, refresh-tools 422 derived_tools(D49), live tools/list(GET /hub/{id}/tools), unpublish
+#   STEP 11  STEP 9 가 게시한 항목: refresh-tools 422 derived_tools(D49), live tools/list(GET /hub/{id}/tools) == A advertised
 #   STEP 12  exposure prerequisites: Traefik IP, self-signed kubernetes.io/tls Secret,
 #            exposure-options lists the Secret name and carries no Secret data
 #   STEP 13  A 를 복제한 a-exposed 를 http://gw-a.e2e.local/mcp 로 노출 배포 → warnings[] unauthenticated_exposure,
@@ -98,8 +104,13 @@ API="$BASE/api"
 FIX="$ROOT/platform/tests/fixtures"
 SOAP_ENDPOINT="http://mock-soap.${SPIKE_NS}.svc:18080/calc"
 ORDERS_ENDPOINT="http://mock-soap.${SPIKE_NS}.svc:18080/orders"
-# remote 허브 항목이 감쌀 URL. 기본은 P1 스파이크 calculator 프록시 (E2E_REMOTE_URL 로 바꿀 수 있다)
-SPIKE_PROXY="${E2E_REMOTE_URL:-http://mcp-calculator-proxy.${SPIKE_NS}.svc.cluster.local:8080/mcp}"
+# entry 허브 항목으로 등록할 외부 MCP 서버다. lab 의 스파이크 calculator(Tool 은 Add 하나)이고, 테넌트 네임스페이스 밖의
+# Service 라 STEP 3·9e 가 플랫폼의 주소 규칙도 이 주소로 본다
+SPIKE_SVC="mcp-calculator-proxy"
+SPIKE_URL="http://${SPIKE_SVC}.${SPIKE_NS}.svc.cluster.local:8080/mcp"
+SPIKE_ITEM="spike-entry"
+# STEP 9e·9h 가 Gateway 를 두는 다른 테넌트
+TENANT_B="${TENANT}-b"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/daegam-e2e-gateway.XXXXXX")"
 K=(kubectl --context "$CTX")
 PY="$ROOT/platform/.venv/bin/python"
@@ -192,7 +203,31 @@ MCP_CLIENT_NAME="e2e-gateway"
 . "$HERE/lib/mcp_rpc.sh"
 # STEP 8c 의 code_read_body·script_args·SCRIPT_TOOL 은 여기에 있다
 . "$HERE/lib/e2e_code_mode.sh"
-# A 가 광고하는 도구 셋 (sorted 의 repr). STEP 8·9·11 이 A·C·게시물·프록시의 목록을 이것과 견준다
+# platform_config (플랫폼 ConfigMap 의 값 읽기) 는 여기에 있다. STEP 9e 가 쓴다
+. "$HERE/lib/e2e_control_plane.sh"
+# entry 항목의 주소를 플랫폼이 부르지 않는지 본다 (STEP 3·9e). refresh-tools 는 422 entry_address_refused 이고 reason 이
+# 걸린 규칙의 코드다. Tools 탭(GET /hub/{id}/tools)은 부르지 않고 listed false 와 그 이유로 답한다
+entry_refused() { # STEP ITEM_ID REASON
+  local code
+  code="$(api POST "/hub/$2/refresh-tools")"
+  [ "$code" = "422" ] && [ "$(jq_ "d['detail']['code'], d['detail'].get('reason')")" = "entry_address_refused $3" ] \
+    || die "$1" "refresh-tools of hub item $2 -> $code (expected 422 entry_address_refused, reason $3): $(cat "$WORK/body")"
+  code="$(api GET "/hub/$2/tools")"
+  [ "$code" = "200" ] && [ "$(jq_ 'd["listed"], d["tools"]')" = "False []" ] \
+    || die "$1" "GET /hub/$2/tools -> $code (expected listed false): $(cat "$WORK/body")"
+  case "$(jq_ 'd["reason"]')" in
+    "entry_address_refused: "*"($3)") ;;
+    *) die "$1" "GET /hub/$2/tools reason: $(jq_ 'd["reason"]') (expected entry_address_refused ... ($3))" ;;
+  esac
+}
+# 플랫폼 상태가 세는 remote 항목의 복제본 기록 수 (모든 클러스터의 합). 남은 것이 없는 클러스터는 상태에서 빠진다
+# 값을 CLONE_RECORDS 에 남긴다 ($( ) 안에서 부르면 die 의 메시지가 사라진다)
+CLONE_RECORDS=""
+clone_records() { # STEP
+  [ "$(api GET /settings/data-plane-auth)" = 200 ] || die "$1" "GET /settings/data-plane-auth failed"
+  CLONE_RECORDS="$(jq_ 'sum(c["clones"] for c in d["entry_conversions"].values())')"
+}
+# A 가 광고하는 도구 셋 (sorted 의 repr). STEP 8·9·11 이 A·C·게시 항목의 목록을 이것과 견준다
 A_TOOLS="['Add', 'CreateOrder', 'GetOrder']"
 tools_sorted() { json_of - 'sorted(d["tools"])' <<<"$1"; }   # $MCP list 의 출력 -> 정렬한 도구 이름
 rpc_tools() { rpc_ 'sorted(t["name"] for t in d["result"]["tools"])'; }
@@ -278,10 +313,23 @@ api GET "/mcp-servers/$I2" >/dev/null
 [ "$(jq_ 'd["display_name"]')" = "orders" ] || die 2 "orders display_name should default to name: $(jq_ 'd["display_name"]')"
 pass 2 "mcp servers calculator=$I1 (display_name=$I1_DISPLAY, CR $I1_NS/$I1_CR) orders=$I2 (display_name defaults to name) 저장·배포 Ready"
 
-# ---------- 3. hub: publish internal x2 (manual, D23) + remote (spike proxy) ----------
-code="$(api POST /hub "{\"name\": \"spike-remote\", \"kind\": \"remote\", \"url\": \"$SPIKE_PROXY\"}")"
-case "$code" in 201) REMOTE="$(jq_ 'd["id"]')" ;; 409) listed_id 3 /hub spike-remote; REMOTE="$LISTED_ID" ;; *) die 3 "POST /hub remote -> $code" ;; esac
-wait_ready "/hub/$REMOTE" 3
+# ---------- 3. hub: publish internal x2 (manual, D23) + entry (spike server) ----------
+# 외부 MCP 서버는 entry 항목이다. URL 만 등록하고 CR 을 만들지 않으므로 기다릴 프록시가 없다. STEP 9e 의 다른 테넌트
+# Gateway 가 쓰도록 그 테넌트에 연다. STEP 9e 가 견줄 remote 복제본 기록 수도 여기서 읽어 둔다
+clone_records 3; CLONES0="$CLONE_RECORDS"
+SPIKE_ACCESS="{\"view\": {\"tenants\": [\"$TENANT_B\"]}, \"consume\": {\"tenants\": [\"$TENANT_B\"]}}"
+code="$(api POST /hub "{\"name\": \"$SPIKE_ITEM\", \"kind\": \"entry\", \"url\": \"$SPIKE_URL\", \"transport\": \"streamable-http\", \"access\": $SPIKE_ACCESS}")"
+case "$code" in
+  201) SPIKE="$(jq_ 'd["id"]')" ;;
+  409)
+    # 이전 실행이 남긴 항목이다. 접근 범위만 다시 맞춘다
+    listed_id 3 /hub "$SPIKE_ITEM"; SPIKE="$LISTED_ID"
+    code="$(api PUT "/hub/$SPIKE/access" "$SPIKE_ACCESS")"; [ "$code" = "200" ] || die 3 "PUT /hub/$SPIKE/access -> $code"
+    ;;
+  *) die 3 "POST /hub entry -> $code: $(cat "$WORK/body")" ;;
+esac
+api GET "/hub/$SPIKE" >/dev/null
+[ "$(jq_ 'd["kind"], d["source"]["url"]')" = "entry $SPIKE_URL" ] || die 3 "spike item shape: $(cat "$WORK/body")"
 # 배포해도 자동으로 허브에 오르지 않는다. hub_item 이 null 이면 허브에 internal 항목이 없고 게시 해제는
 # 404 not_published 다. 재실행이면 이전 실행의 게시가 남아 있을 수 있어 publish 는 200(멱등)도 받는다
 publish_inst() { # ID NAME -> hub item id
@@ -322,16 +370,13 @@ events = json.load(open(sys.argv[1]))
 ok = {e["resource_id"] for e in events if e["result"] == "ok"}
 sys.exit(0 if set(sys.argv[2:]) <= ok else 1)
 PY
-# 프록시가 Ready 여도 업스트림이 아직 안 떠 있을 수 있다 (502 tools_list_failed). 60초까지 재시도
-code=""
-for ((i = 0; i < 12; i++)); do
-  code="$(api POST "/hub/$REMOTE/refresh-tools")"
-  [ "$code" = "200" ] && break
-  sleep 5
-done
-[ "$code" = "200" ] || die 3 "refresh-tools -> $code"
-RTOOLS="$(jq_ 'd["tool_names"]')"
-pass 3 "no auto-registration; published calculator=$HCALC($CALC_WL) orders=$HORD($ORD_WL) ($PUB_CODES, hub_item on the document, audit publish_server x2); remote=$REMOTE Ready tools=$RTOOLS"
+# entry 항목은 프록시를 만들지 않는다. 그 주소는 테넌트의 네임스페이스가 아닌 $SPIKE_NS 의 Service 라(STEP 15 가 그
+# 네임스페이스를 422 namespace_not_allowed 로 본다) 플랫폼은 그 주소를 부르지 않는다. 항목을 쓰는 Gateway 의 vMCP 는
+# 자기 Entry 로 부른다 (STEP 9e)
+left="$("${K[@]}" -n "$I1_NS" get mcpremoteproxy "hub-$SPIKE_ITEM" -o name --ignore-not-found)" || die 3 "listing MCPRemoteProxy hub-$SPIKE_ITEM failed"
+[ -z "$left" ] || die 3 "the entry item got a proxy: $left"
+entry_refused 3 "$SPIKE" service_namespace
+pass 3 "no auto-registration; published calculator=$HCALC($CALC_WL) orders=$HORD($ORD_WL) ($PUB_CODES, hub_item on the document, audit publish_server x2); entry=$SPIKE ($SPIKE_URL) without a proxy, refresh-tools 422 entry_address_refused (service_namespace) and the tools tab listed nothing"
 
 # ---------- 4. gateways A, B 정의 저장 ----------
 # 저장만 한다. draft 정의도 허브 항목을 붙든다 (아래 unpublish 의 409 in_use)
@@ -395,8 +440,8 @@ B_CALC="$(jq_ "[b['workload'] for b in d['deployed_backends'] if b['hub_item_id'
 pass 5 "gateways A=$A (display_name=$A_DISPLAY; $URL_A; entries $A_CALC,$A_ORD) B=$B ($URL_B; entry $B_CALC) 배포 Ready"
 
 # ---------- 6. tools/list subsets ----------
-pf() { # svc port-local [STEP]
-  start_pf "$NS" "svc/$1" "$2:4483"; PFS+=("$PF_PID"); PFS_PORTS+=("$2")
+pf() { # svc port-local [STEP [NAMESPACE]]
+  start_pf "${4:-$NS}" "svc/$1" "$2:4483"; PFS+=("$PF_PID"); PFS_PORTS+=("$2")
   wait_port "$2" || die "${3:-6}" "port-forward $1 :$2 did not open"; }
 # list_redeployed PORT URL -> 다시 배포한 Gateway 의 tools/list. 다시 배포가 vMCP 파드를 바꾸면 먼저 연 kubectl 은 내려간
 # 파드에 붙은 채 포트를 쥐고 있어 요청이 끊긴다. 새 파드로 다시 열고(lib/e2e_pf.sh restart_pf) 답할 때까지 다시 부른다
@@ -423,9 +468,9 @@ a = json.loads(sys.argv[1])["tools"]; b = json.loads(sys.argv[2])["tools"]
 assert "Add" in a and "Divide" not in a, a
 assert "CreateOrder" in a and "GetOrder" in a, a
 assert b == ["Divide"], b
-assert not any("spike" in t or "_" in t for t in a + b), (a, b)   # remote 툴 없음, 접두사 없음
+assert not any("spike" in t or "_" in t for t in a + b), (a, b)   # entry 항목의 툴 없음, 접두사 없음
 PYEOF
-pass 6 "A tools == [Add, CreateOrder, GetOrder]; B tools == [Divide]; no remote tools, no prefixes"
+pass 6 "A tools == [Add, CreateOrder, GetOrder]; B tools == [Divide]; no entry tools, no prefixes"
 
 # ---------- 7. calls ----------
 # STEP 16b 가 늘어난 수를 보도록 부르기 전의 메트릭을 둔다. 이전 실행이 남긴 calculator 에는 그 실행의 호출이 담겨 있다.
@@ -499,7 +544,7 @@ wait_ready "/gateways/$B" 8r
 [ "$(b_rule_warnings)" = "[]" ] || die 8r "B still warns after its rule was removed: $(b_rule_warnings)"
 pass 8r "header mode: B with a rule on Divide warns rules_not_enforced and still lists [Divide]; removing the rule clears the warning"
 
-# ---------- 9. publish A (entry) -> C consumes; tools/list == A advertised; Add == 7 ----------
+# ---------- 9. publish A -> C consumes; tools/list == A advertised; Add == 7 ----------
 # 본문을 비우면 게시 이름은 문서 name 그대로(a), display_name 은 문서의 것이다 (D24). A 는 STEP 0 뒤에 새로 만든
 # 문서라 게시 항목도 새것이고, 같은 이름의 항목이 남아 있으면 409 name_conflict 로 멈춘다
 code="$(api POST "/gateways/$A/publish" '{}')"
@@ -528,6 +573,73 @@ LA2="$($MCP list "$UA")" || die 9 "A tools/list after publish failed"
 [ "$(tools_sorted "$LA2")" = "$A_TOOLS" ] || die 9 "A affected by publish: $LA2"
 pass 9 "published A as 'a' (default name = 문서 name, display_name=$A_DISPLAY) consumed by C; C tools == A advertised; C Add(3,4)=7; A unaffected"
 
+# ---------- 9e. entry 항목: 다른 테넌트의 Gateway 가 자기 Entry 로 부른다 + 플랫폼의 주소 규칙 ----------
+# entry 항목은 복제하지 않는다. 그 항목을 쓰는 Gateway 는 어느 테넌트에 있든 자기 MCPServerEntry 로 항목의 주소를 부른다.
+# 플랫폼은 STEP 3 의 주소를 부르지 않으므로 항목의 Tool 이름을 모르고, 배포의 도달 확인도 부르지 않고 그 백엔드를 준비된
+# 것으로 센다. 이름을 모르는 백엔드는 auto 모드에서 접두사가 붙으므로 priority 로 저장해 서버의 이름 Add 그대로 부른다.
+# vMCP 포트는 뒤의 9h 와 같은 자리를 쓰므로 이 단계 안에서 닫는다
+TENANT="$TENANT_B" api GET /gateways >/dev/null; old="$(find_id eb)"
+[ -z "$old" ] || TENANT="$TENANT_B" api_delete "/gateways/$old" >/dev/null || true
+TENANT="$TENANT_B" save_doc 9e /gateways eb "{\"name\": \"eb\", \"conflict_resolution\": \"priority\", \"backends\": [{\"hub_item_id\": \"$SPIKE\"}]}"
+EB="$SAVED_ID"
+TENANT="$TENANT_B" deploy_doc 9e /gateways "$EB"
+TENANT="$TENANT_B" wait_ready "/gateways/$EB" 9e
+TENANT="$TENANT_B" api GET "/gateways/$EB" >/dev/null
+NSB="$(jq_ 'd["k8s"]["namespace"]')"; NEB="$(jq_ 'd["k8s"]["name"]')"
+[ "$NSB" != "$NS" ] || die 9e "tenant $TENANT_B deployed into $TENANT's namespace $NS"
+EB_ROW="$(jq_ "[(b['kind'], b['url'], b['clone_name'], b['clone_kind']) for b in d['deployed_backends'] if b['hub_item_id']=='$SPIKE'][0]")"
+[ "$EB_ROW" = "entry $SPIKE_URL None None" ] \
+  || die 9e "eb's snapshot row for the entry item: $EB_ROW (want entry, $SPIKE_URL, no clone)"
+EB_WL="$(jq_ "[b['workload'] for b in d['deployed_backends'] if b['hub_item_id']=='$SPIKE'][0]")"
+"${K[@]}" -n "$NSB" get mcpserverentry "$EB_WL" -o jsonpath='{.spec.remoteUrl}' >"$WORK/body" || die 9e "MCPServerEntry $NSB/$EB_WL missing"
+[ "$(cat "$WORK/body")" = "$SPIKE_URL" ] || die 9e "Entry $NSB/$EB_WL remoteUrl: $(cat "$WORK/body") (want $SPIKE_URL)"
+for ns in "$NS" "$NSB"; do
+  left="$("${K[@]}" -n "$ns" get mcpremoteproxies -o name)" || die 9e "listing MCPRemoteProxy in $ns failed"
+  ! grep -Eq "/(hub|shared)-$SPIKE_ITEM" <<<"$left" || die 9e "a proxy or a clone of the entry item runs in $ns: $left"
+done
+clone_records 9e; CLONES1="$CLONE_RECORDS"
+[ "$CLONES1" -le "$CLONES0" ] || die 9e "remote clone records grew from $CLONES0 to $CLONES1"
+PEB=$((PF_PORT_BASE + 3)); pf "vmcp-$NEB" "$PEB" 9e "$NSB"; PF_EB="$PF_PID"
+UEB="http://127.0.0.1:$PEB/mcp"
+# 방금 뜬 vMCP 는 백엔드의 첫 점검이 지나야 그 Tool 을 내놓는다
+seen=""
+for ((i = 0; i < 24; i++)); do
+  LEB="$($MCP list "$UEB" 2>/dev/null || true)"
+  [ -n "$LEB" ] && [ "$(tools_sorted "$LEB" 2>/dev/null || true)" = "['Add']" ] && { seen=1; break; }
+  sleep 5
+done
+[ -n "$seen" ] || die 9e "eb tools/list is not [Add]: $LEB"
+CEB="$($MCP call "$UEB" Add '{"a": 3, "b": 4}')" || die 9e "eb Add failed: $CEB"
+call_result_is 7 "$CEB" || die 9e "eb Add != 7: $CEB"
+stop_pf "$PF_EB" "$PEB"
+# 플랫폼이 직접 부르는 길의 거절 둘. 다른 테넌트 네임스페이스의 Service 로는 eb 의 vMCP 를 쓴다. 사설 주소로는 spike
+# Service 의 ClusterIP 를 쓴다. 설치본이 사설망을 열어 두었으면(DAEGAM_ENTRY_PRIVATE_ALLOW) 그 주소가 열렸는지 알 수
+# 없으므로 사설 주소는 보지 않는다
+refused_entry() { # NAME URL REASON -> 그 주소의 entry 항목을 등록해 거절을 보고 지운다
+  local id code
+  api GET /hub >/dev/null; id="$(find_id "$1")"
+  [ -z "$id" ] || api_delete "/hub/$id" >/dev/null || true
+  code="$(api POST /hub "{\"name\": \"$1\", \"kind\": \"entry\", \"url\": \"$2\", \"transport\": \"streamable-http\"}")"
+  [ "$code" = "201" ] || die 9e "POST /hub $1 -> $code: $(cat "$WORK/body")"
+  id="$(jq_ 'd["id"]')"
+  entry_refused 9e "$id" "$3"
+  api_delete "/hub/$id" >/dev/null || die 9e "delete hub item $1 failed"
+}
+refused_entry e2e-neighbour "http://vmcp-$NEB.$NSB.svc.cluster.local:4483/mcp" service_namespace
+PRIVATE_NOTE="a private address (url_private)"
+PRIVATE_ALLOW="$(platform_config DAEGAM_ENTRY_PRIVATE_ALLOW)" || die 9e "reading the platform ConfigMap failed"
+if [ -z "$PRIVATE_ALLOW" ]; then
+  SPIKE_IP="$("${K[@]}" -n "$SPIKE_NS" get svc "$SPIKE_SVC" -o jsonpath='{.spec.clusterIP}')" || die 9e "Service $SPIKE_NS/$SPIKE_SVC missing"
+  [ -n "$SPIKE_IP" ] || die 9e "Service $SPIKE_NS/$SPIKE_SVC has no ClusterIP"
+  refused_entry e2e-private "http://$SPIKE_IP:8080/mcp" url_private
+else
+  PRIVATE_NOTE="no private address checked, because this install sets DAEGAM_ENTRY_PRIVATE_ALLOW"
+  echo "  9e: DAEGAM_ENTRY_PRIVATE_ALLOW is set on this install; the private-address refusal is not checked"
+fi
+TENANT="$TENANT_B" api_delete "/gateways/$EB" >/dev/null || die 9e "delete gateway eb failed"
+TENANT="$TENANT_B" wait_gone "/gateways/$EB" || die 9e "gateway eb ($EB) is still there after its delete"
+pass 9e "$TENANT_B's Gateway eb called the entry item through its own Entry $NSB/$EB_WL -> $SPIKE_URL (Add(3,4)=7; snapshot row without a clone, no hub- or shared- MCPRemoteProxy in $NS or $NSB, remote clone records $CLONES0 -> $CLONES1); refresh-tools refused a Service of $NSB (service_namespace) and $PRIVATE_NOTE"
+
 # ---------- 9h. 외부 서버의 고정 헤더 (P86 8절) ----------
 # 헤더를 요구하고 되돌려 주는 lab 서버(deploy/dev/lab/images/header-echo)를 테넌트 네임스페이스에 띄운다. 인증을 싣는
 # 항목의 URL 은 https 이거나 그 테넌트 네임스페이스의 Service 여야 하기 때문이다(outside_auth_not_https). 틀린 값은
@@ -537,7 +649,6 @@ pass 9 "published A as 'a' (default name = 문서 name, display_name=$A_DISPLAY)
 # 않고 사본만 본다. 주인이 consume 에서 그 테넌트를 빼면 사본이 없어진다
 HDR_NAME="X-API-Key"; HDR_V1="e2e-p86-one-$$"; HDR_V2="e2e-p86-two-$$"; HDR_WRONG="e2e-p86-wrong-$$"
 HDR_IMAGE="${HEADER_ECHO_IMAGE:-daegam-header-echo:dev}"
-TENANT_B="${TENANT}-b"
 copies() { # GATEWAY_ID NAMESPACE -> 그 Gateway 의 헤더 사본 Secret 수. kubectl 이 실패하면 멈춘다
   local out
   out="$("${K[@]}" -n "$2" get secret -l "daegam.devops.ai.kr/id=$1" -o name)" || die 9h "kubectl get secret in $2 failed"
@@ -646,26 +757,21 @@ api_delete "/hub/$HID" >/dev/null || die 9h "delete header item failed"
 "${K[@]}" delete -f "$WORK/header-echo.yaml" --ignore-not-found >/dev/null
 pass 9h "header item: a wrong value saved as header_refused, the right value reached the echo server through Gateway h, a replaced value after the reapply; $TENANT_B's Gateway kept a copy until $TENANT_B left consume; h without the item kept no copy and still added"
 
-# ---------- 11. publish A (proxy) -> MCPRemoteProxy Ready + tools/list ----------
-code="$(api POST "/gateways/$A/publish" '{"name": "a-pub-proxy", "mode": "proxy"}')"
-[ "$code" = "201" ] || die 11 "publish proxy -> $code (expected 201): $(cat "$WORK/body")"
-PUBP="$(jq_ 'd["id"]')"
-wait_ready "/hub/$PUBP" 11
+# ---------- 11. 게시 항목의 Tool 이름은 원본이 정한다 (D49) + live tools/list (D48) ----------
 # published 항목의 도구 이름은 문서가 정하므로 refresh-tools 는 422 derived_tools 다 (D49). 라이브 tools/list 는 도구
-# 탭이 부르는 GET /hub/{id}/tools 가 저장 없이 한다 (D48). 프록시가 Ready 여도 업스트림을 잠깐 못 볼 수 있어 60초까지 본다
-code="$(api POST "/hub/$PUBP/refresh-tools")"
+# 탭이 부르는 GET /hub/{id}/tools 가 저장 없이 한다 (D48). 플랫폼이 원본 Gateway 의 vMCP 를 부른다. STEP 9 의 항목을 쓴다
+code="$(api POST "/hub/$PUB/refresh-tools")"
 [ "$code" = "422" ] && [ "$(jq_ "d['detail']['code']")" = derived_tools ] || die 11 "refresh-tools on a published item -> $code (expected 422 derived_tools)"
 code=""; listed=""
 for ((i = 0; i < 12; i++)); do
-  code="$(api GET "/hub/$PUBP/tools")"
+  code="$(api GET "/hub/$PUB/tools")"
   [ "$code" = "200" ] && listed="$(jq_ 'd["listed"]')" && [ "$listed" = True ] && break
   sleep 5
 done
-[ "$code" = "200" ] && [ "$listed" = True ] || die 11 "GET /hub/$PUBP/tools via proxy -> $code listed=$listed"
+[ "$code" = "200" ] && [ "$listed" = True ] || die 11 "GET /hub/$PUB/tools -> $code listed=$listed"
 PT="$(jq_ 'sorted(t["name"] for t in d["tools"])')"
-[ "$PT" = "$A_TOOLS" ] || die 11 "proxy tools/list wrong: $PT"
-api DELETE "/hub/$PUBP" >/dev/null
-pass 11 "proxy-mode publish Ready; refresh-tools 422 derived_tools; live tools/list via MCPRemoteProxy == A advertised; unpublished"
+[ "$PT" = "$A_TOOLS" ] || die 11 "live tools/list of the published item wrong: $PT"
+pass 11 "published item: refresh-tools 422 derived_tools; live tools/list == A advertised"
 
 # ---------- 12. exposure prerequisites: Traefik IP, TLS Secret, exposure-options ----------
 LB_IP="$("${K[@]}" -n "$TRAEFIK_NS" get svc "$TRAEFIK_SVC" -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)"
@@ -1094,7 +1200,7 @@ code="$(api DELETE "/mcp-servers/$I1")"
 [ "$code" = "409" ] && [ "$(jq_ "d['detail']['code']")" = "in_use" ] || die 18 "DELETE calculator while A, B reference it -> $code (expected 409 in_use): $(cat "$WORK/body")"
 [ "$(jq_ "sorted(d['detail']['gateway_ids'])")" = "$WANT_REFS" ] || die 18 "in_use gateway_ids: $(jq_ "d['detail']['gateway_ids']")"
 for id in "$A" "$B"; do code="$(api DELETE "/gateways/$id")"; [ "$code" = "200" ] || die 18 "DELETE gateway $id -> $code"; done
-api DELETE "/hub/$REMOTE" >/dev/null
+api DELETE "/hub/$SPIKE" >/dev/null
 # Gateway 가 사라지면 지울 수 있고, 그 삭제가 게시 항목을 함께 지운다 (docs/guide/hub-gateway.md 6절)
 for id in "$I1" "$I2"; do
   code="$(api DELETE "/mcp-servers/$id")"; [ "$code" = "200" ] || die 18 "DELETE mcp server $id -> $code"
@@ -1110,7 +1216,7 @@ for ((i = 0; i < 24; i++)); do
   [ "$left" = "0" ] && { gone=1; break; }; sleep 5
 done
 [ -n "$gone" ] || die 18 "CRs still present in $NS"
-pass 18 "vMCPs, gateway groups/entries, published items, remote proxy, ingresses and MCP servers deleted; A·B 가 붙들고 있는 동안 calculator 삭제는 409 in_use 였고, Gateway 를 지운 뒤의 삭제가 게시 항목을 함께 지웠다"
+pass 18 "vMCPs, gateway groups/entries, published items, the entry item, ingresses and MCP servers deleted; A·B 가 붙들고 있는 동안 calculator 삭제는 409 in_use 였고, Gateway 를 지운 뒤의 삭제가 게시 항목을 함께 지웠다"
 
 # ---------- 9i. 허브 이미지의 허용 (P55 6절, F8) ----------
 # scripts/hub_e2e_registry.sh 가 띄운 TLS zot(k3d-hub)과 평문 upstream 이 있어야 돈다(E2E_HUB_DIR). 다른 STEP 이 모두 끝난 뒤에 돈다.

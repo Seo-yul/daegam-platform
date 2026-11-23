@@ -54,6 +54,7 @@ export const dataPlaneAuth: DataPlaneAuth = {
   kinds: {},
   fallbacks: {},
   handovers: {},
+  entry_conversions: {},
   redis_plain_consumers: {},
   shipped_redis_cert_expires_at: null,
   shipped_redis_cert_expiring: false,

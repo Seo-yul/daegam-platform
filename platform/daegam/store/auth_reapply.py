@@ -316,6 +316,10 @@ class ClusterAuthState(BaseModel):
     def waiting(self, now: datetime) -> bool:
         return _waiting(self.retry_at, now)
 
+    def backing_off(self, now: datetime) -> bool:
+        """연결하지 못해 미뤄 둔 클러스터인가. 그동안은 이 클러스터를 읽지 않는다."""
+        return self.unreachable and self.waiting(now)
+
     def backoff(self, now: datetime) -> None:
         """스윕 실패 한 번을 적고 다음 스윕을 미룬다."""
         self.retry_at, self.failures = next_retry(now, self.failures)
@@ -356,6 +360,11 @@ class MongoAuthReapplyStore:
     async def clusters(self) -> list[ClusterAuthState]:
         cursor = self.coll.find({"_id": {"$regex": f"^{CLUSTER_PREFIX}"}}).sort("_id", 1)
         return [ClusterAuthState.model_validate(d) for d in await cursor.to_list()]
+
+    async def backing_off(self, now: datetime) -> set[str]:
+        """인증 재적용이 연결하지 못해 미뤄 둔 클러스터의 id. 리컨실의 다른 단계도 그동안 그
+        클러스터를 건너뛴다."""
+        return {s.cluster_id for s in await self.clusters() if s.backing_off(now)}
 
     async def turn_gates(self) -> list[ClusterTurnGates]:
         doc = await self.coll.find_one({"_id": TURN_GATES_ID})

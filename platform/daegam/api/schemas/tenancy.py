@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from daegam.api.schemas import REQUIRED_DEFAULTS
 from daegam.k8s.gates import Feature
+from daegam.services.entry_conversion import HoldReason
 from daegam.services.exposure_front import Step
 from daegam.store.auth_reapply import AuthSummary, ClusterAuthState, TurnGateHolder
 from daegam.store.base import UtcDatetime
@@ -399,6 +400,30 @@ class DataPlaneIssuerOut(BaseModel):
     tenants_foreign_mcp_group: list[ForeignMcpGroupOut]
 
 
+class HeldConversionOut(BaseModel):
+    """프록시를 둔 채 옮기지 않고 둔 허브 항목 하나와 그 까닭 (P54b 7절). gateway_ids 는 까닭이
+    consumer_not_applied 일 때 주소를 직접 부르는 렌더를 아직 적용하지 않은 Gateway 다."""
+
+    model_config = REQUIRED_DEFAULTS
+
+    hub_item_id: str
+    name: str
+    tenant: str
+    reason: HoldReason
+    gateway_ids: list[str]
+
+
+class EntryConversionOut(BaseModel):
+    """클러스터 하나에서 프록시를 둔 채 남은 허브 항목(remote 항목과 proxy 모드로 게시한 항목)의
+    수와 remote 항목의 복제본 기록 수, 그 가운데 옮기지 않고 둔 항목이다."""
+
+    model_config = REQUIRED_DEFAULTS
+
+    items: int
+    clones: int
+    held: list[HeldConversionOut]
+
+
 class DataPlaneAuthOut(BaseModel):
     """`GET /settings/data-plane-auth` (P32 8절, P50 1·2절). summary 는 첫 틱 전이면 null 이다.
     render_epochs 는 이 코드가 종류마다 쓰는 렌더 번호이고, kinds 는 클러스터 id 마다 종류별 문서
@@ -406,6 +431,8 @@ class DataPlaneAuthOut(BaseModel):
     있는 문서의 수를 기능 이름마다 센 것이다. 그런 문서가 없는 클러스터와 기능은 빠진다.
     handovers 는 클러스터 id 마다, 노출 앞단을 vMCP 로 넘겨받는 중인 MCP Server 를 넘겨받기의
     단계마다 센 것이다(P54 11절). 그런 서버가 없는 클러스터와 단계는 빠진다.
+    entry_conversions 는 클러스터 id 마다, 프록시를 둔 채 남은 허브 항목과 remote 복제본이다(P54b
+    7절). 남은 것이 없는 클러스터는 빠진다.
     redis_plain_consumers 는 테넌트마다, TLS 끝점을 가진 Redis 에 아직 평문 포트로 붙는 소비자다(P61
     5절 4단계). shipped_redis_cert_expires_at 은 home 이 함께 올린 Redis 의 TLS 서버 인증서가 끝나는
     때이고, expiring 은 그것이 30일 안인가다(P61 F3). turn_tokens 는 턴 위임 토큰의 게이트와 그것을
@@ -421,6 +448,7 @@ class DataPlaneAuthOut(BaseModel):
     kinds: dict[str, dict[ReapplyKindName, KindCountsOut]]
     fallbacks: dict[str, dict[Feature, int]]
     handovers: dict[str, dict[Step, int]]
+    entry_conversions: dict[str, EntryConversionOut]
     redis_plain_consumers: dict[str, list[PlainRedisConsumerOut]]
     shipped_redis_cert_expires_at: UtcDatetime | None
     shipped_redis_cert_expiring: bool

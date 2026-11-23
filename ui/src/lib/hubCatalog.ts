@@ -68,9 +68,9 @@ export function containerBody(form: ContainerForm): ContainerBody {
   return body;
 }
 
-/** 등록 폼에 채울 값. kind 가 entry 면 원격을 비밀 헤더 하나의 entry 항목으로 가져오는 것이다 (P86 A3). */
+/** 등록 폼에 채울 값. 원격은 entry 항목으로 가져오고, headerName 이 있으면 비밀 헤더 하나를 싣는다 (P86 A3). */
 export interface CatalogPrefill {
-  kind: "image" | "remote" | "entry";
+  kind: "image" | "entry";
   name: string;
   displayName: string;
   image: string;
@@ -90,7 +90,7 @@ export interface CatalogPrefill {
  */
 export function catalogPrefill(server: HubCatalogServer): CatalogPrefill {
   const base: CatalogPrefill = {
-    kind: "remote",
+    kind: "entry",
     name: server.name,
     displayName: server.title,
     image: "",
@@ -119,7 +119,6 @@ export function catalogPrefill(server: HubCatalogServer): CatalogPrefill {
   }
   return {
     ...base,
-    kind: server.import_header ? "entry" : "remote",
     url: server.url ?? "",
     headerName: server.import_header ?? "",
     catalog: server.url_template ? null : server.name,
@@ -145,8 +144,8 @@ export function catalogVariable(server: HubCatalogServer | null | undefined, nam
 
 /**
  * 요청에 카탈로그 서버의 이름을 실을 것인가 (5·7절). 서버가 받는 꼴일 때만 싣는다. 이미지는 허브 사본의 참조를 그대로 둔 image
- * 항목이다. 원격은 주소와 전송을 그대로 둔 remote 나 entry 항목이고, 비밀 헤더 하나로 가져오는 원격(P86 A3)은 그 헤더 이름의 header
- * 인증을 든 entry 항목이어야 한다. 이 밖이면 카탈로그 항목이 아니라 그냥 등록이다.
+ * 항목이다. 원격은 주소와 전송을 그대로 둔 entry 항목이고, 비밀 헤더 하나로 가져오는 원격(P86 A3)은 그 헤더 이름의 header
+ * 인증을 들어야 한다. 이 밖이면 카탈로그 항목이 아니라 그냥 등록이다.
  */
 export function catalogStillApplies(
   prefill: CatalogPrefill,
@@ -154,8 +153,8 @@ export function catalogStillApplies(
 ): boolean {
   if (!prefill.catalog) return false;
   if (prefill.kind === "image") return form.kind === "image" && form.image.trim() === prefill.image;
-  if (form.kind !== "remote" && form.kind !== "entry") return false;
+  if (form.kind !== "entry") return false;
   if (form.url.trim() !== prefill.url || form.transport !== prefill.transport) return false;
-  if (!prefill.headerName) return form.kind === "remote" || form.auth === "none";
-  return form.kind === "entry" && form.auth === "header" && form.headerName.trim().toLowerCase() === prefill.headerName.toLowerCase();
+  if (!prefill.headerName) return form.auth === "none";
+  return form.auth === "header" && form.headerName.trim().toLowerCase() === prefill.headerName.toLowerCase();
 }

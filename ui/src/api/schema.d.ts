@@ -8056,6 +8056,8 @@ export interface components {
          *     있는 문서의 수를 기능 이름마다 센 것이다. 그런 문서가 없는 클러스터와 기능은 빠진다.
          *     handovers 는 클러스터 id 마다, 노출 앞단을 vMCP 로 넘겨받는 중인 MCP Server 를 넘겨받기의
          *     단계마다 센 것이다(P54 11절). 그런 서버가 없는 클러스터와 단계는 빠진다.
+         *     entry_conversions 는 클러스터 id 마다, 프록시를 둔 채 남은 허브 항목과 remote 복제본이다(P54b
+         *     7절). 남은 것이 없는 클러스터는 빠진다.
          *     redis_plain_consumers 는 테넌트마다, TLS 끝점을 가진 Redis 에 아직 평문 포트로 붙는 소비자다(P61
          *     5절 4단계). shipped_redis_cert_expires_at 은 home 이 함께 올린 Redis 의 TLS 서버 인증서가 끝나는
          *     때이고, expiring 은 그것이 30일 안인가다(P61 F3). turn_tokens 는 턴 위임 토큰의 게이트와 그것을
@@ -8089,6 +8091,10 @@ export interface components {
                 [key: string]: {
                     [key: string]: number;
                 };
+            };
+            /** Entry Conversions */
+            entry_conversions: {
+                [key: string]: components["schemas"]["EntryConversionOut"];
             };
             /** Redis Plain Consumers */
             redis_plain_consumers: {
@@ -8627,6 +8633,19 @@ export interface components {
             model?: string | null;
             /** Dimensions */
             dimensions?: number | null;
+        };
+        /**
+         * EntryConversionOut
+         * @description 클러스터 하나에서 프록시를 둔 채 남은 허브 항목(remote 항목과 proxy 모드로 게시한 항목)의
+         *     수와 remote 항목의 복제본 기록 수, 그 가운데 옮기지 않고 둔 항목이다.
+         */
+        EntryConversionOut: {
+            /** Items */
+            items: number;
+            /** Clones */
+            clones: number;
+            /** Held */
+            held: components["schemas"]["HeldConversionOut"][];
         };
         /**
          * ErrorDetail
@@ -9923,6 +9942,22 @@ export interface components {
             /** Role */
             role: string;
         };
+        /**
+         * HeldConversionOut
+         * @description 프록시를 둔 채 옮기지 않고 둔 허브 항목 하나와 그 까닭 (P54b 7절). gateway_ids 는 까닭이
+         *     consumer_not_applied 일 때 주소를 직접 부르는 렌더를 아직 적용하지 않은 Gateway 다.
+         */
+        HeldConversionOut: {
+            /** Hub Item Id */
+            hub_item_id: string;
+            /** Name */
+            name: string;
+            /** Tenant */
+            tenant: string;
+            reason: components["schemas"]["HoldReason"];
+            /** Gateway Ids */
+            gateway_ids: string[];
+        };
         /** Hints */
         Hints: {
             /** Title */
@@ -9932,6 +9967,12 @@ export interface components {
             /** Style */
             style?: string | null;
         };
+        /**
+         * HoldReason
+         * @description 항목을 옮기지 않고 둔 까닭. 값은 상태 API 의 `reason` 이다.
+         * @enum {string}
+         */
+        HoldReason: "audit_old" | "hub_item_newer" | "cluster_unreachable" | "entry_address_refused" | "sse_entry" | "source_not_deployed" | "consumer_not_applied";
         /** HubAdmissionOut */
         HubAdmissionOut: {
             /** Digest */
@@ -10150,7 +10191,7 @@ export interface components {
              * Kind
              * @enum {string}
              */
-            kind: "remote" | "entry" | "image";
+            kind: "entry" | "image";
             access?: components["schemas"]["Access"] | null;
             /** Cluster Id */
             cluster_id?: string | null;
@@ -15320,7 +15361,7 @@ export interface components {
              * @default entry
              * @enum {string}
              */
-            mode: "entry" | "proxy";
+            mode: "entry";
             access?: components["schemas"]["Access"] | null;
         };
         /**

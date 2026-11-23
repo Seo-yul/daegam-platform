@@ -743,6 +743,19 @@ class BaseInstanceService[I: EditableInstance](InstanceStatusMixin):
                 logger.info("%s %s: %s skipped (%s)", self.profile_kind, inst.id, action, e.code)
                 return False
 
+    async def claimed(
+        self,
+        inst: I,
+        expect: Collection[str],
+        *,
+        action: str,
+        work: Callable[[], Awaitable[bool]],
+    ) -> bool:
+        """다른 모듈의 배경 작업이 이 문서에 쓰는 것을 문서의 클레임 안에서 돌린다
+        (`_claimed_or_skip`). 쥐며 다시 읽은 문서가 inst 에 덮이고, 남이 쥐고 있거나 상태가 expect
+        밖이면 건너뛰고 False 다."""
+        return await self._claimed_or_skip(inst, expect, action=action, work=work)
+
     def _place_claim(self, inst: I) -> None:
         """쥔 클레임의 자리와 기대 상태를 문서의 지금 배포에 맞춘다. 이 동작이 문서를 옮겼을 때
         (재배포의 `deploying` 전이, provision 의 `failed` 되돌리기와 끝) 부른다. 그러지 않으면 다음

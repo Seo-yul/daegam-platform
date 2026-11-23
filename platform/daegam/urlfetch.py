@@ -247,6 +247,16 @@ def _port_of(parts: Any) -> int:
     return parts.port if parts.port is not None else (443 if parts.scheme == "https" else 80)
 
 
+def _under(host: str, suffixes: Iterable[str]) -> bool:
+    """host 가 suffixes 가운데 한 이름이거나 그 아래 이름인가. 접미사는 대소문자와 앞뒤 점을 가리지
+    않는다."""
+    for suffix in suffixes:
+        suffix = suffix.lower().strip(".")
+        if suffix and (host == suffix or host.endswith("." + suffix)):
+            return True
+    return False
+
+
 def resolve_public(
     url: str,
     *,
@@ -254,12 +264,16 @@ def resolve_public(
     allowed_ports: Collection[int] | None = None,
     blocked_suffixes: Iterable[str] = (),
     blocked_cidrs: Iterable[IPNetwork] = (),
+    allowed_suffixes: Iterable[str] = (),
+    allowed_cidrs: Iterable[IPNetwork] = (),
 ) -> tuple[str, list[str]]:
     """검사를 통과한 URL 과 그때 확인한 주소 목록을 함께 돌려준다.
 
     주소를 돌려주는 이유는 하나다. 연결이 이름을 다시 풀면 검사가 의미를 잃는다. allowed_ports 가
     있으면 그 포트만, blocked_suffixes 는 관리자가 막은 이름 접미사, blocked_cidrs 는 관리자가 막은
-    주소 범위다. 셋 다 기본값이면 예전 판정 그대로다."""
+    주소 범위다. allowed_suffixes 와 allowed_cidrs 는 관리자가 연 사설망이다. 그 접미사 아래의
+    이름은 어느 주소로 풀리든 받고, 그 범위 안의 주소는 공인이 아니어도 받는다. 다섯 다 기본값이면
+    예전 판정 그대로다."""
     parts = urlsplit(url.strip())
     if parts.scheme not in ("http", "https"):
         raise BlockedURL("url_scheme", "only http(s) URLs are allowed")
@@ -274,12 +288,11 @@ def resolve_public(
     if allowed_ports is not None and port not in allowed_ports:
         raise BlockedURL("url_port", f"port {port} is not allowed")
     host = a_label(parts.hostname)
-    if host in BLOCKED_HOSTS or host.endswith(BLOCKED_SUFFIXES):
+    opened = _under(host, allowed_suffixes)
+    if not opened and (host in BLOCKED_HOSTS or host.endswith(BLOCKED_SUFFIXES)):
         raise BlockedURL("url_private", f"host {host!r} is not allowed")
-    for suffix in blocked_suffixes:
-        suffix = suffix.lower().strip(".")
-        if suffix and (host == suffix or host.endswith("." + suffix)):
-            raise BlockedURL("url_blocked_host", f"host {host!r} is blocked")
+    if _under(host, blocked_suffixes):
+        raise BlockedURL("url_blocked_host", f"host {host!r} is blocked")
 
     try:
         literal = ipaddress.ip_address(host)
@@ -288,14 +301,15 @@ def resolve_public(
     addresses = [str(literal)] if literal is not None else resolver(host)
     if not addresses:
         raise BlockedURL("url_unresolvable", f"cannot resolve {host}")
-    cidrs = tuple(blocked_cidrs)
+    cidrs, allowed = tuple(blocked_cidrs), tuple(allowed_cidrs)
     for addr in addresses:
         try:
             ip = ipaddress.ip_address(addr)
         except ValueError as e:
             raise BlockedURL("url_unresolvable", f"bad address {addr!r} for {host}") from e
-        if not is_public_address(ip, cidrs):
-            raise BlockedURL("url_private", f"host {host!r} resolves to non-public address {addr}")
+        if opened or is_public_address(ip, cidrs) or any(ip in net for net in allowed):
+            continue
+        raise BlockedURL("url_private", f"host {host!r} resolves to non-public address {addr}")
     return normalize_url(url), addresses
 
 

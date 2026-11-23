@@ -20,6 +20,7 @@ from daegam import error_codes
 from daegam.auth import password
 from daegam.config import Settings
 from daegam.main import create_app
+from daegam.services.entry_address import EntryAddresses
 from tests.helpers.auth import LOCAL_BOOT_PASSWORD, admin_headers, bearer, map_groups, user_token
 from tests.helpers.consts import (
     B_VIEWER_MAPPINGS,
@@ -37,7 +38,7 @@ from tests.helpers.docs import TENANT, seed_gateway
 from tests.helpers.fake_cluster import FakeClusterClient
 from tests.helpers.fake_secrets import FakeSecretStore
 from tests.helpers.http import api_client, make_app
-from tests.helpers.oauth import GW_HOST, connect, person, register
+from tests.helpers.oauth import GW_HOST, PUBLIC_IP, connect, person, register
 from tests.helpers.oidc import Signer, create_mock_oidc, mock_oidc_config
 
 # psycopg 목 `fake_pg` 는 플러그인(tests/helpers/fake_pg.py)으로 싣는다
@@ -75,6 +76,19 @@ def _cheap_password_hash(request):
         yield
     finally:
         password._N = saved
+
+
+@pytest.fixture(autouse=True)
+def _public_entry_names():
+    """entry 항목의 주소 규칙(`services/entry_address.py`)이 시험에서 DNS 로 나가지 않게 한다. 모든
+    이름이 공인 주소 하나로 풀린다. 규칙 자체를 보는 시험은 서비스의 `entry_addresses.resolver` 를
+    바꾼다. monkeypatch 를 쓰지 않는 까닭은 위와 같다."""
+    saved = EntryAddresses.resolver
+    EntryAddresses.resolver = staticmethod(lambda host: [PUBLIC_IP])
+    try:
+        yield
+    finally:
+        EntryAddresses.resolver = saved
 
 
 # 모든 응답을 오류 코드표와 맞춰 본다 (P74 2.2절). 운영은 이 검사를 하지 않는다

@@ -334,7 +334,7 @@ export const gatewayHandlers: HttpHandler[] = [
     const r = await record(request);
     const g = gatewayStore.findOr404(params.id);
     if (g instanceof Response) return g;
-    const body = r.body as { mode: string; name?: string | null; display_name?: string | null; access?: HubAccessInput | null };
+    const body = r.body as { name?: string | null; display_name?: string | null; access?: HubAccessInput | null };
     // 서버 규칙 (D24): 이름을 비우면 문서의 name 그대로, display_name 을 비우면 그 display_name
     const name = body.name?.trim() || g.name;
     const access = normalizeAccess(body.access);
@@ -348,7 +348,7 @@ export const gatewayHandlers: HttpHandler[] = [
       kind: "published",
       access,
       source: { url: "http://vmcp-gw-support.daegam-default.svc.cluster.local:4483/mcp", transport: "streamable-http", image: null, port: null, instance_id: null, mcp_profile_id: null, tools_filter: null, gateway_instance_id: String(params.id) },
-      k8s: { kind: body.mode === "proxy" ? "MCPRemoteProxy" : "VirtualMCPServer", name: "vmcp-gw-support", namespace: "daegam-default", group: null, tool_config: null },
+      k8s: { kind: "VirtualMCPServer", name: "vmcp-gw-support", namespace: "daegam-default", group: null, tool_config: null },
       tool_names: ["Add"],
       status: { phase: "Valid", ready: true, url: "http://vmcp-gw-support.daegam-default.svc.cluster.local:4483/mcp", message: null, observed_at: NOW, error: null },
     };

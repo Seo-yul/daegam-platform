@@ -105,7 +105,6 @@ export const gateways: Messages["gateways"] = {
     labels: {
       group: "group",
       entry: "entry",
-      proxy: "proxy",
       backends: "backends",
       conflict: "conflict resolution",
       failure: "failure mode",
@@ -149,16 +148,11 @@ export const gateways: Messages["gateways"] = {
       `Once this Gateway is deployed again, calls from the Gateways that use it as a backend (${names}) are all refused, because its Authz policy (Cedar) holds a forbid statement.`,
   },
   publish: {
-    modeHint: "entry: publishes only the URL / proxy: wraps it in an MCPRemoteProxy.",
-    nameHint: "Leave Name empty to use the Gateway's name. In proxy mode, the item gets its own policy and auditing. Publishing again with the same name changes nothing.",
+    nameHint: "Leave Name empty to use the Gateway's name. Publishing again with the same name changes nothing.",
     empty: "No published items yet.",
     deleteBlocked: "This Gateway is published to MCP Hub, so you cannot delete it yet. Unpublish the items below first.",
     title: "Publish to hub",
-    mode: "Mode",
     consumerHint:
       "When another Gateway uses this one as a backend, that Gateway enforces this one's Tool rules as well. A Gateway whose Authz policy (Cedar) holds a forbid statement cannot be used as a backend.",
-    labels: {
-      modeSelect: "publish mode",
-    },
   },
 };

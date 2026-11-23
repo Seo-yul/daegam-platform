@@ -29,6 +29,7 @@ from daegam.store.base import utcnow
 from daegam.store.leases import LEASES
 from tests.helpers.agent_runtime import deployed_agent
 from tests.helpers.consts import DEFAULT_NS, TENANT_HEADER
+from tests.helpers.hub import stored_remote
 from tests.helpers.mcp_servers import clone_and_deploy, mcp_server_env
 from tests.helpers.workers import audit_collector
 
@@ -227,11 +228,7 @@ def test_remote_proxy_and_unmapped_proxy_pods_get_a_tenant(client, fake_clusters
     """vMCP·원격 프록시도 감사를 낸다. 허브 원격 항목의 파드는 그 항목 id 로 적고, 맵에 없는 프록시
     파드는 네임스페이스의 테넌트로 적는다. 테넌트가 비면 테넌트 화면의 MCP 감사에 안 보인다."""
     _inst, fake = _instance_with_proxy(client, fake_clusters)
-    r = client.post(
-        "/hub", json={"name": "wiki", "kind": "remote", "url": "https://mcp.example.com/mcp"}
-    )
-    assert r.status_code == 201, r.text
-    hub_id = r.json()["id"]
+    hub_id = stored_remote(client, "wiki", "https://mcp.example.com/mcp")["id"]
     now = utcnow()
     remote = {
         "toolhive": "true",

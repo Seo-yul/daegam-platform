@@ -103,7 +103,9 @@ jobs:
               for r in rehearse:
                   shards.append({"shard": f"{r}-f1", "script": r, "items": "", "f1": True,
                                  "cert_manager": r == "p54",
-                                 "helm_flags": "--set auth.mode=local" if r == "p54" else ""})
+                                 # p54b: 예행의 외부 서버는 클러스터 Service 의 IP 로 등록하므로 그 범위를 연다
+                                 "helm_flags": "--set auth.mode=local" if r == "p54" else
+                                 "--set-string platform.extraConfig.DAEGAM_ENTRY_PRIVATE_ALLOW=10.43.0.0/16"})
           if not shards:
               sys.exit("::error::nothing to run")
           print(f"#### p54-f0 {mode}\n")

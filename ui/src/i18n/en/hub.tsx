@@ -193,7 +193,7 @@ export const hub: Messages["hub"] = {
   },
   new: {
     placeholders: { display: "Payments MCP", name: "payments-mcp" },
-    kindHint: "remote: wraps it in an MCPRemoteProxy / entry: registers the URL only / image: deploys it as a container",
+    kindHint: "entry: registers the URL, and Gateways call it directly / image: deploys it as a container",
     urlHint: "The address of the remote MCP server. The platform calls tools/list at this address to fill in the Tool list.",
     imageHint: "The MCP server container image. When another tenant uses it, the platform copies it into that tenant's namespace.",
     portHint: "Leave empty to use 8080.",
@@ -203,7 +203,7 @@ export const hub: Messages["hub"] = {
     register: "Register",
     title: "Register external MCP",
     kind: "Kind",
-    kinds: { remote: "remote", entry: "entry", image: "image" },
+    kinds: { entry: "entry", image: "image" },
     cluster: "Cluster",
     url: "URL",
     image: "Image",

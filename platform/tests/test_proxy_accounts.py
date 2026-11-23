@@ -3,16 +3,19 @@
 허브 remote 항목, 그 공유 복제본, MCP Server 노출 앞단의 MCPRemoteProxy 는 테넌트 네임스페이스의
 ServiceAccount `daegam-remote-proxy` 로 돌고, 오퍼레이터가 전에 만든 그 프록시의 RoleBinding 은
 다시 렌더할 때 지운다. 게이트를 지나지 못한 클러스터에서 이미 도는 프록시는 오늘의 꼴로 남고 새
-프록시는 422 로 거절된다. 네임스페이스 스윕은 그 계정이 Secret 을 읽지 못하는지 본다.
+복제본은 422 로 거절된다. 새 항목은 프록시를 두지 않는다. 네임스페이스 스윕은 그 계정이 Secret 을
+읽지 못하는지 본다.
 """
 
 from __future__ import annotations
 
+import pytest
+
 from daegam.services.data_plane_auth import KIND_HUB_ITEM
+from daegam.services.gateways import GatewayError
 from tests.helpers.clusters import downgrade_toolhive, revoke_tenant_rights
 from tests.helpers.consts import DEFAULT_NS, GV, HUB, OTHER_NS
-from tests.helpers.http import detail_code
-from tests.helpers.hub import SPIKE_URL, hub_env, other_tenant_gateway, shared_env
+from tests.helpers.hub import SPIKE_URL, gateway_on_remote_clone, hub_env, shared_env
 from tests.helpers.workers import raise_epoch, run_data_plane_auth
 
 RBAC = "rbac.authorization.k8s.io/v1"
@@ -60,7 +63,7 @@ def test_a_rerendered_remote_proxy_runs_role_less_and_drops_the_operators_bindin
     assert fake.get(RBAC, "RoleBinding", "hub-spike-remote-proxy-runner", DEFAULT_NS) is not None
 
 
-def test_below_the_gate_a_running_proxy_keeps_todays_form_and_a_new_one_is_refused(
+def test_below_the_gate_a_running_proxy_keeps_todays_form_and_new_items_need_no_proxy(
     client, fake_clusters, mongo, monkeypatch
 ):
     cid, _items, _calc, _orders, _remote, fake = hub_env(client, fake_clusters)
@@ -68,14 +71,10 @@ def test_below_the_gate_a_running_proxy_keeps_todays_form_and_a_new_one_is_refus
     raise_epoch(monkeypatch, KIND_HUB_ITEM)
     run_data_plane_auth(client)
     assert "serviceAccount" not in fake.get(GV, "MCPRemoteProxy", "hub-spike", DEFAULT_NS)["spec"]
-    r = client.post(HUB, json={"name": "spike-2", "kind": "remote", "url": SPIKE_URL})
-    assert detail_code(r) == (422, "cluster_rights_missing")
-    assert r.json()["detail"]["feature"] == "roleless_sa"
-
+    # entry 와 image 항목은 원격 프록시가 아니라 게이트 아래에서도 그대로 만든다
     downgrade_toolhive(mongo, cid)
-    r = client.post(HUB, json={"name": "spike-3", "kind": "remote", "url": SPIKE_URL})
-    assert detail_code(r) == (422, "toolhive_too_old")
-    # image 항목은 원격 프록시가 아니라 그대로 만든다
+    entry = {"name": "spike-2", "kind": "entry", "url": SPIKE_URL, "transport": "streamable-http"}
+    assert client.post(HUB, json=entry).status_code == 201
     r = client.post(HUB, json={"name": "fetch", "kind": "image", "image": "ghcr.io/x/fetch:1"})
     assert r.status_code == 201, r.text
 
@@ -95,10 +94,12 @@ def test_the_sweep_notes_a_namespace_where_the_proxy_account_reads_secrets(
 
 
 def test_a_new_remote_clone_is_refused_below_the_gate(client, fake_clusters, mongo):
-    """다른 테넌트의 remote 항목을 쓰는 Gateway 는 복제본을 처음 만들 때 그 클러스터가 게이트를
-    지나야 한다. 오늘의 꼴로 만들면 오퍼레이터가 Secret 을 읽는 Role 을 만든다."""
+    """전에 배포해 다른 테넌트의 remote 항목의 복제본을 쓰는 Gateway 는 복제본을 처음 만들 때 그
+    클러스터가 게이트를 지나야 한다. 오늘의 꼴로 만들면 오퍼레이터가 Secret 을 읽는 Role 을
+    만든다."""
     cid, _items, shared, fake = shared_env(client, fake_clusters)
     revoke_tenant_rights(mongo, cid)
-    _profile, r = other_tenant_gateway(client, shared)
-    assert detail_code(r) == (422, "cluster_rights_missing")
+    with pytest.raises(GatewayError) as e:
+        gateway_on_remote_clone(client, shared)
+    assert (e.value.status, e.value.code) == (422, "cluster_rights_missing")
     assert fake.find("MCPRemoteProxy", OTHER_NS) == []

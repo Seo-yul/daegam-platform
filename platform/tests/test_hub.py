@@ -5,6 +5,7 @@ from __future__ import annotations
 import jwt
 import pytest
 
+from daegam.api.hub import HubCreate
 from daegam.auth.principal import Membership, Principal
 from daegam.k8s.templates import is_private_endpoint, proxy_mcp_url
 from daegam.k8s.templates.common import proxy_resources
@@ -13,7 +14,7 @@ from tests.helpers.clusters import default_cluster
 from tests.helpers.consts import GV, HUB, MS, T2
 from tests.helpers.fake_cluster import FakeClusterClient
 from tests.helpers.http import deployed, detail_code
-from tests.helpers.hub import SPIKE_URL
+from tests.helpers.hub import SPIKE_URL, stored_remote
 from tests.helpers.mcp_servers import clone_and_deploy, mcp_server_env
 
 
@@ -34,17 +35,13 @@ def test_is_private_endpoint_and_url_paths():
 
 
 def test_sse_outside_servers_are_refused_and_existing_ones_warn(client, fake_clusters, mongo):
-    """SSE 로만 말하는 외부 서버는 remote 로도 entry 로도 만들지 못한다. 그 전에 만든 SSE 항목은
-    그대로 두고 상태가 경고한다. 다시 적용해도 프록시는 sse 로 렌더된다 (P54b 15절 3)."""
+    """SSE 로만 말하는 외부 서버는 만들지 못한다. 그 전에 만든 SSE 항목은 그대로 두고 상태가
+    경고한다. 다시 적용해도 프록시는 sse 로 렌더된다."""
     _bootstrap(client)
     url = "https://mcp.example.com/sse"
-    for kind in ("remote", "entry"):
-        body = {"name": f"sse-{kind}", "kind": kind, "url": url, "transport": "sse"}
-        r = client.post(HUB, json=body)
-        assert detail_code(r) == (422, "outside_sse_unsupported"), r.text
-    r = client.post(HUB, json={"name": "old", "kind": "remote", "url": url})
-    assert r.status_code == 201, r.text
-    item_id = r.json()["id"]
+    r = client.post(HUB, json={"name": "sse", "kind": "entry", "url": url, "transport": "sse"})
+    assert detail_code(r) == (422, "outside_sse_unsupported"), r.text
+    item_id = stored_remote(client, "old", url)["id"]
 
     def sse_warnings() -> list[str]:
         st = client.get(f"{HUB}/{item_id}").json()["status"]
@@ -67,11 +64,19 @@ def test_sse_outside_servers_are_refused_and_existing_ones_warn(client, fake_clu
     assert st["ready"] is True and st["url"] == f"{base}/sse"
 
 
-def test_remote_renders_mcpremoteproxy(client, fake_clusters):
+def test_new_remote_items_are_refused(client):
+    """remote 는 만들 수 없는 종류다. 외부 MCP 서버는 entry 로 등록한다."""
     _bootstrap(client)
     r = client.post(HUB, json={"name": "calc-remote", "kind": "remote", "url": SPIKE_URL})
-    assert r.status_code == 201, r.text
-    item = r.json()
+    assert detail_code(r) == (422, "invalid_kind"), r.text
+    assert client.get(HUB).json() == []
+    assert HubCreate.model_json_schema()["properties"]["kind"]["enum"] == ["entry", "image"]
+
+
+def test_remote_renders_mcpremoteproxy(client, fake_clusters):
+    """전에 만든 remote 항목은 MCPRemoteProxy 로 렌더된다."""
+    _bootstrap(client)
+    item = stored_remote(client, "calc-remote", SPIKE_URL)
     assert item["kind"] == "remote" and item["state"] == "created"
     assert item["k8s"] == {
         "kind": "MCPRemoteProxy",
@@ -101,15 +106,7 @@ def test_remote_renders_mcpremoteproxy(client, fake_clusters):
     # 네임스페이스·그룹이 먼저 보장됐다
     assert fake.get(GV, "MCPGroup", "default", "daegam-default") is not None
     # 외부 URL 은 allowPrivateEndpoint false
-    r = client.post(
-        HUB,
-        json={
-            "name": "ext",
-            "kind": "remote",
-            "url": "https://mcp.example.com/mcp",
-            "transport": "streamable-http",
-        },
-    )
+    stored_remote(client, "ext", "https://mcp.example.com/mcp")
     cr = fake.get(GV, "MCPRemoteProxy", "hub-ext", "daegam-default")
     assert (
         cr["spec"]["allowPrivateEndpoint"] is False and cr["spec"]["transport"] == "streamable-http"
@@ -212,24 +209,23 @@ def test_image_renders_mcpserver_with_toolconfig(client, fake_clusters):
 
 def test_validation_and_conflicts(client):
     _bootstrap(client)
-    assert (
-        client.post(HUB, json={"name": "a", "kind": "remote", "url": SPIKE_URL}).status_code == 201
-    )
-    r = client.post(HUB, json={"name": "a", "kind": "remote", "url": SPIKE_URL})
+    entry = {"kind": "entry", "url": SPIKE_URL, "transport": "streamable-http"}
+    assert client.post(HUB, json={"name": "a", **entry}).status_code == 201
+    r = client.post(HUB, json={"name": "a", **entry})
     assert detail_code(r) == (409, "name_conflict")
     # http(s) 이고 호스트가 있으며 공백이 없어야 한다. 뒤의 둘은 예전 접두어 검사가 통과시켰다
     for i, url in enumerate(("ftp://x", "http://:80/mcp", "https://h st/mcp")):
-        r = client.post(HUB, json={"name": f"b{i}", "kind": "remote", "url": url})
+        r = client.post(HUB, json={"name": f"b{i}", **entry, "url": url})
         assert detail_code(r) == (422, "invalid_value"), url
     r = client.post(HUB, json={"name": "c", "kind": "image"})
     assert r.status_code == 422
-    r = client.post(HUB, json={"name": "d", "kind": "internal", "url": SPIKE_URL})
-    assert r.status_code == 422
-    r = client.post(HUB, json={"name": "bad name", "kind": "remote", "url": SPIKE_URL})
+    # 사람이 만들지 못하는 종류다
+    for kind in ("internal", "published", "platform"):
+        r = client.post(HUB, json={"name": "d", "kind": kind, "url": SPIKE_URL})
+        assert detail_code(r) == (422, "invalid_kind"), kind
+    r = client.post(HUB, json={"name": "bad name", **entry})
     assert detail_code(r) == (422, "invalid_name")
-    r = client.post(
-        HUB, json={"name": "e", "kind": "remote", "url": SPIKE_URL, "cluster_id": "nope"}
-    )
+    r = client.post(HUB, json={"name": "e", **entry, "cluster_id": "nope"})
     assert detail_code(r) == (422, "unknown_cluster")
 
 
@@ -237,7 +233,7 @@ def test_refresh_tools_uses_proxy_url(client, fake_clusters, mongo):
     """새로 고침은 프록시 주소로 묻는다. 도구 목록을 받는 사이 저장된 접근 정책을 되돌리지 않는다
     (P68 2절)."""
     _bootstrap(client)
-    item = client.post(HUB, json={"name": "calc-remote", "kind": "remote", "url": SPIKE_URL}).json()
+    item = stored_remote(client, "calc-remote", SPIKE_URL)
     fake = fake_clusters.by_name["edge"]
     calls = []
 
@@ -300,7 +296,7 @@ def test_tools_endpoint_lists_schemas_live_and_never_stores_them(client, fake_cl
     from daegam.mcp_client import ToolSchema, ToolsResult
 
     _bootstrap(client)
-    item = client.post(HUB, json={"name": "calc-remote", "kind": "remote", "url": SPIKE_URL}).json()
+    item = stored_remote(client, "calc-remote", SPIKE_URL)
     mongo["audit_events"].delete_many({})
 
     # URL 이 아직 없으면 오류가 아니라 까닭이다
@@ -554,7 +550,7 @@ def test_publish_and_unpublish_round_trip(client, fake_clusters):
     cid, bp, ds, mp = mcp_server_env(client)
     inst = clone_and_deploy(client, mp).json()
     # 이름을 주고 게시, 충돌은 409, 잘못된 이름은 422
-    assert client.post(HUB, json={"name": "taken", "kind": "remote", "url": SPIKE_URL}).status_code
+    assert stored_remote(client, "taken", SPIKE_URL)["name"] == "taken"
     r = client.post(f"{MS}/{inst['id']}/publish", json={"name": "taken"})
     assert detail_code(r) == (409, "name_conflict")
     r = client.post(f"{MS}/{inst['id']}/publish", json={"name": "bad name"})
@@ -620,7 +616,7 @@ def test_listing_tools_carries_a_platform_service_token_for_our_servers(client, 
 def _ready_remote(client, fake_clusters):
     """Ready 인 remote 항목 하나."""
     _bootstrap(client)
-    item = client.post(HUB, json={"name": "calc-remote", "kind": "remote", "url": SPIKE_URL}).json()
+    item = stored_remote(client, "calc-remote", SPIKE_URL)
     fake_clusters.by_name["edge"].set_status(
         GV,
         "MCPRemoteProxy",
@@ -669,9 +665,8 @@ def test_a_refresh_or_apply_after_a_delete_started_leaves_deleting(client, fake_
 def test_every_hub_item_names_a_refused_read_the_same_way(client, fake_clusters):
     """읽기 거절은 종류와 상관없이 MCP Server·Gateway 상태와 같은 `cluster_forbidden: 권한` 이다."""
     mcp_server_env(client)
-    r = client.post(HUB, json={"name": "spike", "kind": "remote", "url": SPIKE_URL})
-    assert r.status_code == 201, r.text
+    item = stored_remote(client, "spike", SPIKE_URL)
     fake: FakeClusterClient = fake_clusters.by_name["edge"]
     fake.denied.add(("toolhive.stacklok.dev", "mcpremoteproxies", "get"))
-    st = client.get(f"{HUB}/{r.json()['id']}").json()["status"]
+    st = client.get(f"{HUB}/{item['id']}").json()["status"]
     assert st["error"].startswith("cluster_forbidden: mcpremoteproxies:get")

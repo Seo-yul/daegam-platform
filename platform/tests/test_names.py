@@ -59,7 +59,8 @@ def test_is_valid_name_rejects_line_breaks(name):
 
 
 def _hub(client, name, **extra):
-    return client.post(HUB, json={"name": name, "kind": "remote", "url": REMOTE_URL, **extra})
+    body = {"name": name, "kind": "entry", "url": REMOTE_URL, "transport": "streamable-http"}
+    return client.post(HUB, json={**body, **extra})
 
 
 def test_create_applies_rule_and_display_name_default(client, fake_clusters):

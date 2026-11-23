@@ -22,7 +22,7 @@ from typing import Any
 from starlette.concurrency import run_in_threadpool
 
 from daegam.errors import ServiceError
-from daegam.k8s.client import KubeClient
+from daegam.k8s.client import KubeClient, parse_service_url
 from daegam.k8s.labels import LABEL_ID
 from daegam.k8s.templates.common import TOOLHIVE_API
 from daegam.services.claims import tick_item
@@ -49,6 +49,25 @@ async def entry_owners(client: KubeClient, namespace: str) -> dict[str, str | No
         item["metadata"]["name"]: (item["metadata"].get("labels") or {}).get(LABEL_ID)
         for item in listed
     }
+
+
+# (네임스페이스, Service 이름) 마다 그 Service 를 이름 댄 Entry 들의 라벨 daegam.devops.ai.kr/id 값
+EntryServices = dict[tuple[str, str], set[str | None]]
+
+
+async def entry_services(client: KubeClient) -> EntryServices:
+    """클러스터의 지워지는 중이 아닌 MCPServerEntry 가 `spec.remoteUrl` 로 이름 댄 클러스터 안
+    Service. 바깥 주소를 가리키는 Entry 는 들지 않는다. 프록시나 복제본을 지워도 되는지는 저장된
+    스냅샷이 아니라 클러스터가 도는 이것으로 본다. 렌더를 적용하지 못한 Gateway 의 Entry 가 아직
+    그 Service 를 부르기 때문이다."""
+    named: EntryServices = {}
+    for entry in await run_in_threadpool(client.list, TOOLHIVE_API, ENTRY_KIND):
+        meta = entry.get("metadata") or {}
+        service = parse_service_url((entry.get("spec") or {}).get("remoteUrl") or "")
+        if service is None or meta.get("deletionTimestamp"):
+            continue
+        named.setdefault(service[:2], set()).add((meta.get("labels") or {}).get(LABEL_ID))
+    return named
 
 
 class GatewayEntries:

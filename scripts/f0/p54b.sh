@@ -292,12 +292,15 @@ f1_item_note() {
 }
 
 f1_prepare() {
-  local code r p g tenant
+  local code r p g tenant spike_ip
   f1_state
   f0_header_connect F1
   traefik_ip F1
   TENANT="$F1_A"
-  hub_item F1 f1b-calc remote "$SPIKE_URL" streamable-http "$(share_with "$F1_B")"
+  # 외부 서버 자리에 spike Service 의 IP 를 둔다. 다른 네임스페이스의 Service 이름은 플랫폼이 부르지 않아 변환이 보류된다
+  spike_ip="$("${K[@]}" -n "$SPIKE_NS" get svc mcp-calculator-proxy -o jsonpath='{.spec.clusterIP}')"
+  [ -n "$spike_ip" ] || die F1 "the spike Service has no ClusterIP"
+  hub_item F1 f1b-calc remote "http://$spike_ip:8080/mcp" streamable-http "$(share_with "$F1_B")"
   [ -n "$ITEM_ID" ] || die F1 "the remote item f1b-calc -> $ITEM_CODE"
   [ "$ITEM_PHASE" = Ready ] || die F1 "the remote item f1b-calc is $ITEM_PHASE, not Ready"
   r="$ITEM_ID"; f1_put item-r "$r"

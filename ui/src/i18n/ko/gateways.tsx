@@ -138,7 +138,6 @@ export const gateways = {
     labels: {
       group: "group",
       entry: "entry",
-      proxy: "proxy",
       backends: "backends",
       conflict: "conflict resolution",
       failure: "failure mode",
@@ -197,19 +196,13 @@ export const gateways = {
   },
   /** 배포 탭의 허브 게시 카드와 삭제 대화상자의 게시 경고. 게시 해제 확인 문구는 detail.publishSection.unpublishPublished 다. */
   publish: {
-    modeHint: "entry: URL 만 게시합니다 / proxy: MCPRemoteProxy 로 감쌉니다.",
-    nameHint: "Name 을 비우면 Gateway 이름을 사용합니다. proxy 는 별도 정책과 감사를 적용합니다. 같은 이름으로 다시 게시하면 그대로입니다.",
+    nameHint: "Name 을 비우면 Gateway 이름을 사용합니다. 같은 이름으로 다시 게시하면 그대로입니다.",
     empty: "아직 게시된 항목이 없습니다.",
     /** 게시된 Gateway 의 삭제 경고. 문장 아래에 막고 있는 허브 항목 링크가 붙는다. */
     deleteBlocked: "이 Gateway 가 MCP Hub 에 게시돼 있어 그대로는 지울 수 없습니다. 아래 항목의 게시를 먼저 해제해 주세요.",
     title: "허브에 게시",
-    mode: "Mode",
     /** 토큰 인증에서 다른 Gateway 가 이 Gateway 를 백엔드로 쓰면 지켜지는 것 (P57 6.2절). */
     consumerHint:
       "다른 Gateway 가 이 Gateway 를 백엔드로 사용하면 그 Gateway 가 이 Gateway 의 Tool 규칙을 함께 지킵니다. Authz policy (Cedar) 에 forbid 문장이 있는 Gateway 는 백엔드로 사용할 수 없습니다.",
-    /** 게시 방식 선택 칸의 낭독 이름. */
-    labels: {
-      modeSelect: "게시 방식",
-    },
   },
 };
