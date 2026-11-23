@@ -24,6 +24,9 @@
 - 핀이 없는 Agent 가 쓰는 Gateway 에 웹 백엔드를 더하는 배포는 409 `web_backend_unpinned_agents`
   이고, 그 Agent 를 재배포하면 핀이 생긴다. 이름을 모를 때 핀한 Agent 는 409
   `web_backend_unknown_pins` 다.
+- 게시한 Agent 를 Tool 로 쓰는 노드의 핀은 그 호출도 든다(`ToolPin.call`, P46 6.2절). 호출받는
+  Agent 의 id 와 이름, 그때 항목에 적힌 Tool 설명과 기다리는 시간이다. 컴파일이 이것으로 그 소스의
+  항목을 만들므로 항목의 설명을 고쳐도 부르는 Agent 의 모델은 다음 배포에서야 새 설명을 읽는다.
 - 노드가 내는 이름이 그 Agent 에 내장되는 Tool 의 이름과 같으면 런타임이 소스의 Tool 을 빼고 상태
   경고 `builtin_tool_name` 을 낸다. 같은 이름을 저장과 배포의 검증이 먼저 경고로 알린다
   (`builtin_name_issues`, 고른 Tool 이나 소스의 지금 이름). 내장 이름은 하위 Agent, 응답 형식,
@@ -35,9 +38,10 @@ from __future__ import annotations
 import copy
 from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from daegam.services.agent_graph import (
+    AGENT_SOURCE,
     GraphContext,
     Issue,
     JsonSchemaFormat,
@@ -55,7 +59,10 @@ from daegam.services.tool_effects import (
     tools_nodes,
 )
 from daegam.services.toolnames import CODEX_MODELS, builtin_tool_names
-from daegam.store.agents import Agent, AgentSpec, ToolPin
+from daegam.store.agents import Agent, AgentCallPin, AgentSpec, ToolPin
+
+if TYPE_CHECKING:
+    from daegam.services.agent_calls import AgentSource
 
 ToolPins = dict[str, ToolPin]
 
@@ -70,8 +77,14 @@ _MARK_EFFECTS = frozenset({EFFECT_READ, EFFECT_WRITE})
 _STRENGTH = {EFFECT_READ: 0, EFFECT_WRITE: 1, EFFECT_WEB: 2}
 
 
-def pins_of(spec: AgentSpec, sources: Mapping[str, SourceTools]) -> ToolPins:
-    """tools 노드마다 지금 쓰는 Tool 의 이름·효과·웹 종류다. 이름을 모르면 names 가 None 이다."""
+def pins_of(
+    spec: AgentSpec,
+    sources: Mapping[str, SourceTools],
+    calls: Mapping[str, AgentSource] | None = None,
+) -> ToolPins:
+    """tools 노드마다 지금 쓰는 Tool 의 이름·효과·웹 종류다. 이름을 모르면 names 가 None 이다.
+    calls 는 검증 문맥이 읽은 게시한 Agent 이고(`GraphContext.agent_sources`), 그것을 Tool 로 쓰는
+    노드의 핀에 호출을 박는다."""
     pins: ToolPins = {}
     for node_id, data in tools_nodes(spec):
         tools = sources.get(data.source.id, UNKNOWN_SOURCE)
@@ -83,8 +96,16 @@ def pins_of(spec: AgentSpec, sources: Mapping[str, SourceTools]) -> ToolPins:
             names=names,
             effects={n: tools.effect(n) for n in names},
             web={n: tools.web[n] for n in names if n in tools.web},
+            call=_call_pin(data, calls or {}),
         )
     return pins
+
+
+def _call_pin(data: ToolsData, calls: Mapping[str, AgentSource]) -> AgentCallPin | None:
+    """게시한 Agent 를 Tool 로 쓰는 노드에 박을 호출이다. 다른 노드와 쓸 수 없는 소스는 None
+    이다."""
+    source = calls.get(data.source.id) if data.source.kind == AGENT_SOURCE else None
+    return source.pin() if source is not None else None
 
 
 def valid_pins(agent: Agent) -> ToolPins:

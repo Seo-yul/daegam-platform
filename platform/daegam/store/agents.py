@@ -234,16 +234,32 @@ class LlmRoute(BaseModel):
         return self.route == "gateway"
 
 
+class AgentCallPin(BaseModel):
+    """배포 때 tools 노드 하나가 Tool 로 쓴 게시한 Agent 다 (P46 6.2절, `services/agent_calls.py`).
+    호출받는 Agent 의 id 와 이름, 그때 허브 항목에 적혀 있던 Tool 설명, 호출 하나가 답을 기다리는
+    시간(초)이다. 항목의 설명을 고치거나 게시를 거둬도 부르는 Agent 는 다음 배포까지 이것으로
+    컴파일한다."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    agent_id: str
+    agent_name: str
+    description: str
+    timeout_seconds: int
+
+
 class ToolPin(BaseModel):
     """배포 때 tools 노드 하나가 쓴 Tool 이다 (P39b 14절 5부, `services/tool_pins.py`). names 는
     그때의 이름이고 모르면 None 이다. effects 와 web 은 그 이름마다의 효과(`read`·`write`·`web`)와
-    웹 종류(`fetch`·`search`)다. 뒤 판이 칸을 더해도 읽히게 모르는 칸은 버린다."""
+    웹 종류(`fetch`·`search`)다. call 은 게시한 Agent 를 Tool 로 쓰는 노드에만 있다. 뒤 판이 칸을
+    더해도 읽히게 모르는 칸은 버린다."""
 
     model_config = ConfigDict(extra="ignore")
 
     names: list[str] | None = None
     effects: dict[str, str] = Field(default_factory=dict)
     web: dict[str, str] = Field(default_factory=dict)
+    call: AgentCallPin | None = None
 
 
 SleepState = Literal["awake", "draining", "asleep", "waking"]

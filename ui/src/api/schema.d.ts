@@ -1615,7 +1615,9 @@ export interface paths {
          * Validate Agent Graph
          * @description 저장 없이 그래프를 검사한다. 저장·배포도 같은 규칙이다. 보이는데 consume 이 없는 Skill 을
          *     붙였으면 422 `skill_not_consumable` 이다(D64). `agent_id` 는 캔버스가 고치는 Agent 이고, 없는
-         *     Agent 면 404 다. 검사는 그것에 따라 바뀌지 않는다.
+         *     Agent 면 404 다. 게시한 Agent 를 Tool 로 쓰는 노드의 검사가 그것을 읽는다. 그 Agent 자신의
+         *     항목은 오류(`agent_source_self`)이고, 그 Agent 를 다시 부르는 Agent 는 경고
+         *     (`agent_call_cycle`)다.
          */
         post: operations["validate_agent_graph_api_agents_validate_post"];
         delete?: never;
@@ -5067,6 +5069,26 @@ export interface components {
             };
         };
         /**
+         * AgentCallOut
+         * @description tools 노드 하나가 Tool 로 쓰는 게시한 Agent 다 (P46 6.2절). provider 와 record_bodies 는 그
+         *     Agent 의 메인 모델 provider 와 본문 기록 설정이다. 부르는 대화의 글이 거기로 간다.
+         *     timeout_seconds 는 호출 하나가 답을 기다리는 시간의 기본값이다.
+         */
+        AgentCallOut: {
+            /** Tool */
+            tool: string;
+            /** Agent Id */
+            agent_id: string;
+            /** Agent Name */
+            agent_name: string;
+            /** Provider */
+            provider: string;
+            /** Record Bodies */
+            record_bodies: boolean;
+            /** Timeout Seconds */
+            timeout_seconds: number;
+        };
+        /**
          * AgentCancelBody
          * @description `POST /agents/{id}/sessions/{sid}/cancel` 의 본문이다. 없어도 된다. turn_id 를 주면 그 시도일
          *     때만 멈춘다(P78 2절). 묵은 화면에서 누른 중단이 다음 턴을 멈추지 않게 한다.
@@ -6550,7 +6572,7 @@ export interface components {
             /** Tool Origins */
             tool_origins?: {
                 [key: string]: {
-                    [key: string]: "internal" | "platform" | "image" | "remote" | "entry" | "script";
+                    [key: string]: "internal" | "platform" | "image" | "remote" | "entry" | "script" | "agent";
                 };
             };
             /** Tool Marked */
@@ -6562,6 +6584,10 @@ export interface components {
              * @default true
              */
             tool_safety: boolean;
+            /** Agent Calls */
+            agent_calls?: {
+                [key: string]: components["schemas"]["AgentCallOut"];
+            };
         };
         /**
          * ApiKeyIn

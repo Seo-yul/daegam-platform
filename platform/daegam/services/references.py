@@ -26,7 +26,11 @@ from typing import Literal, Protocol
 from pydantic import BaseModel, ConfigDict
 
 from daegam.errors import ServiceError
-from daegam.services.agent_graph import references_knowledge_base, references_tool_source
+from daegam.services.agent_graph import (
+    AGENT_SOURCE,
+    references_knowledge_base,
+    references_tool_source,
+)
 from daegam.services.agent_skills import skill_pins
 from daegam.store.agents import MongoAgentStore
 from daegam.store.backend_apis import BackendAPIStore
@@ -197,8 +201,6 @@ TOKEN_GUARD = GuardField(
 )
 # 게시한 Agent 의 항목을 Tool 로 쓰는 Agent 는 막지 않는다. 주인은 언제든 게시를 거둔다 (P46 6.1절)
 HUB_ITEM_DELETE: tuple[GuardField, ...] = (GuardField("gateway_ids", "gateway"),)
-# tools 노드가 게시한 Agent 의 허브 항목을 가리키는 소스 종류 (P46 6.2절). 소스 id 는 항목 id 다
-AGENT_SOURCE = "agent"
 # Knowledge Base 와 Skill 은 두 칸을 늘 함께 싣는다
 KNOWLEDGE_BASE_DELETE: tuple[GuardField, ...] = (
     GuardField("agent_ids", "agent", CURRENT),

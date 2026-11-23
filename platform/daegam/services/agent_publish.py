@@ -96,14 +96,15 @@ class AgentPublishing:
         """허브에 `agent` 항목으로 게시한다. (항목, 새로 만들었는지). 호출이 꺼져 있으면 409
         agent_calls_disabled, 턴을 받지 않는 Agent 면 409 not_deployed·in_progress·deleting 이다.
         이미 게시돼 있으면 전제 조건을 다시 보지 않고 그 항목을 돌려준다."""
-        check = self.check_revision
-        if check is None or not calls_enabled(self.settings):
+        if not self.enabled:
             raise self.error_cls(409, CALLS_DISABLED, "agent calls are turned off on this platform")
         self.require_serving(doc)
         existing = await self.hub.store.get_by_agent(doc.id)
         if existing is not None:
             return existing, False
-        self._require_callable(doc, check)
+        refusal = self.call_refusal(doc)
+        if refusal is not None:
+            raise self.error_cls(refusal.status, refusal.code, refusal.detail, **refusal.extra)
         try:
             return await self.hub.publish_agent(
                 doc,
@@ -117,22 +118,30 @@ class AgentPublishing:
         except HubError as e:
             raise self.error_cls(e.status, e.code, e.detail, **e.extra) from e
 
-    def _require_callable(self, doc: Agent, check: RevisionCheck) -> None:
-        """배포된 리비전과 런타임 이미지가 호출을 받을 수 있어야 한다. 리비전은 409
-        agent_source_runs_unmet·runs_need_events, 이미지는 409 runtime_feature_missing 이다."""
+    @property
+    def enabled(self) -> bool:
+        """이 플랫폼에서 호출이 켜져 있는가. 실행 서비스가 없으면 꺼진 것이다."""
+        return self.check_revision is not None and calls_enabled(self.settings)
+
+    def call_refusal(self, doc: Agent) -> ServiceError | None:
+        """턴을 받는 Agent 가 호출을 받지 못하는 까닭. 받을 수 있으면 None 이다. 리비전은 409
+        agent_source_runs_unmet·runs_need_events, 이미지는 409 runtime_feature_missing 이다. 게시와,
+        그 Agent 를 Tool 로 쓰는 Agent 의 저장과 배포가 같은 것을 본다 (P46 6.2절)."""
         revision = doc.deployed
         assert revision is not None  # 턴을 받는 Agent 다
-        refusal = revision_refusal(revision, check)
-        if refusal is not None:
-            raise self.error_cls(refusal.status, refusal.code, refusal.detail, **refusal.extra)
+        if self.check_revision is not None:
+            refusal = revision_refusal(revision, self.check_revision)
+            if refusal is not None:
+                return refusal
         for feature in CALL_FEATURES:
             if not doc.image_reports(feature):
-                raise self.error_cls(
+                return ServiceError(
                     409,
                     RUNTIME_FEATURE_MISSING,
                     f"the deployed runtime image has not reported the {feature!r} capability",
                     feature=feature,
                 )
+        return None
 
     async def refuse_undeploy(self, doc: Agent) -> None:
         """게시한 Agent 는 내리지 못한다 (409 published). 먼저 게시를 해제한다."""

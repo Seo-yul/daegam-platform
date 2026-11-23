@@ -99,6 +99,7 @@ from daegam.store.settings import LLMProvider, WebToolsSettings
 from daegam.store.tenants import TenantSettings
 
 if TYPE_CHECKING:
+    from daegam.services.agent_calls import AgentSource
     from daegam.services.tool_effects import SourceTools
 
 # redis Database 의 `capabilities.checkpointer` 값별 `redis_modules_missing` 설명(D33). 캔버스
@@ -113,8 +114,11 @@ Level = Literal["error", "warning"]
 Effort = Literal["off", "low", "medium", "high", "xhigh", "max"]
 Decision = Literal["approve", "edit", "reject", "respond"]
 PIIType = Literal["email", "credit_card", "ip", "mac_address", "url", "regex"]
-SourceKind = Literal["gateway_instance", "mcp_instance"]
+SourceKind = Literal["gateway_instance", "mcp_instance", "agent"]
 SOURCE_KINDS: frozenset[str] = frozenset(get_args(SourceKind))
+# 게시한 Agent 를 Tool 로 부르는 소스다 (P46 6.2절). 소스 id 는 그 Agent 의 허브 항목 id 이고,
+# MCP 를 말하지 않으므로 규칙과 컴파일은 `services/agent_calls.py` 에 있다
+AGENT_SOURCE: SourceKind = "agent"
 # entry·에이전트에 붙는 노드 종류. 붙이는 간선의 종류도 같은 이름이라(ALLOWED_EDGES) 노드 종류로도
 # 간선 종류로도 쓴다
 Attachable = Literal["model", "tools", "memory", "guardrail", "knowledge"]
@@ -590,6 +594,9 @@ class GraphContext:
     source_tools: dict[str, SourceTools] = field(default_factory=dict)
     # 컴파일하는 문서의 배포 때 Tool 핀 (노드 id → ToolPin, `services/tool_pins.py`). 검증은 비운다
     tool_pins: dict[str, ToolPin] = field(default_factory=dict)
+    # tools 노드가 Tool 로 쓰는 게시한 Agent (허브 항목 id → AgentSource, P46 6.2절). 서비스가
+    # 리비전이 가리키는 항목마다 채운다 (`services/agent_calls.py` `AgentSourceLoader`)
+    agent_sources: dict[str, AgentSource] = field(default_factory=dict)
     # Platform Settings 의 웹 Tool 설정 (P39b 15절). 컴파일이 막는 접미사와 사용자별 한도를 싣는다
     web_tools: WebToolsSettings | None = None
     llm_gateway_url: str | None = None  # 게이트웨이 경로로 컴파일하면 그 주소 (P38 6절)
@@ -604,7 +611,8 @@ class GraphContext:
     in_pod_approvals: bool = False
 
     def source_pool(self, kind: str) -> dict[str, Any]:
-        """도구 소스 종류의 사전. `gateway_instance` 면 Gateway, 아니면 MCP Server 다."""
+        """MCP 를 말하는 도구 소스 종류의 사전. `gateway_instance` 면 Gateway, 아니면 MCP Server
+        다. 게시한 Agent 는 `agent_sources` 에 있다."""
         return self.gateway_instances if kind == "gateway_instance" else self.mcp_instances
 
 
@@ -1049,6 +1057,10 @@ def _check_agent_names(a: Analysis) -> None:
 def _check_sources(a: Analysis, ctx: GraphContext) -> None:
     ts = ctx.tenant_settings
     for node_id, data in a.nodes_of("tools", ToolsData):
+        if data.source.kind == AGENT_SOURCE:
+            # 게시한 Agent 의 규칙은 저장과 배포가 본다 (`agent_calls.call_issues`). 컴파일은 배포
+            # 때의 핀으로 하므로 게시를 거둔 뒤에도 부르는 Agent 의 파드가 뜬다
+            continue
         pool = ctx.source_pool(data.source.kind)
         if data.source.id not in pool:
             a.error(
@@ -1505,16 +1517,21 @@ def without_newer_sources[S: AgentSpec](spec: S) -> S:
 
 
 def references_tool_source(spec: AgentSpec, kind: str, source_id: str) -> bool:
-    """그래프에 이 도구 소스(`mcp_instance`·`gateway_instance`)를 가리키는 tools 노드가 있는가.
-    스토어 질의 `referencing_tool_source` 와 같은 조건을 문서 하나 안에서 본다. 배포가 핀한
+    """그래프에 이 도구 소스(`mcp_instance`·`gateway_instance`·`agent`)를 가리키는 tools 노드가
+    있는가. 스토어 질의 `referencing_tool_source` 와 같은 조건을 문서 하나 안에서 본다. 배포가 핀한
     리비전이 붙드는지 가릴 때 쓴다."""
     return (kind, source_id) in set(_tool_sources(spec))
 
 
 def tool_sources(spec: AgentSpec) -> list[tuple[str, str]]:
-    """tools 노드가 가리키는 도구 소스의 (종류, id) (정렬, 중복 없음). 턴 위임이 토큰을 줄 대상을
-    여기서 고른다 (P53 2절)."""
-    return sorted(set(_tool_sources(spec)))
+    """tools 노드가 가리키는 MCP 도구 소스의 (종류, id) (정렬, 중복 없음). 턴 위임이 토큰을 줄
+    대상을 여기서 고른다 (P53 2절). 게시한 Agent 는 `agent_source_items` 가 따로 낸다."""
+    return sorted({s for s in _tool_sources(spec) if s[0] != AGENT_SOURCE})
+
+
+def agent_source_items(spec: AgentSpec) -> list[str]:
+    """tools 노드가 Tool 로 쓰는 게시한 Agent 의 허브 항목 id (정렬, 중복 없음, P46 6.2절)."""
+    return sorted({sid for kind, sid in _tool_sources(spec) if kind == AGENT_SOURCE})
 
 
 def turn_token_sources(spec: AgentSpec, *, trusts_platform: bool) -> list[tuple[str, str]]:
@@ -1664,6 +1681,8 @@ def _tool_auth(kind: SourceKind, ctx: GraphContext, source_id: str) -> dict[str,
 
 
 def _tool_doc(ref: str, data: ToolsData, ctx: GraphContext) -> dict[str, Any]:
+    if data.source.kind == AGENT_SOURCE:
+        return ctx.agent_sources[data.source.id].tool_doc(ref, data, ctx.tool_pins.get(ref))
     if data.source.kind == "gateway_instance":
         gw = ctx.gateway_instances[data.source.id]
         source = {"kind": "gateway_instance", "id": gw.id, "name": gw.name}

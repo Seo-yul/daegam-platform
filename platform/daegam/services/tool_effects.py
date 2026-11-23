@@ -1,5 +1,5 @@
-"""Tool 효과 (P39b 14절 4부). 도구 소스(MCP Server, Gateway)의 Tool 마다 `read`·`write`·`web`
-하나다.
+"""Tool 효과 (P39b 14절 4부). 도구 소스(MCP Server, Gateway, 게시한 Agent)의 Tool 마다
+`read`·`write`·`web` 하나다.
 
 서버가 스스로 주는 힌트(`annotations.readOnlyHint`)는 보지 않는다(D48). 효과는 우리가 아는 것으로만
 정한다. 서버나 항목의 주인이 Tool 규칙에 적은 읽기 전용 표시는 그 소스 자신의 효과다(P52 4절).
@@ -33,6 +33,9 @@
 - 도는 렌더가 code mode 를 실은 Gateway 는 `execute_tool_script` 를 효과 `read`, 종류 `script` 로
   더 낸다(P56 6.5절). 그 Gateway 의 Tool 이 모두 읽기라는 판정이 그 효과 뒤에 선다. 게시된 원본의
   스크립트는 소비자가 내놓지 않으므로(`published_pins`) 소비자의 이름에서 뺀다.
+- 게시한 Agent 를 부르는 소스는 Tool 하나(`ask_*`)를 효과 `write`, 종류 `agent` 로 낸다(P46
+  6.6절, `agent_source`). 호출받은 Agent 가 제 Tool 로 데이터를 바꿀 수 있어서다. 캔버스의 읽기
+  전용 표시는 이 효과를 바꾸지 못한다(`node_effects`).
 
 검증·컴파일은 스레드 풀에서 돌므로 서비스가 효과의 재료를 미리 읽어 `GraphContext.source_tools`
 (소스 id → `SourceTools`)에 둔다(`ToolEffectLoader`).
@@ -74,6 +77,9 @@ ORIGIN_SCRIPT = "script"
 """code mode Gateway 의 `execute_tool_script` 다(P56 6.5절). `internal` 도 바깥 서비스도 아니다.
 효과는 `read` 이고, 결과는 늘 바깥 내용이며 캔버스의 어느 표시도 효과가 없다
 (`agent_tool_safety`)."""
+ORIGIN_AGENT = "agent"
+"""게시한 Agent 를 부르는 `ask_*` 다(P46 6.6절). 효과는 늘 `write` 이고 결과는 늘 바깥 내용이며
+캔버스의 어느 표시도 효과가 없다(`agent_tool_safety`)."""
 READ_METHODS = frozenset({"GET", "HEAD"})
 WEB_FETCH = "fetch"
 WEB_SEARCH = "search"
@@ -119,6 +125,11 @@ class SourceTools:
 
 
 UNKNOWN_SOURCE = SourceTools(names=None)
+
+
+def agent_source(tool: str) -> SourceTools:
+    """게시한 Agent 하나를 부르는 소스다. Tool 은 tool 하나이고 쓰기다(모듈 머리)."""
+    return SourceTools(names=(tool,), effects={tool: EFFECT_WRITE}, origins={tool: ORIGIN_AGENT})
 
 
 def without_script(tools: SourceTools) -> SourceTools:
@@ -169,13 +180,15 @@ def node_effects(
     """tools 노드 하나의 Tool 효과다. 읽기 전용 표시는 `write` 만 `read` 로 바꾼다. tool_safety 면
     바깥 내용 뒤의 승인 규칙이 쓰는 효과다. 표시는 서버나 항목의 표시가 설 수 없는 Tool 에만 효과가
     있고(`SourceTools.canvas_mark_counts`), 백엔드 종류를 모르는 이름은 웹 Tool 이 아니면 쓰기다.
-    런타임이 그 이름을 `read` 로 받지 않기 때문이다(`agent_tool_safety.node_marks`)."""
+    런타임이 그 이름을 `read` 로 받지 않기 때문이다(`agent_tool_safety.node_marks`). 게시한 Agent
+    를 부르는 Tool 은 표시와 상관없이 쓰기다."""
     out: dict[str, str] = {}
     for name in names:
         effect, origin = tools.effect(name), tools.origins.get(name)
         if tool_safety and origin is None and effect == EFFECT_READ:
             effect = EFFECT_WRITE
         marked = name in read_only and (not tool_safety or tools.canvas_mark_counts(name))
+        marked = marked and origin != ORIGIN_AGENT
         out[name] = EFFECT_READ if effect == EFFECT_WRITE and marked else effect
     return out
 

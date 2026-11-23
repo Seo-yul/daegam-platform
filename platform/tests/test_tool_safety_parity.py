@@ -3,7 +3,8 @@
 원본은 플랫폼 `services/tool_effects.py` 의 `ORIGIN_INTERNAL`(바깥 표시의 기본값이 안쪽인 종류,
 `agent_tool_safety._inside`)과 `THIRD_PARTY_ORIGINS`(캔버스의 읽기 전용 표시가 효과를 내는 종류)다.
 화면 `ui/src/lib/toolSafety.ts` 가 같은 값을 두고, 검사 응답의 `ToolOrigin` 은 그 종류와 웹 Tool,
-code mode 의 스크립트(`ORIGIN_SCRIPT`, P56 6.5절)의 전부다.
+code mode 의 스크립트(`ORIGIN_SCRIPT`, P56 6.5절), 게시한 Agent 를 부르는 Tool(`ORIGIN_AGENT`, P46
+6.6절)의 전부다.
 어긋나면 캔버스가 플랫폼이 렌더하지 않는 표시를 보인다. 플랫폼 쪽이 원본이므로 화면의 사본을 맞춘다.
 """
 
@@ -14,6 +15,7 @@ from typing import get_args
 
 from daegam.api.schemas.agents import ToolOrigin
 from daegam.services.tool_effects import (
+    ORIGIN_AGENT,
     ORIGIN_INTERNAL,
     ORIGIN_PLATFORM,
     ORIGIN_SCRIPT,
@@ -48,5 +50,6 @@ def test_the_validate_origins_are_every_backend_kind_the_rules_know() -> None:
         ORIGIN_INTERNAL,
         ORIGIN_PLATFORM,
         ORIGIN_SCRIPT,
+        ORIGIN_AGENT,
         *THIRD_PARTY_ORIGINS,
     }

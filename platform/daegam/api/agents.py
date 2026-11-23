@@ -278,6 +278,7 @@ def review_out(review: GraphReview) -> dict[str, Any]:
         "tool_origins": review.tools.origins,
         "tool_marked": review.tools.marked,
         "tool_safety": True,
+        "agent_calls": review.calls,
     }
 
 
@@ -318,10 +319,13 @@ async def validate_agent_graph(
 ) -> dict[str, Any]:
     """저장 없이 그래프를 검사한다. 저장·배포도 같은 규칙이다. 보이는데 consume 이 없는 Skill 을
     붙였으면 422 `skill_not_consumable` 이다(D64). `agent_id` 는 캔버스가 고치는 Agent 이고, 없는
-    Agent 면 404 다. 검사는 그것에 따라 바뀌지 않는다."""
+    Agent 면 404 다. 게시한 Agent 를 Tool 로 쓰는 노드의 검사가 그것을 읽는다. 그 Agent 자신의
+    항목은 오류(`agent_source_self`)이고, 그 Agent 를 다시 부르는 Agent 는 경고
+    (`agent_call_cycle`)다."""
     if agent_id:
         await get_agent_or_404(store, tenant, agent_id)
-    return review_out(await service.review(tenant, body.spec(), principal=user))
+    review = await service.review(tenant, body.spec(), principal=user, agent_id=agent_id)
+    return review_out(review)
 
 
 @router.get("/summary", response_model=list[AgentSummary], dependencies=[READ])

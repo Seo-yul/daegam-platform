@@ -70,6 +70,12 @@ SANDBOX_ROUTES = {
 SANDBOX_PATHS = re.compile(rf"^{re.escape(API_PREFIX)}/agents/[^/]+/sandboxes(/touch|/close)?$")
 
 
+# 다른 Agent 를 Tool 로 부르는 기계 경로 (P46 6.3절). 부르는 Agent 의 런타임이 호출받는 Agent 의
+# id 로 실행을 시작하고, 그 아래의 runs/{run_id} 와 runs/{run_id}/cancel 로 묻고 취소한다. 컴파일이
+# 이 경로를 agent.json 의 Agent 소스에 싣는다
+AGENT_CALL_PATH = "/internal/agent-calls/{agent_id}"
+
+
 # 웹훅 트리거의 공개 경로 (P41 4절). 다른 시스템이 Bearer 없이 서명으로 부른다. 감사 미들웨어가
 # 빼고(경로가 스스로 감사 행을 쓴다) 본문 상한은 경로가 읽으며 센다
 HOOK_ROUTE = "/hooks/{trigger_id}"
