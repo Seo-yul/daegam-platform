@@ -129,6 +129,7 @@ from daegam.store.tenants import (
 from daegam.store.tool_rules import has_caller_rule
 
 if TYPE_CHECKING:
+    from daegam.services.entry_conversion import EntryConversion
     from daegam.services.issuer_switch import IssuerSwitch
 
 logger = logging.getLogger("daegam.data_plane_auth")
@@ -835,6 +836,7 @@ class DataPlaneAuth:
         hub_items: ReapplyKind,
         shared_clones: ReapplyKind,
         issuer_switch: IssuerSwitch | None = None,
+        entry_conversion: EntryConversion | None = None,
     ):
         self.tenancy = tenancy
         self.store = store
@@ -854,6 +856,9 @@ class DataPlaneAuth:
         # 데이터 플레인 발급자 전환의 상태 (`services/issuer_switch.py` `IssuerSwitch`, P53b 6.9절).
         # 없으면 상태의 data_plane_issuer 가 null 이다
         self.issuer_switch = issuer_switch
+        # 프록시를 두던 허브 항목 옮기기의 상태 (`services/entry_conversion.py` `EntryConversion`,
+        # P54b 7절). 없으면 상태의 entry_conversions 가 비어 있다
+        self.entry_conversion = entry_conversion
 
     @property
     def settings(self) -> Settings:
@@ -934,7 +939,7 @@ class DataPlaneAuth:
         서버들은 적힌 넘겨받기 단계를 그대로 기대한다."""
         exposed = any(svc is self.mcp_servers and exposure_enabled(doc) for svc, doc in docs)
         state = await self.store.cluster(cluster.id) if exposed else None
-        if state is None or (state.unreachable and state.waiting(tick.now)):
+        if state is None or state.backing_off(tick.now):
             self.mcp_servers.fronts.forget(cluster.id)
             return
         await self.mcp_servers.observe_fronts(cluster, tick.now)
@@ -947,7 +952,7 @@ class DataPlaneAuth:
         네임스페이스 하나의 실패는 그 네임스페이스만 미루므로 다른 네임스페이스는 틱마다 다시
         본다."""
         state = await self.store.cluster(cluster.id)
-        if state.unreachable and state.waiting(tick.now):
+        if state.backing_off(tick.now):
             return state
         try:
             client = await run_in_threadpool(self.tenancy.cluster_service.client_for, cluster)
@@ -1351,6 +1356,7 @@ class DataPlaneAuth:
             "kinds": kinds,
             "fallbacks": fallbacks,
             "handovers": handovers,
+            "entry_conversions": await self._conversion_status(clusters, tick.now),
             "redis_plain_consumers": {
                 tenant: [plain_row(r) for r in rows] for tenant, rows in by_tenant(plain).items()
             },
@@ -1372,6 +1378,15 @@ class DataPlaneAuth:
             if c.service is self.mcp_servers
         )
         return dict(Counter(str(step) for step in steps if step is not None))
+
+    async def _conversion_status(
+        self, clusters: list[Cluster], now: datetime
+    ) -> dict[str, dict[str, Any]]:
+        """클러스터마다 프록시를 둔 채 남은 허브 항목과 remote 복제본, 옮기지 않고 둔 항목과 그
+        까닭 (P54b 7절, `EntryConversion.status`). 남은 것이 없는 클러스터는 빠진다."""
+        if self.entry_conversion is None:
+            return {}
+        return await self.entry_conversion.status(clusters, now)
 
     async def _issuer_status(
         self, clusters: list[Cluster], scans: dict[str, _Scan], now: datetime

@@ -356,9 +356,8 @@ def test_unknown_resolution_falls_back_to_the_stored_names_not_to_empty():
 def test_published_backend_rejected_in_oidc_mode(oidc_client, oidc_headers, fake_clusters, mongo):
     h = oidc_headers
     cid = default_cluster(oidc_client, headers=h)
-    hub = oidc_client.post(
-        HUB, json={"name": "spike", "kind": "remote", "url": SPIKE_URL}, headers=h
-    ).json()
+    entry = {"name": "spike", "kind": "entry", "url": SPIKE_URL, "transport": "streamable-http"}
+    hub = oidc_client.post(HUB, json=entry, headers=h).json()
     pub = HubItem(
         tenant="acme",
         name="pub",
@@ -380,7 +379,7 @@ def test_published_backend_rejected_in_oidc_mode(oidc_client, oidc_headers, fake
     assert r.status_code == 422, r.text
     assert r.json()["detail"]["code"] == "published_oidc_unsupported"
     assert r.json()["detail"]["hub_item_id"] == pub.id
-    # remote 만이면 되고 응답 auth 는 oidc 다
+    # entry 만이면 되고 응답 auth 는 oidc 다
     r = oidc_client.post(
         GW, json={"name": "bot", "backends": [{"hub_item_id": hub["id"]}]}, headers=h
     )
@@ -653,7 +652,7 @@ def test_entry_backend_precheck_uses_tools_list(client, fake_clusters):
         json={
             "name": "ext",
             "kind": "entry",
-            "url": "http://ext.svc:8080/mcp",
+            "url": "https://ext.example.com/mcp",
             "transport": "streamable-http",
         },
     ).json()
@@ -668,7 +667,7 @@ def test_entry_backend_precheck_uses_tools_list(client, fake_clusters):
     assert "unreachable" in r.json()["detail"]["backends"][0]["error"]
 
     async def alive(_client, url, bearer=None):
-        assert url == "http://ext.svc:8080/mcp"
+        assert url == "https://ext.example.com/mcp"
         return ["Ping"]
 
     client.app.state.hub_service.tool_lister = alive

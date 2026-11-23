@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import dataclasses
+import ipaddress
 import json
 import logging
 import os
@@ -25,6 +26,7 @@ from daegam.auth.signer import (
     jwks_url,
 )
 from daegam.documents import TOKEN_ENV as DOCPARSE_TOKEN_ENV
+from daegam.urlfetch import IPNetwork
 from daegam.urls import ENV_WHITESPACE, is_http_url, origin_of
 
 logger = logging.getLogger("daegam.config")
@@ -95,8 +97,8 @@ _LLM_GATEWAY_URL = re.compile(
     r"\.svc(\.cluster\.local)?(:(?P<port>[0-9]{1,5}))?",
     re.ASCII,
 )
-# 테넌트 네임스페이스와 같은 DNS 라벨 규칙이다(store/tenants.py NAMESPACE_RE)
-_NAMESPACE_LABEL = re.compile(r"[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?", re.ASCII)
+# DNS 라벨 규칙이다. 테넌트 네임스페이스(store/tenants.py NAMESPACE_RE)와 같다
+_DNS_LABEL = re.compile(r"[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?", re.ASCII)
 
 
 def default_llm_gateway_url(namespace: str) -> str:
@@ -115,7 +117,7 @@ def check_llm_gateway(settings: Settings) -> None:
         )
     ns = settings.llm_gateway_namespace
     if (
-        not _NAMESPACE_LABEL.fullmatch(ns)
+        not _DNS_LABEL.fullmatch(ns)
         or ns.startswith("kube-")
         or ns in ("default", settings.namespace)
     ):
@@ -227,6 +229,15 @@ def _sleep_window_from_env() -> int:
         logger.warning("%s=%d is below %d; using %d", name, value, floor, floor)
         return floor
     return value
+
+
+@dataclass(frozen=True)
+class EntryPrivateAllow:
+    """플랫폼이 entry 항목의 URL 로 직접 불러도 되는 사설망 (DAEGAM_ENTRY_PRIVATE_ALLOW). 주소
+    범위와 이름 접미사다. 비어 있으면 공인 주소와 그 테넌트 네임스페이스의 Service 만 부른다."""
+
+    cidrs: tuple[IPNetwork, ...] = ()
+    suffixes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -688,6 +699,10 @@ class Settings:
     # Cluster 문서와 배포 스냅샷에는 칸을 더하지 않는다. 그 모델은 옛 판이 모르는 칸을 거절해
     # 되돌리기가 깨지기 때문이다
     web_tools_image: str | None = None
+    # 플랫폼이 entry 항목의 URL 로 직접 불러도 되는 사설망 (DAEGAM_ENTRY_PRIVATE_ALLOW). 콤마로 이은
+    # CIDR 과 이름 접미사이고 기본은 비어 있다. Tool 새로고침, Tools 탭, Gateway 배포의 도달 확인이
+    # 본다(`services/entry_address.py`)
+    entry_private_allow: EntryPrivateAllow = EntryPrivateAllow()
     # home 클러스터의 샌드박스 이미지 (P40 10절, DAEGAM_HOME_SANDBOX_IMAGE). 배포가 digest 로 못
     # 박고 기동마다 home 의 `sandbox.image` 에 덮어쓴다. `DAEGAM_HOME_IMAGES` 의 키가
     # 아닌 것은 앞의 판이 그 JSON 을 `ClusterImages` 로 엄격히 검증해 모르는 키에 기동을 거절하기
@@ -892,6 +907,46 @@ def _home_redis_tls_from_env() -> ShippedRedisTls | None:
     return out
 
 
+def _covers_cluster_names(labels: list[str]) -> bool:
+    """이름 접미사가 클러스터 안 이름(`*.svc`, `*.cluster.local`)을 덮는가. 그 아래의 접미사
+    (`ns.svc`, `svc.cluster.local`)와 그것을 품는 접미사(`local`)가 모두 그렇다."""
+    return labels[-1] == "svc" or labels[-2:] == ["cluster", "local"] or labels == ["local"]
+
+
+def _entry_private_allow_from_env() -> EntryPrivateAllow:
+    """DAEGAM_ENTRY_PRIVATE_ALLOW. 콤마로 이은 CIDR(주소 하나도 된다)과 이름 접미사다. `/` 가 있거나
+    마지막 라벨이 숫자면 주소 범위로 읽는다. 읽을 수 없는 값과 클러스터 안 이름을 덮는 접미사는
+    기동을 거절한다(`_covers_cluster_names`). 그래서 이름 접미사로는 다른 테넌트의 Service 를 열지
+    못한다. 주소 범위는 플랫폼이 클러스터의 Service·Pod 대역을 알지 못해 거르지 못하므로, 그 대역과
+    겹치지 않게 적는 것은 운영자의 몫이다."""
+    cidrs: list[IPNetwork] = []
+    suffixes: list[str] = []
+    for raw in (os.environ.get("DAEGAM_ENTRY_PRIVATE_ALLOW") or "").split(","):
+        entry = raw.strip(ENV_WHITESPACE).lower()
+        if not entry:
+            continue
+        if "/" in entry or ":" in entry or entry.rsplit(".", 1)[-1].isdigit():
+            try:
+                cidrs.append(ipaddress.ip_network(entry, strict=False))
+            except ValueError as e:
+                raise ValueError(
+                    f"DAEGAM_ENTRY_PRIVATE_ALLOW holds an unreadable CIDR: {entry!r}"
+                ) from e
+            continue
+        suffix = entry.strip(".")
+        labels = suffix.split(".")
+        if not all(_DNS_LABEL.fullmatch(label) for label in labels):
+            raise ValueError(
+                f"DAEGAM_ENTRY_PRIVATE_ALLOW holds an unreadable host suffix: {entry!r}"
+            )
+        if _covers_cluster_names(labels):
+            raise ValueError(
+                f"DAEGAM_ENTRY_PRIVATE_ALLOW cannot list the in-cluster suffix {entry!r}"
+            )
+        suffixes.append(suffix)
+    return EntryPrivateAllow(cidrs=tuple(cidrs), suffixes=tuple(suffixes))
+
+
 def _home_block_metadata_from_env() -> bool | None:
     raw = (os.environ.get("DAEGAM_HOME_BLOCK_METADATA") or "").strip().lower()
     if not raw:
@@ -969,6 +1024,7 @@ def settings_from_env() -> Settings:
         platform_port=_env_int("DAEGAM_PLATFORM_PORT", _DEFAULTS["platform_port"]),
         platform_internal_url=os.environ.get("DAEGAM_PLATFORM_INTERNAL_URL") or None,
         web_tools_image=os.environ.get("DAEGAM_WEB_TOOLS_IMAGE") or None,
+        entry_private_allow=_entry_private_allow_from_env(),
         reconcile_enabled=_env_bool("DAEGAM_RECONCILE_ENABLED", _DEFAULTS["reconcile_enabled"]),
         reconcile_interval=_env_float("DAEGAM_RECONCILE_INTERVAL", _DEFAULTS["reconcile_interval"]),
         auth_mode=os.environ.get("DAEGAM_AUTH_MODE", _DEFAULTS["auth_mode"])

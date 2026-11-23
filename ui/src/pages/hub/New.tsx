@@ -22,7 +22,7 @@ import { EMPTY_CONTAINER, catalogPrefill, catalogStillApplies, containerBody, mi
 import { CLUSTERS_KEY, HUB_CATALOG_KEY } from "@/lib/queryKeys";
 import { useTenant } from "@/lib/tenant";
 
-type Kind = "remote" | "entry" | "image";
+type Kind = "entry" | "image";
 /** entry 항목의 인증 (P86 6.1절). oauth 는 P86b 가 더한다. */
 type Auth = "none" | "header";
 
@@ -41,7 +41,7 @@ export function HubNewPage() {
   return <HubForm key={server?.name ?? ""} server={server} missing={name && !server ? name : null} admission={catalog.data?.admission ?? false} />;
 }
 
-/** 외부 MCP 등록 폼. remote/entry 는 url(+transport), image 는 image/port/tools_filter 와 컨테이너 칸. 접근 정책은 접힌 편집기다 (D23). */
+/** 외부 MCP 등록 폼. entry 는 url(+transport), image 는 image/port/tools_filter 와 컨테이너 칸. 접근 정책은 접힌 편집기다 (D23). */
 function HubForm({ server, missing, admission }: { server: HubCatalogServer | null; missing: string | null; admission: boolean }) {
   const t = useT();
   const text = t.hub.new;
@@ -54,11 +54,11 @@ function HubForm({ server, missing, admission }: { server: HubCatalogServer | nu
   const prefill = server ? catalogPrefill(server) : null;
 
   const [names, setNames] = useState<NameValue>({ displayName: prefill?.displayName ?? "", name: prefill?.name ?? "" });
-  const [kind, setKind] = useState<Kind>(prefill?.kind ?? "remote");
+  const [kind, setKind] = useState<Kind>(prefill?.kind ?? "entry");
   const [clusterId, setClusterId] = useState("");
   const [url, setUrl] = useState(prefill?.url ?? "");
   const [transport, setTransport] = useState(prefill?.transport ?? "");
-  // 외부 서버(remote, entry)는 SSE 를 받지 않는다(outside_sse_unsupported). image 로 sse 를 고른 뒤 바꾸면 기본값으로 돌린다
+  // 외부 서버(entry)는 SSE 를 받지 않는다(outside_sse_unsupported). image 로 sse 를 고른 뒤 바꾸면 기본값으로 돌린다
   const changeKind = (next: Kind) => {
     setKind(next);
     if (next !== "image" && transport === "sse") setTransport("");
@@ -132,12 +132,11 @@ function HubForm({ server, missing, admission }: { server: HubCatalogServer | nu
               create.mutate();
             }}
           >
-            {/* remote·image 는 MCPRemoteProxy·MCPServer 를 `hub-<name>` 으로 만든다. entry 는 URL 만 등록하므로 미리보기가 없다 */}
+            {/* image 는 MCPServer 를 `hub-<name>` 으로 만든다. entry 는 URL 만 등록하므로 미리보기가 없다 */}
             <NameFields testId="hub" placeholders={text.placeholders} value={names} onChange={setNames} preview={kind === "entry" ? undefined : { prefix: "hub" }} errors={nameFieldErrors(create.error)} />
             <div className="grid grid-cols-2 gap-3">
               <Field label={text.kind} htmlFor="hub-kind" hint={text.kindHint}>
                 <Select id="hub-kind" data-testid="hub-kind" value={kind} onChange={(e) => changeKind(e.target.value as Kind)}>
-                  <option value="remote">{text.kinds.remote}</option>
                   <option value="entry">{text.kinds.entry}</option>
                   <option value="image">{text.kinds.image}</option>
                 </Select>
@@ -196,7 +195,7 @@ function HubForm({ server, missing, admission }: { server: HubCatalogServer | nu
               <Select id="hub-transport" data-testid="hub-transport" required={kind === "entry"} value={transport} onChange={(e) => setTransport(e.target.value)}>
                 <option value="">{t.shared.defaultValue}</option>
                 <option value="streamable-http">{text.transports["streamable-http"]}</option>
-                {/* sse 는 image 항목의 컨테이너만 고른다. SSE 로만 말하는 외부 서버(remote, entry)는 서버가 거절한다(outside_sse_unsupported) */}
+                {/* sse 는 image 항목의 컨테이너만 고른다. SSE 로만 말하는 외부 서버(entry)는 서버가 거절한다(outside_sse_unsupported) */}
                 {kind === "image" ? <option value="sse">{text.transports.sse}</option> : null}
               </Select>
             </Field>

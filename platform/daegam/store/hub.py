@@ -51,6 +51,8 @@ HUB_ITEMS = "hub_items"
 HubKind = Literal["internal", "remote", "entry", "image", "published", "platform"]
 HUB_KINDS: frozenset[str] = frozenset(get_args(HubKind))
 Transport = Literal["streamable-http", "sse"]
+# 항목이 transport 를 적지 않았을 때 쓰는 값
+DEFAULT_TRANSPORT: Transport = "streamable-http"
 
 # 모델 칸이 아니어도 뒤 판이 쓴 칸으로 보지 않는 최상위 키 (P55 9절). 저장 쪽 칸(P68 의 `seq`·
 # `claim`)과, 읽지 않고 남아 있는 옛 칸(D23 전의 `scope`)이다
@@ -278,6 +280,22 @@ def replicated(item: HubItemBase, tenant: str) -> bool:
     if item.kind == PLATFORM_KIND:
         return item.k8s.kind is not None
     return item.tenant != tenant and item.kind in CLONED_KINDS
+
+
+def as_entry[T: HubItemBase](item: T) -> T:
+    """remote 항목을 entry 항목으로 본 사본. 같은 URL 이고 CR 이 없으며 전송이 비었으면
+    `DEFAULT_TRANSPORT` 다. Gateway 가 그 주소를 자기 Entry 로 직접 부르므로 프록시도 복제본도 쓰지
+    않는다. 다른 종류는 그대로 돌려준다."""
+    if item.kind != "remote":
+        return item
+    transport = item.source.transport or DEFAULT_TRANSPORT
+    return item.model_copy(
+        update={
+            "kind": "entry",
+            "source": item.source.model_copy(update={"transport": transport}),
+            "k8s": item.k8s.model_copy(update={"kind": None}),
+        }
+    )
 
 
 # 재적용이 다시 렌더하는 살아 있는 상태 (P50 1절). `creating` 은 적용이 끝나지 않았고 `deleting` 은

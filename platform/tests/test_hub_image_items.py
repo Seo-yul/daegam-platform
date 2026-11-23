@@ -149,10 +149,8 @@ def test_container_inputs_are_checked_at_creation(client, cluster, mongo, extra,
 
 
 def test_container_inputs_are_for_image_items_only(client, cluster):
-    r = client.post(
-        HUB,
-        json={"name": "r", "kind": "remote", "url": "https://mcp.example.com/mcp", "stdio": True},
-    )
+    entry = {"kind": "entry", "url": "https://mcp.example.com/mcp", "transport": "streamable-http"}
+    r = client.post(HUB, json={"name": "r", **entry, "stdio": True})
     assert detail_code(r) == (422, "invalid_value")
 
 
@@ -391,6 +389,7 @@ def test_a_catalog_image_waits_for_the_hub_image_settings(client, cluster):
 
 
 def test_a_catalog_remote_must_match_the_snapshot(client, cluster):
+    """카탈로그의 원격 서버는 entry 항목으로 가져온다. remote 항목으로는 가져오지 못한다."""
     cat = snapshot()
     plain = next(
         s
@@ -400,9 +399,12 @@ def test_a_catalog_remote_must_match_the_snapshot(client, cluster):
         and not s.needs_login
         and not s.needs_credentials
     )
-    body = {"name": "from-cat", "kind": "remote", "url": plain.url, "transport": plain.transport}
+    body = {"name": "from-cat", "kind": "entry", "url": plain.url, "transport": plain.transport}
+    r = client.post(HUB, json={**body, "kind": "remote", "catalog": plain.name})
+    assert detail_code(r) == (422, "invalid_kind"), r.text
     r = client.post(HUB, json={**body, "catalog": plain.name})
     assert r.status_code == 201, r.text
+    assert r.json()["kind"] == "entry" and r.json()["k8s"]["kind"] is None
     assert r.json()["source"]["catalog"] == {"server": plain.name, "release": cat.release}
     other = {**body, "name": "wrong", "url": "https://other.example.com/mcp"}
     assert detail_code(client.post(HUB, json={**other, "catalog": plain.name})) == (
@@ -414,7 +416,7 @@ def test_a_catalog_remote_must_match_the_snapshot(client, cluster):
         HUB,
         json={
             "name": "login",
-            "kind": "remote",
+            "kind": "entry",
             "url": login.url,
             "transport": login.transport,
             "catalog": login.name,
@@ -431,7 +433,7 @@ def test_a_catalog_remote_that_speaks_only_sse_is_refused(client, cluster):
         if s.kind == "remote" and s.transport == "sse" and not s.needs_login
     )
     for transport in ("sse", "streamable-http"):
-        body = {"name": f"sse-{transport}", "kind": "remote", "url": sse.url}
+        body = {"name": f"sse-{transport}", "kind": "entry", "url": sse.url}
         r = client.post(HUB, json={**body, "transport": transport, "catalog": sse.name})
         assert detail_code(r) == (422, "outside_sse_unsupported"), r.text
 

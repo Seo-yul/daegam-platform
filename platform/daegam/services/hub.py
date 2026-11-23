@@ -30,7 +30,13 @@ from daegam.auth.principal import Principal
 from daegam.config.resolve import ProfileRuntime, image_digest, resolve_effective, with_registry
 from daegam.errors import ServiceError, save_missed
 from daegam.k8s.client import AccessDenied, ClusterUnreachable, KubeClient, parse_service_url
-from daegam.k8s.gates import passing_features, require_tenant_secrets, toolhive_has
+from daegam.k8s.gates import (
+    Feature,
+    cluster_gate,
+    passing_features,
+    require_tenant_secrets,
+    toolhive_has,
+)
 from daegam.k8s.labels import (
     APP_MCPSERVER,
     LABEL_APP_INSTANCE,
@@ -72,6 +78,12 @@ from daegam.services.data_plane_auth import (
     rules_rev,
     secret_env_rev,
 )
+from daegam.services.entry_address import (
+    CheckedURL,
+    EntryAddresses,
+    EntryAddressRefused,
+    list_tools_pinned,
+)
 from daegam.services.hub_images import (
     HubImageAdmission,
     image_warnings,
@@ -79,7 +91,7 @@ from daegam.services.hub_images import (
     refused_items,
 )
 from daegam.services.hub_secret_env import SecretEnvSecrets
-from daegam.services.proxy_accounts import proxy_service_account, require_proxy_account
+from daegam.services.proxy_accounts import proxy_service_account
 from daegam.services.references import HUB_ITEM_DELETE, ReferenceService
 from daegam.services.rule_compile import RuleScopes, closed_policies, item_policies
 from daegam.services.svc_tokens import SvcTokens
@@ -107,11 +119,13 @@ from daegam.store.base import (
     save_with_edit_claim,
     utcnow,
 )
+from daegam.store.clusters import Cluster
 from daegam.store.gateways import Gateway
 from daegam.store.hub import (
     CHECK_OK,
     CHECK_REFUSED,
     CHECK_UNREACHABLE,
+    DEFAULT_TRANSPORT,
     HUB_LIVE_STATES,
     HUB_NOT_DELETING,
     PLATFORM_KIND,
@@ -124,6 +138,7 @@ from daegam.store.hub import (
     HubSource,
     MongoHubStore,
     StdioProbe,
+    as_entry,
     secret_env_name,
     unknown_keys,
 )
@@ -239,8 +254,11 @@ NOT_ANSWERING = "not_answering"
 STDIO_CONFIRM = timedelta(seconds=45)
 STDIO_BACKOFF_FIRST = timedelta(minutes=2)
 STDIO_BACKOFF_MAX = timedelta(minutes=30)
-# 항목이 transport 를 적지 않았을 때 쓰는 값
-DEFAULT_TRANSPORT = "streamable-http"
+
+
+# 사람이 만들 수 있는 종류. 외부 MCP 서버는 entry 로만 등록한다. remote 는 전에 만든 항목을 읽을
+# 때만 있는 종류다
+CREATABLE_KINDS: tuple[str, ...] = ("entry", "image")
 
 
 def hub_k8s_name(name: str) -> str:
@@ -251,6 +269,23 @@ def proxied(item: HubItem) -> bool:
     """MCPRemoteProxy 로 감싼 항목인가. remote 는 늘 그렇고 published 는 proxy 모드로 게시했을
     때다. 소비는 프록시를 거친다(정책·audit 계층)."""
     return item.kind == "remote" or (item.kind == "published" and item.k8s.kind == "MCPRemoteProxy")
+
+
+# 프록시를 떼지 못하는 까닭 (`proxy_kept`). 옮기기 단계의 상태가 같은 값을 보인다
+PROXY_KEPT_AUDIT = "audit_old"
+PROXY_KEPT_SSE = "sse_entry"
+
+
+def proxy_kept(item: HubItem, cluster: Cluster) -> str | None:
+    """프록시를 떼지 못하는 항목이면 그 까닭, 아니면 None. 클러스터가 vMCP 감사의 게이트 아래면
+    프록시만 그 호출을 감사에 남긴다. SSE 주소는 플랫폼의 MCP 클라이언트가 확인하지 못해, 그 주소를
+    직접 부르는 Gateway 는 배포의 도달 확인을 지나지 못한다. 옮기기 단계는 이런 항목을 그대로
+    두고(`services/entry_conversion.py`), 새 배포도 그 프록시를 계속 부른다(`deploy_form`)."""
+    if not cluster_gate(cluster, Feature.AUDIT).ok:
+        return PROXY_KEPT_AUDIT
+    if item.source.transport == "sse":
+        return PROXY_KEPT_SSE
+    return None
 
 
 def hub_item_rev(item: HubItem) -> str | None:
@@ -429,9 +464,12 @@ async def _default_schema_lister(
     orbstack 에서 실측했다 (D21). 실은 헤더에 `Authorization` 이 있고 직행이 아니면
     pods/portforward 로 간다. API 서버 프록시는 Authorization 을 지우기 때문이다 (D41, 실측). 그
     판정은 에이전트 런타임 프록시와 같은 `bearer_service_client` 다. 외부 URL 에 헤더를 실으면
-    리다이렉트를 따라가지 않는다 (`list_tools`, P86 6.5절)."""
+    리다이렉트를 따라가지 않는다 (`list_tools`, P86 6.5절). 주소 규칙을 지난 entry 항목의 바깥
+    URL(`CheckedURL`)은 그때 확인한 주소로만 연결한다."""
     from daegam.mcp_client import list_tools
 
+    if isinstance(url, CheckedURL):
+        return await list_tools_pinned(url, timeout=TOOLS_LIST_TIMEOUT, headers=headers)
     parts = parse_service_url(url)
     if parts is None:
         return await list_tools(url, timeout=TOOLS_LIST_TIMEOUT, headers=headers)
@@ -599,6 +637,8 @@ class HubService:
         # 모듈이 Gateway·MCP Server 모듈을 import 해 여기서 만들 수 없으므로 wiring 이 만들어 넘긴다
         self.tool_names = tool_names
         self.schema_lister = schema_lister or _default_schema_lister
+        # 플랫폼이 entry 항목의 URL 을 직접 부를 때의 주소 규칙 (`services/entry_address.py`)
+        self.entry_addresses = EntryAddresses(cluster_service.settings.entry_private_allow)
         # 플랫폼 자신이 우리 MCPServer 에 tools/list 할 때 낼 서비스 토큰의 발급 창구 (D41)
         self.svc_tokens = svc_tokens
         # internal 항목의 상태는 원본 MCP Server 자신의 판단이다 (T55). wiring 이 붙인다
@@ -968,10 +1008,11 @@ class HubService:
 
         image 항목은 컨테이너 입력(stdio, args, env, Secret env)을 받는다 (P55 5절). Secret env 의
         값은 항목의 Secret 에 문서보다 먼저 쓰고, 문서를 쓰지 못하면 그 Secret 을 되돌린다. catalog
-        는 항목이 온 카탈로그 서버다. remote·entry 는 주소와 전송이 스냅숏의 것과 같아야 하고,
-        자격 증명이 필요한 원격은 그 서버의 헤더를 고정 헤더로 싣는 entry 여야 한다 (P86 A3).
-        image 항목은 허브 이미지 설정이 켜져 있으면 허용을 거친다(`_admit`, P55 6절)."""
-        if kind not in CROSS_TENANT_KINDS:
+        는 항목이 온 카탈로그 서버다. 카탈로그의 원격 서버는 entry 항목이 되고, 주소와 전송이
+        스냅숏의 것과 같아야 하며, 자격 증명이 필요한 원격은 그 서버의 헤더를 고정 헤더로 싣는다
+        (P86 A3). image 항목은 허브 이미지 설정이 켜져 있으면 허용을 거친다(`_admit`, P55 6절).
+        그 밖의 종류는 422 invalid_kind 다. remote 도 그렇다."""
+        if kind not in CREATABLE_KINDS:
             raise HubError(422, "invalid_kind", f"kind {kind!r} cannot be created directly")
         header = self._header_input(kind, auth)
         # 정책 검증(hub:share 등)은 클러스터에 닿기 전에 끝낸다
@@ -980,10 +1021,10 @@ class HubService:
         self._check_container(kind, source, values, stamped, tenant)
         if await self.store.get_by_name(tenant, name) is not None:
             raise HubError(409, "name_conflict", f"hub item {name!r} already exists")
-        if kind in ("remote", "entry"):
+        if kind == "entry":
             if not source.url or not is_http_url(source.url):
                 raise HubError(422, "invalid_value", "source.url must be an http(s) URL")
-            if kind == "entry" and not source.transport:
+            if not source.transport:
                 raise HubError(422, "invalid_value", "entry needs source.transport")
             if source.transport == "sse":
                 raise HubError(422, OUTSIDE_SSE_UNSUPPORTED, OUTSIDE_SSE_UNSUPPORTED_TEXT)
@@ -1003,9 +1044,6 @@ class HubService:
             raise HubError(e.status, e.code, e.detail) from e
         except ClusterUnreachable as e:
             raise HubError(502, "cluster_unreachable", str(e)) from e
-        if kind == "remote":
-            # 새 원격 프록시는 역할 없는 ServiceAccount 로만 만든다 (P50 2절·10절)
-            require_proxy_account(cluster, HubError)
         if header is not None:
             await self._require_https(tenant, cluster, source.url or "")
             # 값을 둘 곳이 없으면 항목을 저장하기 전에 멈춘다
@@ -1135,7 +1173,7 @@ class HubService:
     def _catalog_origin(
         kind: str, name: str, source: HubSource, *, header_name: str | None
     ) -> HubCatalogOrigin:
-        """remote·entry 항목이 적은 카탈로그 서버 (P55 5절). 지금 스냅숏의 원격 서버와 주소·전송이
+        """entry 항목이 적은 카탈로그 서버 (P55 5절). 지금 스냅숏의 원격 서버와 주소·전송이
         같아야 하고, 자격 증명이 필요한 원격은 header_name(항목이 고정 헤더로 싣는 이름)이 그
         서버의 헤더여야 한다 (P86 A3). image 의 카탈로그 서버는 허용(서명)이 정한다(`_admit`)."""
         catalog = hub_catalog.snapshot()
@@ -1742,9 +1780,40 @@ class HubService:
         bearer = await self._bearer_for(item)
         return {"Authorization": f"Bearer {bearer}"} if bearer else {}
 
+    async def deploy_form(self, item: HubItem) -> HubItem:
+        """Gateway 배포가 스냅샷 행을 짓는 항목의 꼴. remote 항목은 entry 항목으로 보아 행이 그
+        주소를 직접 부른다(`as_entry`). 프록시를 떼지 못하는 remote 항목(`proxy_kept`)은 그대로
+        두어, 행이 지금처럼 그 프록시나 복제본을 부른다."""
+        if item.kind != "remote" or proxy_kept(item, await self._cluster(item)):
+            return item
+        return as_entry(item)
+
+    async def checked_entry_url(
+        self, item: HubItem, url: str, cluster: Cluster | None = None
+    ) -> str:
+        """entry 항목의 URL 로 플랫폼이 불러도 되는 것. 주소 규칙이 거절하면 422
+        `entry_address_refused` 다. cluster 는 이미 읽은 항목의 클러스터이고, 없으면 여기서 읽는다.
+        entry 항목이 될 remote 항목의 주소도 이것으로 본다."""
+
+        async def namespaces() -> list[str]:
+            return await self.tenancy.allowed_namespaces(
+                item.tenant, cluster or await self._cluster(item)
+            )
+
+        return await self.entry_addresses.check(url, namespaces)
+
+    async def _callable_url(self, item: HubItem, url: str) -> str:
+        """플랫폼이 불러도 되는 URL. entry 항목은 주소 규칙을 지나야 하고(`checked_entry_url`),
+        다른 종류는 플랫폼이 만든 Service 주소라 그대로다."""
+        if item.kind != "entry":
+            return url
+        return await self.checked_entry_url(item, url)
+
     async def list_tools_at(self, item: HubItem, url: str) -> list[str]:
         """항목이 사는 클러스터의 클라이언트로 url 에 tools/list (D21 경로 선택은 클라이언트 몫).
-        헤더를 싣는 항목은 그 답을 확인으로 적는다(`_record_check`)."""
+        헤더를 싣는 항목은 그 답을 확인으로 적는다(`_record_check`). 주소 규칙이 거절한 URL 은
+        부르지 않고 확인도 적지 않는다."""
+        url = await self._callable_url(item, url)
         client, headers = await self._client(item), await self._headers_for(item)
         try:
             names = await self.tool_lister(client, url, headers)
@@ -1755,7 +1824,8 @@ class HubService:
         return names
 
     async def list_tool_schemas_at(self, item: HubItem, url: str) -> ToolsResult:
-        """같은 경로로 이름·설명·입력 스키마까지 받는다. 확인을 적는 것도 같다."""
+        """같은 경로로 이름·설명·입력 스키마까지 받는다. 주소 규칙과 확인을 적는 것도 같다."""
+        url = await self._callable_url(item, url)
         client, headers = await self._client(item), await self._headers_for(item)
         try:
             res = await self.schema_lister(client, url, headers)
@@ -1764,6 +1834,16 @@ class HubService:
             raise
         await self._record_check(item, CHECK_OK)
         return res
+
+    async def reachable_tools(self, item: HubItem, url: str) -> list[str]:
+        """Gateway 배포의 도달 확인. tools/list 가 답한 이름이다. 주소 규칙이 거절한 URL 은 부르지
+        않고 저장된 Tool 이름으로 답해 백엔드를 준비된 것으로 센다. 서버가 답하는지는 vMCP 의
+        백엔드 상태가 보인다."""
+        try:
+            return await self.list_tools_at(item, url)
+        except EntryAddressRefused as e:
+            logger.info("entry address refused, not checked: item=%s reason=%s", item.id, e.reason)
+            return list(item.tool_names)
 
     async def check_header(self, item: HubItem) -> HubItem:
         """헤더 값을 실어 그 항목의 URL 에 tools/list 를 불러 본다 (P86 6.3절). vMCP 의 점검은
@@ -1818,6 +1898,9 @@ class HubService:
             }
         try:
             res = await self.list_tool_schemas_at(item, st["url"])
+        except EntryAddressRefused as e:
+            reason = coded_warning(e.code, e.detail, e.reason)
+            return {"tools": [], "listed": False, "reason": reason, "truncated": False}
         except Exception as e:  # noqa: BLE001 - MCP 연결·프로토콜 오류 전부
             leaf = _leaf_exception(e)
             return {
@@ -1845,6 +1928,8 @@ class HubService:
             raise HubError(409, "not_ready", f"hub item has no URL yet (phase={st['phase']})")
         try:
             names = await self.list_tools_at(item, st["url"])
+        except EntryAddressRefused:
+            raise
         except Exception as e:  # noqa: BLE001 - MCP 연결·프로토콜 오류 전부
             leaf = _leaf_exception(e)
             raise HubError(
@@ -2020,7 +2105,6 @@ class HubService:
         *,
         name: str | None = None,
         display_name: str | None = None,
-        mode: str = "entry",
         access: Access | None = None,
         principal: Principal,
     ) -> HubItem:
@@ -2029,9 +2113,8 @@ class HubService:
         name_conflict 다. 이름 기본값은 문서 `name`, 표시 이름 기본값은 문서 `display_name` 이다
         (D24).
 
-        entry 는 CR 없이 URL 만 둔다(소비자가 Entry 래퍼로 감싼다). proxy 는 MCPRemoteProxy 로
-        감싸고 `apply` 가 CR 을 적용하며 실패를 last_error 로 남긴다. published 는 다른 테넌트에 열
-        수 없다 (422 cross_tenant_unsupported). 상태·mode 검사는 부르는 쪽 몫이다."""
+        항목은 CR 없이 vMCP 의 URL 만 둔다(소비자가 Entry 래퍼로 감싼다). published 는 다른
+        테넌트에 열 수 없다 (422 cross_tenant_unsupported). 상태·mode 검사는 부르는 쪽 몫이다."""
         k8s = gw.k8s
         assert k8s is not None  # 부르는 쪽이 deployed 를 확인했다
         hub_name = (name or gw.name).strip()
@@ -2043,14 +2126,6 @@ class HubService:
         stamped = self._initial_access(
             access, owner=gw.tenant, kind="published", principal=principal
         )
-        proxy = mode == "proxy"
-        if proxy:
-            # 새 원격 프록시는 역할 없는 ServiceAccount 로만 만든다 (P50 2절·10절). 클러스터를
-            # 모르면 게이트를 볼 수 없으므로 만들지 않는다
-            cluster = await self.tenancy.clusters.get(gw.cluster_id or "")
-            if cluster is None:
-                raise HubError(422, "unknown_cluster", f"cluster {gw.cluster_id} missing")
-            require_proxy_account(cluster, HubError)
         item = HubItem(
             tenant=gw.tenant,
             name=hub_name,
@@ -2062,19 +2137,13 @@ class HubService:
                 gateway_instance_id=gw.id,
             ),
             cluster_id=gw.cluster_id,
-            k8s=HubK8s(
-                kind="MCPRemoteProxy" if proxy else "VirtualMCPServer",
-                name=hub_k8s_name(hub_name) if proxy else k8s.name,
-                namespace=k8s.namespace,
-            ),
+            k8s=HubK8s(kind="VirtualMCPServer", name=k8s.name, namespace=k8s.namespace),
             access=stamped,
             access_updated_by=principal.sub if access is not None else None,
             access_updated_at=utcnow() if access is not None else None,
-            state="creating" if proxy else "created",
+            state="created",
         )
         await self.store.create(item)
-        if proxy:
-            await self.apply(item)
         return item
 
     async def sync_instance(self, inst: MCPServer) -> HubItem | None:

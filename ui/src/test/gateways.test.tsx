@@ -463,12 +463,12 @@ describe("gateways (deployment)", () => {
     expect(within(card).getByTestId("published-empty")).toBeInTheDocument();
     // header 모드의 Gateway 에는 소비자가 규칙을 지킨다는 안내가 없다 (P57 6.2절)
     expect(within(card).queryByTestId("publish-consumer-hint")).not.toBeInTheDocument();
-    await selectValue(user, "publish-mode", "proxy");
+    expect(within(card).queryByTestId("publish-mode")).not.toBeInTheDocument();
     await user.clear(screen.getByTestId("publish-display-name"));
     await user.type(screen.getByTestId("publish-display-name"), "Bot Tools");
     expect(screen.getByTestId("publish-name")).toHaveValue("bot-tools");
     await user.click(screen.getByTestId("publish-button"));
-    await waitFor(() => expect(lastRequest("POST", "/gateways/gw-support/publish")?.body).toEqual({ mode: "proxy", name: "bot-tools", display_name: "Bot Tools" }));
+    await waitFor(() => expect(lastRequest("POST", "/gateways/gw-support/publish")?.body).toEqual({ mode: "entry", name: "bot-tools", display_name: "Bot Tools" }));
     expect(await screen.findByTestId("published-link-bot-tools")).toHaveAttribute("href", "/hub/hub-pub-bot-tools");
 
     await user.click(screen.getByTestId("unpublish-bot-tools"));

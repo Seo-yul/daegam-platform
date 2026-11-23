@@ -271,13 +271,12 @@ def catalog_remote(
     header_name: str | None = None,
     error_cls: type[ServiceError],
 ) -> CatalogServer:
-    """remote·entry 항목이 적은 카탈로그 서버 (5절). 지금 스냅숏의 원격 서버여야 하고, 주소와 전송이
+    """entry 항목이 적은 카탈로그 서버 (5절). 지금 스냅숏의 원격 서버여야 하고, 주소와 전송이
     그 서버의 것과 같아야 한다. 그래야 상세가 뒷받침하지 못하는 출처를 말하지 않는다. 로그인이
     필요한 원격은 가져올 수 없다. 자격 증명이 필요한 원격은 그 서버의
     `import_header` 를 고정 헤더로 싣는 항목만 받는다 (P86 A3). header_name 은 항목이 `auth: header`
-    로 싣는 헤더 이름이고, 인증은 entry 항목만 받으므로 remote 항목에는 늘 None 이다. HTTP 헤더
-    이름이라 대소문자를 가리지 않는다. SSE 로만 말하는 서버는 422 outside_sse_unsupported 이고
-    나머지는 모두 422 invalid_value 다."""
+    로 싣는 헤더 이름이고 없으면 None 이다. HTTP 헤더 이름이라 대소문자를 가리지 않는다. SSE 로만
+    말하는 서버는 422 outside_sse_unsupported 이고 나머지는 모두 422 invalid_value 다."""
     server = catalog.server(name)
     if server is None or server.kind != "remote":
         raise error_cls(422, "invalid_value", f"catalog has no remote server {name!r}")

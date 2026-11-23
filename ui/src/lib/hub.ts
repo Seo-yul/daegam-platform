@@ -51,7 +51,7 @@ export function hubKindLabel(t: Messages, kind: HubItem["kind"]): string {
 /** ToolHive code mode 의 가상 Tool 이름. 게시된 Gateway 가 code mode 로 돌면 그 목록에 있다. */
 export const CODE_MODE_TOOL = "execute_tool_script";
 
-/** proxy 모드로 게시한 항목인가. 게시 카드와 Gateway 폼이 함께 쓴다. */
+/** proxy 모드로 게시한 항목인가. 새로 게시할 수는 없고 전에 게시한 항목에만 있다. */
 export function isProxyPublished(item: HubItem): boolean {
   return item.kind === "published" && item.k8s.kind === "MCPRemoteProxy";
 }

@@ -42,12 +42,16 @@ describe("hub header auth (P86)", () => {
     });
   });
 
-  it("other kinds send no auth and hide the auth fields", async () => {
+  it("an image item hides the auth fields, and an entry item without auth sends none", async () => {
     const user = userEvent.setup();
     render(<TestApp initialPath="/hub/new" />);
+    await selectValue(user, "hub-kind", "image");
     expect(screen.queryByTestId("hub-auth")).not.toBeInTheDocument();
+    await selectValue(user, "hub-kind", "entry");
+    expect(screen.getByTestId("hub-auth")).toHaveValue("none");
     await user.type(screen.getByTestId("hub-name"), "ext");
     await user.type(screen.getByTestId("hub-url"), "https://mcp.example.com/mcp");
+    await selectValue(user, "hub-transport", "streamable-http");
     await user.click(screen.getByTestId("save-button"));
     expect(await screen.findByTestId("hub-detail-page")).toBeInTheDocument();
     expect(lastRequest("POST", "/hub")?.body).not.toHaveProperty("auth");

@@ -7,7 +7,7 @@ from dataclasses import replace
 
 import pytest
 
-from daegam.config import Settings, settings_from_env
+from daegam.config import EntryPrivateAllow, Settings, settings_from_env
 
 
 def test_empty_env_gives_the_dataclass_defaults(bare_env):
@@ -218,3 +218,31 @@ def test_preview_settings_are_read_and_clamped(bare_env):
     assert (got.agent_previews_enabled, got.agent_previews_per_tenant) == (False, 0)
     bare_env.setenv("DAEGAM_AGENT_PREVIEWS_PER_TENANT", "500")
     assert settings_from_env().agent_previews_per_tenant == 50
+
+
+def test_entry_private_allow_reads_cidrs_and_host_suffixes(bare_env):
+    """DAEGAM_ENTRY_PRIVATE_ALLOW 는 기본이 빈 목록이다. 주소 하나도 범위로 읽고, 읽을 수 없는 값과
+    클러스터 안 이름을 덮는 접미사에는 기동을 거절한다."""
+    assert settings_from_env().entry_private_allow == EntryPrivateAllow()
+    bare_env.setenv(
+        "DAEGAM_ENTRY_PRIVATE_ALLOW", " 10.20.0.0/16, 192.168.7.5 ,fd00::/8,.Corp.Example ,"
+    )
+    got = settings_from_env().entry_private_allow
+    assert [str(n) for n in got.cidrs] == ["10.20.0.0/16", "192.168.7.5/32", "fd00::/8"]
+    assert got.suffixes == ("corp.example",)
+    for bad in (
+        "10.20.0.0/40",
+        "10.20.0",
+        "corp_example",
+        "a..b",
+        "svc",
+        "ns.svc",
+        "cluster.local",
+        "svc.cluster.local",
+        # cluster.local 을 품는 접미사
+        "local",
+        ".Local.",
+    ):
+        bare_env.setenv("DAEGAM_ENTRY_PRIVATE_ALLOW", bad)
+        with pytest.raises(ValueError, match="DAEGAM_ENTRY_PRIVATE_ALLOW"):
+            settings_from_env()

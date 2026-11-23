@@ -62,11 +62,12 @@ describe("name fields in forms (D24)", () => {
     render(<TestApp initialPath="/hub/new" />);
     await user.type(screen.getByTestId("hub-display-name"), "날씨 Weather");
     expect(screen.getByTestId("hub-name")).toHaveValue("weather");
-    // remote 는 MCPRemoteProxy 를 만드니 hub-<name> 을 미리 보이고, entry 는 URL 만이라 미리보기가 없다
+    // entry 는 URL 만이라 미리보기가 없고, image 는 MCPServer 를 만드니 hub-<name> 을 미리 보인다
+    expect(screen.queryByTestId("hub-name-preview")).not.toBeInTheDocument();
+    await selectValue(user, "hub-kind", "image");
     expect(screen.getByTestId("hub-name-preview")).toHaveTextContent("hub-weather");
     await selectValue(user, "hub-kind", "entry");
-    expect(screen.queryByTestId("hub-name-preview")).not.toBeInTheDocument();
-    await selectValue(user, "hub-kind", "remote");
+    await selectValue(user, "hub-transport", "streamable-http");
     await user.type(screen.getByTestId("hub-url"), "https://w.example.com/mcp");
     await user.click(screen.getByTestId("save-button"));
     await screen.findByTestId("hub-detail-page");

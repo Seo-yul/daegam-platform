@@ -26,8 +26,8 @@ from tests.helpers.http import detail_code
 from tests.helpers.hub import (
     SHARED_ACCESS,
     clone_name_of,
+    gateway_on_remote_clone,
     hub_env,
-    other_tenant_gateway,
     shared_env,
 )
 from tests.helpers.mcp_servers import clone_and_deploy
@@ -434,9 +434,7 @@ def test_revoked_boundary_warns_and_freezes_the_clone(client, fake_clusters, mon
     """consume 경계에서 빠진 테넌트의 복제본은 남고 경고가 뜬다. 원본을 고쳐도 복제본은 마지막
     원본으로 남고(D23), 경계에 다시 들어오면 원본을 다시 받는다 (P50 1절의 복제본 기록)."""
     cid, items, shared, fake = shared_env(client, fake_clusters)
-    _profile_, r = other_tenant_gateway(client, shared)
-    assert r.status_code == 201, r.text
-    inst = r.json()
+    inst = gateway_on_remote_clone(client, shared)
     name = clone_name_of(shared)
     assert client.get(f"{GW}/{inst['id']}", headers=T2).json()["status"]["warnings"] == []
     # 경계에서 other 를 뺀다 (빈 정책 = 소유 테넌트만). 복제본은 남고 경고가 뜬다

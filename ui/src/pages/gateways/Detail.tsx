@@ -8,7 +8,7 @@
  *  - Advanced: 문서 묶음(그룹·Entry·vMCP) 편집과 드리프트.
  *
  * 게시는 MCP Server 와 달리 허브 항목을 따로 만드는 일이라 머리 버튼이 아니라 배포 탭의 카드다.
- * 한 Gateway 를 entry 로도 proxy 로도 여러 번 게시할 수 있기 때문이다.
+ * 한 Gateway 를 이름을 달리해 여러 번 게시할 수 있기 때문이다.
  */
 import { CloudOff } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -69,12 +69,10 @@ import { StateBadge, isLiveState } from "@/components/StateBadge";
 import { Badge, levelVariant, type BadgeProps } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Alert, Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Field, Select } from "@/components/ui/input";
 import { EmptyRow, Table, TBody, TD, TH, THead, TR } from "@/components/ui/table";
 import { TabBar } from "@/components/ui/tabs";
 import { HubPublishDeleteWarning, publishedFrom } from "@/pages/gateways/HubPublishDeleteWarning";
 import { authBoundary, hasScope, takesPlatformTokens, useAuthState } from "@/lib/auth";
-import { isProxyPublished } from "@/lib/hub";
 import type { DeleteTarget } from "@/lib/deletion";
 import { shouldPoll } from "@/lib/deployment";
 import { advertisedTools, degradedBadgeText } from "@/lib/gateway";
@@ -906,7 +904,6 @@ function PublishCard({ gateway }: { gateway: Gateway }) {
   const auth = useAuthState();
   const { me } = auth;
   const hub = useQuery({ queryKey: hubItemsKey(tenant), queryFn: listHubItems });
-  const [mode, setMode] = useState<"entry" | "proxy">("entry");
   const [names, setNames] = useState<NameValue>({ displayName: displayName(gateway), name: gateway.name });
   const [access, setAccess] = useState<HubAccess>(emptyAccess());
   const [unpublishing, setUnpublishing] = useState<DeleteTarget | null>(null);
@@ -914,7 +911,7 @@ function PublishCard({ gateway }: { gateway: Gateway }) {
     mutationFn: () => {
       const policy = accessForPublish(access);
       const display = names.displayName.trim();
-      return publishGateway(gatewayId, { mode, name: names.name.trim() || null, ...(display ? { display_name: display } : {}), ...(policy ? { access: policy } : {}) });
+      return publishGateway(gatewayId, { name: names.name.trim() || null, ...(display ? { display_name: display } : {}), ...(policy ? { access: policy } : {}) });
     },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["hub"] }),
   });
@@ -930,14 +927,6 @@ function PublishCard({ gateway }: { gateway: Gateway }) {
       </CardHeader>
       <CardContent className="flex flex-col gap-3">
         <NameFields testId="publish" placeholders={{ display: t.gateways.placeholder, name: "support-gw" }} value={names} onChange={setNames} preview={{ prefix: "hub" }} required={false} errors={nameFieldErrors(publish.error)} />
-        <div className="max-w-xs">
-          <Field label={text.mode} htmlFor="publish-mode" hint={text.modeHint}>
-            <Select id="publish-mode" aria-label={text.labels.modeSelect} data-testid="publish-mode" value={mode} onChange={(e) => setMode(e.target.value as "entry" | "proxy")}>
-              <option value="entry">{t.gateways.detail.labels.entry}</option>
-              <option value="proxy">{t.gateways.detail.labels.proxy}</option>
-            </Select>
-          </Field>
-        </div>
         <p className="text-xs text-muted">{text.nameHint}</p>
         {takesPlatformTokens(authBoundary(gateway.auth), auth) ? (
           <p className="text-xs text-muted" data-testid="publish-consumer-hint">
@@ -954,7 +943,6 @@ function PublishCard({ gateway }: { gateway: Gateway }) {
                   {i.name}
                 </Link>
                 <Badge variant={levelVariant(i.status?.ready ?? null)}>{i.status?.phase ?? t.detail.phaseBadge.unknown}</Badge>
-                <span className="text-xs text-muted">{isProxyPublished(i) ? t.gateways.detail.labels.proxy : t.gateways.detail.labels.entry}</span>
                 {i.permissions.manage ? (
                   <Button size="sm" variant="secondary" data-testid={`unpublish-${i.name}`} onClick={() => setUnpublishing({ id: i.id, name: i.name })}>
                     <CloudOff size={13} />

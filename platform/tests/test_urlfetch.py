@@ -350,6 +350,38 @@ def test_ports_and_admin_suffixes():
         assert code(f"https://localhost{dot}/") == "url_private"
 
 
+def test_admin_allowed_private_networks():
+    """관리자가 연 접미사 아래의 이름은 어느 주소로 풀리든 받고, 연 범위 안의 주소는 공인이 아니어도
+    받는다. 그 밖의 판정은 그대로다."""
+
+    def private(host: str) -> list[str]:
+        return ["10.20.0.7", "93.184.216.34"]
+
+    def code(url, **rules):
+        with pytest.raises(BlockedURL) as ei:
+            resolve_public(url, resolver=private, **rules)
+        return ei.value.code
+
+    net = [ipaddress.ip_network("10.20.0.0/16")]
+    assert code("http://mcp.corp.example/") == "url_private"
+    assert resolve_public("http://mcp.corp.example/", resolver=private, allowed_cidrs=net) == (
+        "http://mcp.corp.example/",
+        ["10.20.0.7", "93.184.216.34"],
+    )
+    assert resolve_public("http://10.20.0.7:8080/", allowed_cidrs=net)[1] == ["10.20.0.7"]
+    assert code("http://10.21.0.7/", allowed_cidrs=net) == "url_private"
+    assert code("http://[::ffff:10.20.0.7]/", allowed_cidrs=net) == "url_private"
+    for url in ("http://mcp.Corp.Example./", "http://corp.example/", "http://db.internal/"):
+        suffixes = ["CORP.example.", "internal"]
+        assert resolve_public(url, resolver=private, allowed_suffixes=suffixes)
+    assert code("http://notcorp.example/", allowed_suffixes=["corp.example"]) == "url_private"
+    assert code("http://localhost/", allowed_suffixes=["corp.example"]) == "url_private"
+    # 자격 증명과 스킴은 열린 이름에도 그대로 본다
+    rules = {"allowed_suffixes": ["corp.example"], "allowed_cidrs": net}
+    assert code("http://u:p@mcp.corp.example/", **rules) == "url_userinfo"
+    assert code("ftp://mcp.corp.example/", **rules) == "url_scheme"
+
+
 def _page(handler, url, **kw):
     return asyncio.run(
         fetch_page(url, resolver=resolver, transport=httpx.MockTransport(handler), **kw)

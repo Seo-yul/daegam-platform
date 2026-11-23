@@ -1,15 +1,16 @@
 """Gateway (D42) 의 허브 게시를 본다.
 
-entry·proxy 모드, 게시물을 백엔드로 쓰는 Gateway 와 순환, 허브 규칙을 따르는 정책 시각과 프록시
-실패, prefix 모드의 게시 도구 이름(D23)을 든다.
+entry 모드 게시와 proxy 모드의 거절, 전에 proxy 모드로 게시한 항목, 게시물을 백엔드로 쓰는
+Gateway 와 순환, 허브 규칙을 따르는 정책 시각, prefix 모드의 게시 도구 이름(D23)을 든다.
 """
 
 from __future__ import annotations
 
+from daegam.api.gateways import PublishBody
 from tests.helpers.consts import DEFAULT_NS, GV, GW, HUB
 from tests.helpers.gateways import deploy_gateway, gateway_up, vmcp_of
 from tests.helpers.http import detail_code
-from tests.helpers.hub import hub_env
+from tests.helpers.hub import hub_env, stored_proxy_publish
 
 
 def test_publish_entry_mode_and_consume(client, fake_clusters, mongo):
@@ -60,12 +61,27 @@ def test_publish_entry_mode_and_consume(client, fake_clusters, mongo):
     assert client.delete(f"{GW}/{ia['id']}").status_code == 200
 
 
-def test_publish_proxy_mode(client, fake_clusters):
+def test_publish_refuses_proxy_mode(client, fake_clusters):
+    """게시 방식은 entry 하나다. proxy 는 422 invalid_value 이고 항목도 프록시도 생기지 않는다."""
     cid, items, calc, orders, remote, fake = hub_env(client, fake_clusters)
     ia = gateway_up(client, items, name="a")
+    before = [i["name"] for i in client.get(HUB).json()]
     r = client.post(f"{GW}/{ia['id']}/publish", json={"name": "a-pub", "mode": "proxy"})
+    assert detail_code(r) == (422, "invalid_value"), r.text
+    assert [i["name"] for i in client.get(HUB).json()] == before
+    assert fake.get(GV, "MCPRemoteProxy", "hub-a-pub", DEFAULT_NS) is None
+    assert PublishBody.model_json_schema()["properties"]["mode"]["enum"] == ["entry"]
+    r = client.post(f"{GW}/{ia['id']}/publish", json={"name": "a-pub", "mode": "entry"})
+    assert r.status_code == 201 and r.json()["k8s"]["kind"] == "VirtualMCPServer"
+
+
+def test_a_stored_proxy_mode_item_keeps_its_proxy(client, fake_clusters):
+    """전에 proxy 모드로 게시한 항목은 MCPRemoteProxy 로 렌더되고 그 주소로 답한다."""
+    cid, items, calc, orders, remote, fake = hub_env(client, fake_clusters)
+    ia = gateway_up(client, items, name="a")
+    r = client.post(f"{GW}/{ia['id']}/publish", json={"name": "a-pub"})
     assert r.status_code == 201, r.text
-    pub = r.json()
+    pub = stored_proxy_publish(client, r.json())
     assert pub["k8s"]["kind"] == "MCPRemoteProxy" and pub["k8s"]["name"] == "hub-a-pub"
     cr = fake.get(GV, "MCPRemoteProxy", "hub-a-pub", DEFAULT_NS)
     assert cr["spec"]["remoteUrl"] == "http://vmcp-gw-a.daegam-default.svc.cluster.local:4483/mcp"
@@ -84,21 +100,12 @@ def test_publish_proxy_mode(client, fake_clusters):
     assert fake.get(GV, "MCPRemoteProxy", "hub-a-pub", DEFAULT_NS) is None
 
 
-def test_publish_follows_the_hub_rules_for_access_stamp_and_proxy_failure(client, fake_clusters):
+def test_publish_follows_the_hub_rules_for_the_access_stamp(client, fake_clusters):
     """게시는 허브의 절차(`HubService.publish_gateway`)를 탄다. 정책 시각은 허브의 create·
-    publish_instance 처럼 access 를 보냈을 때만 찍고, 프록시 적용이 실패하면 항목이 creating 에
-    last_error 와 함께 남아 화면이 이유를 읽는다."""
+    publish_instance 처럼 access 를 보냈을 때만 찍는다."""
     cid, items, calc, orders, remote, fake = hub_env(client, fake_clusters)
     ia = gateway_up(client, items, name="a")
     pub = client.post(f"{GW}/{ia['id']}/publish", json={}).json()
     assert pub["access_updated_by"] is None and pub["access_updated_at"] is None
     sent = client.post(f"{GW}/{ia['id']}/publish", json={"name": "a-open", "access": {}}).json()
     assert sent["access_updated_by"] is not None and sent["access_updated_at"] is not None
-
-    fake.unreachable = True
-    r = client.post(f"{GW}/{ia['id']}/publish", json={"name": "a-pub", "mode": "proxy"})
-    assert detail_code(r) == (502, "cluster_unreachable")
-    fake.unreachable = False
-    listed = {i["name"]: i for i in client.get(HUB).json()}
-    assert listed["a-pub"]["state"] == "creating"
-    assert listed["a-pub"]["last_error"].startswith("cluster_unreachable: ")

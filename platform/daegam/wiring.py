@@ -65,6 +65,7 @@ from daegam.services.condition_records import ConditionRecords
 from daegam.services.data_plane_auth import DataPlaneAuth
 from daegam.services.data_services import DataServiceService
 from daegam.services.docparse import DocparseClient
+from daegam.services.entry_conversion import EntryConversion
 from daegam.services.evaluation.copies import CONSENT_ENDING, EvaluationCopies
 from daegam.services.evaluation.gate import DeployGate
 from daegam.services.evaluation.grader import EvaluationGrader
@@ -951,6 +952,11 @@ def build_services(
         agents=stores.agents,
         people=stores.idp_people,
     )
+    # P54b 7절: 프록시를 두던 허브 항목(remote 항목, proxy 모드로 게시한 항목)을 Gateway 의 Entry 가
+    # 주소를 직접 부르는 꼴로 옮긴다. 리컨실의 한 단계이고 상태 API 가 남은 것을 읽는다
+    entry_conversion = EntryConversion(
+        hub_service, gateway_service, stores.shared_clones, stores.auth_reapply
+    )
     data_plane_auth = DataPlaneAuth(
         tenancy,
         stores.auth_reapply,
@@ -961,6 +967,7 @@ def build_services(
         hub_items=HubItemReapply(hub_service),
         shared_clones=SharedCloneReapply(shared_clones),
         issuer_switch=issuer_switch,
+        entry_conversion=entry_conversion,
     )
     # preflight 가 테넌트 Secret 의 바인딩을 볼 네임스페이스는 스윕이 맞추는 곳이다 (P63)
     cluster_service.tenant_namespaces = data_plane_auth.tenant_namespaces
@@ -1036,6 +1043,8 @@ def build_services(
         cluster_service=cluster_service,
         # P52 4절: 인자 조건의 기록. 인증 재적용보다 먼저 돌아 바뀐 서버를 같은 틱에 다시 렌더한다
         condition_sweep=condition_records.sweep,
+        # P54b 7절: 인증 재적용보다 먼저 돌아 스냅샷을 고쳐 쓴 Gateway 를 같은 틱에 다시 렌더한다
+        entry_conversion=entry_conversion.run,
         # P32 7절·4절: 접근 정리가 옛 슬롯을 지운 뒤 개인 토큰의 키 pool 을 채운다. T24: 기동 뒤
         # 15분 동안 플랫폼보다 먼저 떠 JWKS 를 받지 못한 검증기를 다시 띄운다
         steps=(

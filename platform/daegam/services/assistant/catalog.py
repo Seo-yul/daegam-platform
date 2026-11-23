@@ -545,8 +545,9 @@ TOOLS: tuple[ToolSpec, ...] = (
         "POST",
         HUB,
         "deploy",
-        "외부 MCP 서버(remote·entry·image)를 허브에 등록한다. remote·entry 는 streamable-http "
-        "서버만 받고 sse 는 거절한다. 인증과 컨테이너 입력은 화면에서 넣는다.",
+        "외부 MCP 서버(entry·image)를 허브에 등록한다. entry 는 URL 만 등록하고 Gateway 가 그 "
+        "주소를 직접 부르며, streamable-http 서버만 받고 sse 는 거절한다. 인증과 컨테이너 입력은 "
+        "화면에서 넣는다.",
         kind="hub",
         # 헤더 값과 Secret env 값은 비밀이다. 비서는 비밀을 묻지도 받지도 않는다 (D56, P86 6.1절,
         # P55 5절). 컨테이너 입력(stdio·args·env)과 카탈로그 가져오기는 변수마다 카탈로그의 설명을

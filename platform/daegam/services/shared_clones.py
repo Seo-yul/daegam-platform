@@ -9,7 +9,9 @@
   고치면 다음 재적용이 복제본을 다시 렌더한다. 경계 밖이거나 원본이 없으면 기록이 원본을 더 받지
   않아, 동결된 복제본은 마지막 원본으로 렌더하되 렌더 번호가 오르면 다시 렌더한다.
 - 리컨실의 스윕(`sweep`): 손으로 지운 복제본을 재적용이 다시 만들게 표시하고, 쓰는 Gateway 가 없는
-  복제본과 기록, 이 설치의 버려진 복제본을 지운다.
+  복제본과 기록, 이 설치의 버려진 복제본을 지운다. 살아 있는 MCPServerEntry 가 그 복제본의 Service
+  를 이름 대는 동안은 지우지 않는다. 스냅샷에서 복제본을 뺀 Gateway 가 그 렌더를 적용하기 전에는
+  Entry 가 아직 복제본을 부르기 때문이다.
 """
 
 from __future__ import annotations
@@ -26,7 +28,7 @@ from daegam.errors import ServiceError
 from daegam.k8s.client import KubeClient
 from daegam.k8s.gates import Feature, passing_features
 from daegam.k8s.labels import LABEL_PLATFORM_ID, LABEL_RESOURCE, LABEL_SOURCE_ID
-from daegam.k8s.templates.common import RESOURCE_HUB_ITEM, TOOLHIVE_API
+from daegam.k8s.templates.common import RESOURCE_HUB_ITEM, TOOLHIVE_API, proxy_service_name
 from daegam.k8s.templates.svc_token import TOKEN_BACKEND_KINDS
 from daegam.k8s.templates.web_tools import web_config_hash
 from daegam.services.authz_configs import (
@@ -42,6 +44,7 @@ from daegam.services.data_plane_auth import (
     own_audience_rev,
     render_epoch,
 )
+from daegam.services.gateway_entries import EntryServices, entry_services
 from daegam.services.gateway_plan import point_at_clone
 from daegam.services.hub import (
     CLONE_SOURCE_FIELDS,
@@ -324,9 +327,13 @@ class SharedClones:
 
     async def wanted_source(self, record: SharedClone) -> WantedSource:
         """렌더할 원본 정의와 동결 여부, 그 원본의 모르는 칸. 쓰는 테넌트가 경계 안이면 지금
-        원본이고, 경계 밖이거나 원본이 없으면 기록이 든 원본이다. 기대 판도 이것을 읽으므로 모르는
-        칸이 있어도 멈추지 않는다. 멈추는 것은 다시 렌더다(`rerender`)."""
+        원본이고, 경계 밖이거나 원본이 없으면 기록이 든 원본이다. 원본의 종류가 기록의 것과
+        달라졌어도(entry 가 된 remote 항목) 기록의 원본이다. 그 복제본은 스윕이 지울 때까지 렌더한
+        꼴로 남는다. 기대 판도 이것을 읽으므로 모르는 칸이 있어도 멈추지 않는다. 멈추는 것은 다시
+        렌더다(`rerender`)."""
         item = await self.hub.store.get_unscoped(record.source_item_id)
+        if item is not None and item.kind != record.source.get("kind"):
+            item = None
         if item is not None and tenant_in_boundary(record.tenant, item, "consume"):
             return WantedSource(clone_source(item), False, item.newer_fields)
         source = record.source
@@ -396,11 +403,7 @@ class SharedClones:
         budget = Budget(CLONE_SWEEP_SECONDS)
         now = utcnow()
         install_id = await self.tenancy.platform_settings.install_id()
-        backing_off = {
-            s.cluster_id
-            for s in await self.auth_states.clusters()
-            if s.unreachable and s.waiting(now)
-        }
+        backing_off = await self.auth_states.backing_off(now)
         clusters = await self.tenancy.clusters.list()
         clusters.sort(key=lambda c: self.started.get(c.id, 0.0))
         for cluster in clusters:
@@ -426,7 +429,8 @@ class SharedClones:
 class _ClusterSweep:
     """클러스터 하나의 스윕. 실물, 기록, Gateway 순으로 읽는다. 배포는 Gateway 의 스냅샷을 먼저
     저장하고 provision 에서 복제본과 기록을 만들므로, 먼저 읽은 복제본과 기록을 쓰는 Gateway 가 뒤에
-    읽는 목록에서 빠지지 않는다. 지우기 직전에는 Gateway 를 다시 읽는다."""
+    읽는 목록에서 빠지지 않는다. 지우기 직전에는 Gateway 를 다시 읽는다. 실물과 함께 읽은 Entry 가
+    이름 댄 Service 의 복제본은 스냅샷이 쓰지 않아도 지우지 않는다(`_named`)."""
 
     def __init__(
         self,
@@ -445,12 +449,15 @@ class _ClusterSweep:
         self.result = result
         self.budget = budget
         self.seen_at = utcnow()  # 실물을 읽기 시작한 시각
+        # 살아 있는 Entry 가 이름 댄 Service (`entry_services`). `run` 이 실물과 함께 읽는다
+        self.entry_services: EntryServices = {}
 
     def _out_of_time(self) -> bool:
         return self.budget.out_of_time()
 
     async def run(self) -> None:
         live = await _live_clones(self.client)
+        self.entry_services = await entry_services(self.client)
         records = await self.store.live_on_cluster(self.cluster.id)
         gateways = await self.clones.gateways.live_on_cluster(self.cluster.id)
         # 버려진 복제본을 기록마다의 일보다 먼저 지운다. 기록이 많아 한 틱에 다 보지 못해도 그
@@ -482,9 +489,12 @@ class _ClusterSweep:
         await self._check_live(record, live)
 
     async def _delete_unused(self, record: SharedClone) -> None:
-        """쓰는 Gateway 가 없으면 기록과 복제본을 지운다. 지우기 직전에 Gateway 를 다시 읽고 기록을
-        먼저 지우며, 그 사이 배포가 기록을 고쳤으면 지우지 않는다. 기록을 지운 바로 뒤에 배포가
-        기록을 다시 만들면 그 복제본은 다음 틱의 실물 확인과 재적용이 되살린다."""
+        """쓰는 Gateway 가 없으면 기록과 복제본을 지운다. 살아 있는 Entry 가 그 복제본의 Service 를
+        이름 대면 둔다. 지우기 직전에 Gateway 를 다시 읽고 기록을 먼저 지우며, 그 사이 배포가
+        기록을 고쳤으면 지우지 않는다. 기록을 지운 바로 뒤에 배포가 기록을 다시 만들면 그 복제본은
+        다음 틱의 실물 확인과 재적용이 되살린다."""
+        if self._named(_clone_kind(record), record.name, record.namespace):
+            return
         fresh = await self.clones.gateways.live_on_cluster(self.cluster.id)
         if _users(fresh, record):
             return
@@ -492,6 +502,11 @@ class _ClusterSweep:
             return
         await self._delete_crs(record, [record.name])
         self.result["deleted"].append(f"{record.namespace}/{record.name}")
+
+    def _named(self, kind: str, name: str, namespace: str) -> bool:
+        """살아 있는 Entry 가 그 복제본 CR 의 프록시 Service 를 이름 대는가."""
+        service = proxy_service_name(name, remote=kind == CR_KIND["remote"])
+        return (namespace, service) in self.entry_services
 
     async def _check_live(self, record: SharedClone, live: LiveClones) -> None:
         """쓰이는 복제본이 실물에 없으면(손으로 지웠다) 렌더 번호를 -1 로 적어 재적용이 다시 만들게
@@ -541,11 +556,14 @@ class _ClusterSweep:
     ) -> None:
         """기록도 없고 가리키는 Gateway 도 없는 이 설치의 복제본을 지운다. 이 설치의 라벨이 있는
         것만이다. 다른 설치의 복제본과 라벨이 없는 복제본은 건드리지 않는다. 그 원본을 쓰는 Gateway
-        가 그 네임스페이스에서 배포 중이거나 실패했으면 남긴다(`_unsettled`)."""
+        가 그 네임스페이스에서 배포 중이거나 실패했으면 남기고(`_unsettled`), 살아 있는 Entry 가 그
+        Service 를 이름 대도 남긴다(`_named`)."""
         named = {(r.namespace, r.name) for r in records}
         named |= _gateway_clone_names(gateways)
         for (namespace, kind, name), meta in sorted(live.items()):
             if (namespace, name) in named or self._out_of_time():
+                continue
+            if self._named(kind, name, namespace):
                 continue
             await tick_item()
             labels = meta.get("labels") or {}

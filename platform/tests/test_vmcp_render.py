@@ -75,7 +75,8 @@ def test_oauth_advertises_the_mcp_scope_on_the_vmcp_ref(oauth_client, fake_clust
     c = oauth_client
     c.headers.update({**admin_headers(c, mongo), TENANT_HEADER: "default"})
     default_cluster(c)
-    hub = c.post(HUB, json={"name": "spike", "kind": "remote", "url": SPIKE_URL}).json()
+    entry = {"name": "spike", "kind": "entry", "url": SPIKE_URL, "transport": "streamable-http"}
+    hub = c.post(HUB, json=entry).json()
     r = c.post(GW, json={"name": "bot", "backends": [{"hub_item_id": hub["id"]}]})
     assert r.status_code == 201, r.text
     spec = c.get(f"{GW}/{r.json()['id']}/revisions/1/preview").json()["manifest"]["spec"]

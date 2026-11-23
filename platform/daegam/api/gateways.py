@@ -115,7 +115,8 @@ class PublishBody(BaseModel):
 
     name: str | None = None
     display_name: str | None = None
-    mode: Literal["entry", "proxy"] = "entry"
+    # 게시 방식은 entry 하나다. 다른 값은 서비스가 422 invalid_value 로 답하도록 문자열로 받는다
+    mode: str = Field(default="entry", json_schema_extra={"enum": ["entry"]})
     # 접근 정책 (D23). published 는 다른 테넌트에 열 수 없다 (422 cross_tenant_unsupported)
     access: Access | None = None
 

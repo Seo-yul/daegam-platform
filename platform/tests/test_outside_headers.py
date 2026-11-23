@@ -132,7 +132,7 @@ def header(name: str, value: str) -> dict:
         ),
         ({"url": "https://user:pw@mcp.example.com/mcp"}, "invalid_value"),
         (header("X-Key", "k" * (MAX_VALUE_BYTES + 1)), "outside_header_value_invalid"),
-        ({"kind": "remote"}, "invalid_value"),
+        ({"kind": "remote"}, "invalid_kind"),
     ],
 )
 def test_header_items_are_checked_before_anything_is_stored(client, cluster, mongo, body, code):
@@ -376,7 +376,7 @@ def test_a_catalog_remote_that_needs_a_key_is_imported_with_its_header(client, c
 
 
 def test_catalog_remotes_one_header_cannot_carry_stay_refused(client, cluster, mongo):
-    """키가 필요한 원격을 헤더 없이, 다른 헤더로, remote 항목으로 가져올 수 없다. 로그인이나 주소의
+    """키가 필요한 원격을 헤더 없이나 다른 헤더로 가져올 수 없다. 로그인이나 주소의
     비밀 변수나 헤더 둘 이상이 필요한 원격은 헤더를 골라도 가져올 수 없다. 아무것도 저장하지
     않는다."""
     cat = snapshot()
@@ -389,7 +389,6 @@ def test_catalog_remotes_one_header_cannot_carry_stay_refused(client, cluster, m
     refused = [
         catalog_body(keyed),
         catalog_body(keyed, **header("X-Other-Key", SECRET)),
-        {**catalog_body(keyed), "kind": "remote"},
         catalog_body(login, **header(keyed.import_header, SECRET)),
         catalog_body(url_secret, **header(keyed.import_header, SECRET)),
         catalog_body(two, **header(first, SECRET)),

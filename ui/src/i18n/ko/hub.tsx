@@ -249,7 +249,7 @@ export const hub = {
   new: {
     /** 화면 언어를 따르는 예시. 표시 이름과 Name 이 서로 대응되는 한 쌍이다. */
     placeholders: { display: "결제 MCP", name: "payments-mcp" },
-    kindHint: "remote: MCPRemoteProxy 로 감쌉니다 / entry: URL 만 등록합니다 / image: 컨테이너로 배포합니다",
+    kindHint: "entry: URL 만 등록하고 Gateway 가 그 주소를 직접 부릅니다 / image: 컨테이너로 배포합니다",
     urlHint: "원격 MCP 서버의 주소입니다. 플랫폼이 이 주소로 tools/list 를 불러 Tool 목록을 채웁니다.",
     imageHint: "MCP 서버 컨테이너 이미지입니다. 다른 테넌트가 참조하면 그 네임스페이스로 복제됩니다.",
     portHint: "비우면 8080 을 사용합니다.",
@@ -259,7 +259,7 @@ export const hub = {
     register: "등록",
     title: "Register external MCP",
     kind: "Kind",
-    kinds: { remote: "remote", entry: "entry", image: "image" },
+    kinds: { entry: "entry", image: "image" },
     cluster: "Cluster",
     url: "URL",
     image: "Image",

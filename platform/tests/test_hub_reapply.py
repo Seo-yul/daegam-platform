@@ -16,7 +16,7 @@ from daegam.services.hub import HubError
 from daegam.store.base import utcnow
 from tests.helpers.clusters import default_cluster
 from tests.helpers.consts import HUB
-from tests.helpers.hub import SPIKE_URL
+from tests.helpers.hub import SPIKE_URL, stored_remote
 from tests.helpers.workers import raise_epoch, run_data_plane_auth
 
 # 지금 코드의 허브 항목 렌더 번호. 테스트가 올리기 전에 읽는다
@@ -36,9 +36,7 @@ def _image_and_remote(client) -> tuple[dict, dict]:
         json={"name": "fetch", "kind": "image", "image": "ghcr.io/x/fetch:1", "port": 8000},
     )
     assert image.status_code == 201, image.text
-    remote = client.post(HUB, json={"name": "calc-remote", "kind": "remote", "url": SPIKE_URL})
-    assert remote.status_code == 201, remote.text
-    return image.json(), remote.json()
+    return image.json(), stored_remote(client, "calc-remote", SPIKE_URL)
 
 
 def _stored(mongo, item_id: str) -> dict:

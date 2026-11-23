@@ -934,16 +934,17 @@ class GatewayService(ExposureValidationMixin, BaseInstanceService[Gateway]):
         Entry 이름(workload)은 `<gateway>-<hub item>` 이다. MCPServerEntry 는 네임스페이스 단위로
         이름이 유일하므로 허브 항목 이름만 쓰면 같은 백엔드를 쓰는 두 게이트웨이가 충돌한다.
 
-        다른 테넌트의 항목(remote|image)은 이 테넌트 네임스페이스에 CR 을 복제하므로
+        다른 테넌트의 image 항목은 이 테넌트 네임스페이스에 CR 을 복제하므로
         (P6 F3b, NetworkPolicy 가 타 네임스페이스 프록시 접근을 막는다) URL 을 복제본 프록시로
-        고정하고 원본 id·복제본 이름을 스냅샷에 남긴다. entry 는 CR 이 없어 원본 URL 그대로다.
+        고정하고 원본 id·복제본 이름을 스냅샷에 남긴다. entry 는 CR 이 없어 원본 URL 그대로이고,
+        remote 항목의 행도 프록시를 떼지 못하는 것만 빼고 entry 행이다(`HubService.deploy_form`).
         consume 판정은 validate_spec 이 먼저 했다."""
         snapshots: list[GatewayBackendSnapshot] = []
         report: list[dict[str, Any]] = []
         ok = True
         resolved = await self.hub.resolve_origins(list(items.values()))
         for b in rev.backends:
-            item = items[b.hub_item_id]
+            item = await self.hub.deploy_form(items[b.hub_item_id])
             # 이름·필터·종류·Entry 이름·서버는 저장 때의 code mode 판정과 같은 행에서 온다
             # (`backend_snapshot_of`). 스냅샷에 베끼는 값도 원본에서 계산한 것이다 (D49). 스냅샷
             # 자체는 적용한 CR 과 짝인 기록이라 그 뒤로 얼어 있는다
@@ -958,7 +959,7 @@ class GatewayService(ExposureValidationMixin, BaseInstanceService[Gateway]):
             if ready and require_ready and item.kind in ("entry", "published"):
                 # CR 이 없는 항목은 phase 가 없다. tools/list 로 도달 여부를 본다
                 try:
-                    listed = await self.hub.list_tools_at(item, url)
+                    listed = await self.hub.reachable_tools(item, url)
                     if not tool_names:
                         tool_names = list(listed)
                 except Exception as e:  # noqa: BLE001
@@ -1528,19 +1529,18 @@ class GatewayService(ExposureValidationMixin, BaseInstanceService[Gateway]):
     ) -> HubItem:
         """이 문서의 vMCP 를 허브 published 항목으로 게시한다 (docs/guide/hub-gateway.md 6절).
         `deployed` 만 된다.
-        entry: CR 없이 URL 만 (소비자가 Entry 래퍼로 감싼다). proxy: MCPRemoteProxy 로 감싼다.
+        CR 없이 URL 만 둔다 (소비자가 Entry 래퍼로 감싼다). mode 는 entry 뿐이다.
         이름 기본값은 문서 `name` 그대로, 표시 이름 기본값은 문서 `display_name` 이다 (D24).
         published 는 다른 테넌트에 열 수 없다 (422 cross_tenant_unsupported)."""
         self._require(doc, {"deployed"}, action="publish", outside="not_deployed")
         self._k8s(doc)
-        if mode not in ("entry", "proxy"):
-            raise GatewayError(422, "invalid_value", "mode must be entry or proxy")
+        if mode != "entry":
+            raise GatewayError(422, "invalid_value", "mode must be entry")
         try:
             return await self.hub.publish_gateway(
                 doc,
                 name=name,
                 display_name=display_name,
-                mode=mode,
                 access=access,
                 principal=principal,
             )

@@ -81,6 +81,12 @@ def run_clone_sweep(client) -> dict[str, list[str]]:
     return client.portal.call(client.app.state.shared_clones.sweep)
 
 
+def run_entry_conversion(client) -> dict[str, list[str]]:
+    """프록시를 두던 허브 항목 옮기기(리컨실의 conversion 단계, `EntryConversion.run`) 한 회차의
+    결과다."""
+    return client.portal.call(client.app.state.data_plane_auth.entry_conversion.run)
+
+
 def audit_collector(client, holder="pod-a", **kw) -> AuditCollector:
     """client 의 앱이 쓰는 스토어와 holder 의 리스로 만든 감사 수집기. 루프는 돌지 않고 테스트가
     run_once 로 회차를 하나씩 돌린다."""

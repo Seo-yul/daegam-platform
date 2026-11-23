@@ -254,6 +254,8 @@ export const errors = {
     outside_oauth_unavailable: "사람마다 계정을 연결하는 인증은 아직 사용할 수 없습니다. none 이나 header 를 선택해 주세요.",
     outside_sse_unsupported:
       "SSE 방식으로만 동작하는 외부 MCP 서버는 등록할 수 없습니다. 서버의 streamable-http 주소로 등록해 주세요.",
+    entry_address_refused:
+      "플랫폼이 이 주소로 연결하지 않습니다. 공개 주소나 이 테넌트의 네임스페이스에 있는 Service 주소를 등록하거나, 사내망 주소라면 관리자에게 허용 목록에 넣어 달라고 요청해 주세요.",
     not_session_owner: "다른 사용자의 세션입니다. 자기 세션에서 다시 시도해 주세요.",
     tenant_mismatch: "다른 테넌트의 세션입니다. 테넌트를 바꾼 뒤에 다시 열어 주세요.",
     agent_oauth_missing:

@@ -1160,7 +1160,8 @@ export async function previewGatewayRevision(
 
 // -- gateways: 배포 쪽 동작 (D42) ----------------------------------------------------------
 
-export type PublishBody = Schemas["daegam__api__gateways__PublishBody"];
+/** 게시 방식은 entry 하나라 부르는 쪽이 고르지 않는다. publishGateway 가 싣는다. */
+export type PublishBody = Omit<Schemas["daegam__api__gateways__PublishBody"], "mode">;
 
 /** 배포. `draft` 문서의 vMCP 를 올린다. 백엔드 허브 항목이 준비돼 있어야 한다(409 `backends_not_ready`). */
 export async function deployGateway(id: string, body: GatewayDeployBody = {}): Promise<Gateway> {
@@ -1231,7 +1232,7 @@ export async function publishGateway(id: string, body: PublishBody): Promise<Hub
   return unwrap(
     await api.POST("/gateways/{gateway_id}/publish", {
       params: { path: { gateway_id: id } },
-      body,
+      body: { ...body, mode: "entry" },
     }),
   );
 }

@@ -95,6 +95,9 @@ STATUS: dict[str, int] = {
     "empty_instruction": 422,
     "empty_patch": 422,
     "encrypted_document": 422,
+    # 플랫폼이 entry 항목의 URL 을 직접 부르지 않는다. 공인 주소, 그 테넌트 네임스페이스의 Service,
+    # 관리자가 연 사설망만 부른다. reason 이 걸린 주소 규칙의 코드다
+    "entry_address_refused": 422,
     "env_managed": 409,
     # 카탈로그가 비밀로 표시한 변수를 env 에 넣었다 (P55 5절)
     "env_must_be_secret": 422,

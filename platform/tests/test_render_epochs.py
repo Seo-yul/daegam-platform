@@ -35,7 +35,14 @@ from tests.helpers.agent_runtime import deployed_agent
 from tests.helpers.clusters import default_cluster
 from tests.helpers.consts import BP, GW, HUB, MS
 from tests.helpers.exposure import front_and_gateway
-from tests.helpers.hub import SPIKE_URL, other_tenant_gateway, shared_env, shared_image_item
+from tests.helpers.hub import (
+    SPIKE_URL,
+    gateway_on_remote_clone,
+    other_tenant_gateway,
+    shared_env,
+    shared_image_item,
+    stored_remote,
+)
 from tests.helpers.mcp_servers import two_backend_server
 
 # 종류마다의 (렌더 번호, 지문). 렌더를 바꾼 커밋이 번호와 지문을 함께 고친다. agent 의 지문은 P78
@@ -131,15 +138,13 @@ def _hub_item(client, _fake_clusters, _mongo) -> list[dict[str, Any]]:
     """CR 을 가진 허브 항목 둘(image·remote)의 CR."""
     portal, state = client.portal, client.app.state
     default_cluster(client)
-    bodies = (
-        {"name": "fetch", "kind": "image", "image": "ghcr.io/x/fetch:1", "port": 8000},
-        {"name": "calc-remote", "kind": "remote", "url": SPIKE_URL},
-    )
+    image = {"name": "fetch", "kind": "image", "image": "ghcr.io/x/fetch:1", "port": 8000}
+    r = client.post(HUB, json=image)
+    assert r.status_code == 201, r.text
+    ids = (r.json()["id"], stored_remote(client, "calc-remote", SPIKE_URL)["id"])
     docs: list[dict[str, Any]] = []
-    for body in bodies:
-        r = client.post(HUB, json=body)
-        assert r.status_code == 201, r.text
-        item = _before_switch(portal.call(state.hub_service.store.get_unscoped, r.json()["id"]))
+    for item_id in ids:
+        item = _before_switch(portal.call(state.hub_service.store.get_unscoped, item_id))
         docs += portal.call(state.hub_service.render, item)
     return docs
 
@@ -151,9 +156,10 @@ def _clone(client, fake_clusters, mongo) -> list[dict[str, Any]]:
     _cid, _items, remote, fake = shared_env(client, fake_clusters)
     image = shared_image_item(client, fake)
     docs: list[dict[str, Any]] = []
+    gateway_on_remote_clone(client, remote, name="gw-0")
+    _profile, r = other_tenant_gateway(client, image, name="gw-1")
+    assert r.status_code == 201, r.text
     for i, shared in enumerate((remote, image)):
-        _profile, r = other_tenant_gateway(client, shared, name=f"gw-{i}")
-        assert r.status_code == 201, r.text
         record = mongo["shared_clones"].find_one({"source_item_id": shared["id"]})
         docs += portal.call(
             lambda record=record, i=i: state.hub_service.shared_clone_docs(

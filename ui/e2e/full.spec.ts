@@ -205,7 +205,6 @@ test("hub to gateway scenario end to end through the browser (header auth mode)"
 
   // ---- 8. 허브 게시(entry) → 게시 항목의 Refresh tools 가 status.url 로 tools/list → [Add] ----
   await expect(page.getByTestId("published-empty")).toBeVisible();
-  await selectValue(page, "publish-mode", "entry");
   // 게시 이름의 기본값은 문서 name 그대로, 표시 이름은 문서 표시 이름이다 (D24, services/gateways.py publish)
   const PUB_NAME = GW_NAME;
   await expect(page.getByTestId("publish-display-name")).toHaveValue(GW_DISPLAY);

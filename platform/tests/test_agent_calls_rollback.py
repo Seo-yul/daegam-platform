@@ -131,8 +131,8 @@ def test_an_agent_item_is_out_of_the_list_and_its_reads_answer_hub_item_newer(
         assert detail_code(r) == (422, "hub_item_newer"), (method, path, r.text)
         detail = r.json()["detail"]
         assert detail["hub_item_id"] == doc["_id"] and detail["fields"] == ["kind"]
-    remote = {"name": "billing", "kind": "remote", "url": "https://mcp.example/mcp"}
-    r = client.post(HUB, json=remote)
+    entry = {"name": "billing", "kind": "entry", "url": "https://mcp.example/mcp"}
+    r = client.post(HUB, json={**entry, "transport": "streamable-http"})
     assert detail_code(r) == (422, "hub_item_newer"), r.text
     assert "hub_item_id" not in r.json()["detail"]
     assert mongo["hub_items"].find_one({"_id": doc["_id"]}) == stored
