@@ -344,6 +344,11 @@ class LlmGateway:
                 await self._clear(client)
                 await self.store.put(LlmGatewayState(synced_at=self.clock()))
                 return {"cleared": [COMPONENT]}
+            if state.reason is not None:
+                # 껐고 치울 home 클라이언트가 없다. 까닭은 렌더하던 때의 것이라 끈 게이트웨이에는
+                # 맞지 않는다. 만든 것은 `rendered` 가 남아 있어 클라이언트가 생기는 틱이 치운다
+                state.reason, state.synced_at = None, self.clock()
+                await self.store.put(state)
             return {}
         now = self.clock()
         state.warnings = []

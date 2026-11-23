@@ -550,3 +550,39 @@ def test_a_failed_apply_leaves_a_reason_and_the_next_tick_clears_it(settings):
         assert (state.reason, state.synced_at) == (None, rig.now[0])
 
     run_db(settings, go)
+
+
+def test_turning_off_without_a_home_client_drops_the_apply_reason(settings):
+    """적용이 실패한 채로 껐는데 home 클라이언트가 없으면 치우지는 못해도 까닭은 지운다. 만든 것은
+    렌더한 것으로 남아, 클라이언트가 돌아온 틱이 치운다."""
+    fake = gateway_namespace()
+    real_apply = fake.apply
+
+    def refuse(obj, **kwargs):
+        if obj["kind"] == "NetworkPolicy":
+            raise RuntimeError("the cluster refused the policy")
+        return real_apply(obj, **kwargs)
+
+    async def go(db):
+        rig = await make_rig(db, fake)
+        fake.apply = refuse
+        with pytest.raises(RuntimeError, match="refused the policy"):
+            await rig.gw.sync()
+        fake.apply = real_apply
+        assert (await rig.store.get()).reason == APPLY_FAILED
+        rig.gw.settings = dataclasses.replace(rig.gw.settings, llm_gateway="off")
+        rig.gw.clusters.home_client = lambda: None
+        rig.tick()
+        assert await rig.gw.sync() == {}
+        state = await rig.store.get()
+        assert (state.reason, state.synced_at) == (None, rig.now[0])
+        assert state.rendered and state.activated_at is not None
+        # 까닭이 없는 틱은 다시 쓰지 않는다
+        rig.tick()
+        assert await rig.gw.sync() == {}
+        assert (await rig.store.get()).synced_at != rig.now[0]
+        rig.gw.clusters.home_client = lambda: fake
+        assert await rig.gw.sync() == {"cleared": ["llm-gateway"]}
+        assert not (await rig.store.get()).rendered
+
+    run_db(settings, go)
