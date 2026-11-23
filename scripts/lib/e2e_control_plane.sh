@@ -126,3 +126,32 @@ wait_pods_settled() {
   done
   return 1
 }
+
+# wait_workloads_rolled NS [SECONDS]  NS 의 Deployment 와 StatefulSet 이 모두 새 판으로 굴러 끝나고 내려가는 파드가 없는
+# 상태가 5초 간격으로 세 번 이어질 때까지 기다린다. 플랫폼이 CR 을 다시 적용한 뒤 오퍼레이터가 워크로드를 굴리기까지 몇
+# 초가 걸리므로 한 번 본 것으로는 굴리기 전인지 뒤인지 모른다. 옛 프록시 파드가 받은 호출의 감사 줄은 그 파드가 지워지면
+# 수집기가 읽지 못하므로(services/audit_collector.py) 감사 기록을 보는 단계가 호출 앞에 부른다
+wait_workloads_rolled() {
+  local ns="$1" limit="${2:-300}" calm=0 i
+  for ((i = 0; i < limit / 5; i++)); do
+    if "${K[@]}" -n "$ns" get deploy,sts,pod -o json 2>/dev/null | python3 -c '
+import json, sys
+for o in json.load(sys.stdin)["items"]:
+    meta, spec, st = o["metadata"], o.get("spec", {}), o.get("status", {})
+    if o["kind"] == "Pod":
+        ok = not meta.get("deletionTimestamp")
+    else:
+        want = spec.get("replicas", 1)
+        ok = (st.get("observedGeneration") == meta.get("generation") and st.get("updatedReplicas", 0) == want
+              and st.get("readyReplicas", 0) == want and st.get("replicas", 0) == want)
+    if not ok:
+        sys.exit(1)
+'; then
+      calm=$((calm + 1)); [ "$calm" -ge 3 ] && return 0
+    else
+      calm=0
+    fi
+    sleep 5
+  done
+  return 1
+}

@@ -47,7 +47,7 @@
 #            id 로 부른 GET /agents/{id} 는 404 이고 Agent 목록에 없다. 토큰 Secret 의 calculator 토큰은 A 의 id 와 주체를 싣고
 #            미리 보기의 끝 + 10분 안에 만료하며, calculator 프록시가 그 토큰을 받아 Add 를 부르게 한다. 규칙이 이름 대지 않은
 #            Agent 의 토큰은 Tool 을 보지 못하고 부르지도 못한다
-#   STEP 14  미리 보기에서 Add 를 부르면 승인을 기다리고, 그 결정(approve)이 Add 를 불러 결과 7 로 끝난다. Add 의 규칙은 A 만
+#   STEP 14  미리 보기에서 Add(3, 4) 를 부르면 승인을 기다리고, 그 결정(approve)이 Add 를 불러 결과 7 로 끝난다. Add 의 규칙은 A 만
 #            이름 대므로 그 호출은 규칙이 원본으로서 받아들인 것이다
 #   STEP 15  테넌트의 developer 인 다른 사람은 그 id 와 A 의 내 미리 보기에서 404 를 받고, 열린 미리 보기 목록에서 그것을 보고
 #            끝낸다. 시작한 사람의 GET /preview 는 404 이고 까닭이 ended_by_other 이며 미리 보기의 객체가 사라진다
@@ -121,6 +121,8 @@ CORS_ORIGIN="https://app.e2e.local"
 DONE_MSG='{"sleep": 0} provisioning e2e'
 # 승인을 기다리는 메시지. 조각이 없으면 스텁이 첫 MCP Tool(Add)을 부르고 승인 규칙이 묻는다
 ASK_MSG="provisioning e2e asks for Add"
+# 승인 뒤 Add 가 실제로 돌아 결과 7 을 내야 하는 메시지다. 빈 인자의 Add 는 mock-soap 이 "missing element a" 로 거절한다
+ADD_MSG='{"tool": "Add", "args": {"a": 3, "b": 4}}'
 REPLICAS_PATCH='{"patch": {"spec": {"replicas": 1}}}'
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/daegam-e2e-provisioning.XXXXXX")"
 K=(kubectl --context "$CTX")
@@ -728,7 +730,7 @@ step_13() {
 
 step_14() {
   local code
-  code="$(chat "/agents/$A_ID/preview/chat" "$(msg "$ASK_MSG")" -D "$WORK/hdr")"
+  code="$(chat "/agents/$A_ID/preview/chat" "$(msg "$ADD_MSG")" -D "$WORK/hdr")"
   [ "$code" = 200 ] || { cp "$WORK/sse" "$WORK/body"; die 14 "POST /agents/$A_ID/preview/chat (Add) -> $code"; }
   [ "$(sse_ '"interrupt" in names')" = True ] || { cp "$WORK/sse" "$WORK/body"; die 14 "the preview's Add call did not wait for approval: $(sse_ 'names')"; }
   PV_SID="$(hdr X-Daegam-Session-Id)"

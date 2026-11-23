@@ -119,7 +119,8 @@ MARK="E2E-SBX-$RUN_TAG"            # xlsx 표본의 글과 작업 공간 파일�
 OOM_TEXT="ran out of memory"; KEPT_TEXT="are kept"
 RECLAIM_TEXT="reclaimed for another conversation"; IDLE_TEXT="30 minutes without use"
 LIMIT_TEXTS="most workspaces open at once|no room for another workspace"
-GATE_TEXT="Code execution is unavailable on this cluster (unchecked)"
+# has_text 는 확장 정규식으로 찾으므로 괄호를 글자 그대로 찾게 막는다
+GATE_TEXT="Code execution is unavailable on this cluster \\(unchecked\\)"
 TIMED_TEXT="stopped after 3 seconds"
 RESTART_TEXTS="restarting|$OOM_TEXT"
 # 중지 뒤 스트림이 끝나기까지의 초(lib/e2e_sse.sh expect_cancelled_stream). 런타임이 작업 공간 연결도 닫는다
@@ -964,9 +965,12 @@ chat_bg "/agents/$AG_ID/sessions/$S6/decisions" '{"decisions": [{"type": "approv
 READY=""
 for ((i = 0; i < 150; i += 2)); do
   if sandbox_record "$S6" && [ "$(rec_ 'd["state"] == "open" and d.get("ready_at") is not None')" = True ]; then READY=1; break; fi
+  # 턴이 이미 끝났으면 더 기다리지 않는다. 명령이 돌지 못하고 Tool 이 곧바로 답한 것이다
+  case "$(sse_ 'names[-1]' "$WORK/bg.sse")" in done|error) break ;; esac
   sleep 2
 done
-[ -n "$READY" ] || die 14 "the approved command did not open a sandbox: $(sse_ 'names' "$WORK/bg.sse")"
+# 거절의 까닭은 Tool 의 답과 그 세션의 마지막 기록(닫힌 까닭)에 있다. 정리가 플랫폼을 굴려 그 로그는 남지 않는다
+[ -n "$READY" ] || die 14 "the approved command did not open a sandbox: $(sse_ 'names' "$WORK/bg.sse"); tool_result $(sse_ 'first("tool_result")["status"]' "$WORK/bg.sse"): $(sse_ 'inner(first("tool_result")["content"])[:600]' "$WORK/bg.sse"); last event $(sse_ 'events[-1][1]' "$WORK/bg.sse"); record: $(sandbox_record "$S6" && rec_ '{k: d.get(k) for k in ("state", "generation", "pod", "opened_at", "ready_at", "closed_at", "close_reason", "person")}' || echo none)"
 SBX_POD="$(rec_ 'd["pod"]')"
 sleep 3
 code="$(api POST "/agents/$AG_ID/undeploy")"; [ "$code" = 200 ] || die 14 "undeploy during the command -> $code"

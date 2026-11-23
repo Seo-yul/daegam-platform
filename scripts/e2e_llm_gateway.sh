@@ -59,6 +59,7 @@ DS_NAME="pg-llm-gw-e2e"; KB_NAME="faq-llm-gw-e2e"
 # 2분 안에 닿아야 하는 것(키, 회수)을 기다리는 한도다. 한 틱(60초)과 kubelet 의 Secret 동기화를 넘는다
 APPLY_WAIT=150
 UNREACHABLE_WITHIN=10
+GONE_WAIT=60 # 지운 게이트웨이 파드의 컨테이너와 서비스 규칙이 사라지기를 기다리는 초
 PAUSE_ANNOTATION="daegam.devops.ai.kr/llm-gateway-paused"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/daegam-e2e-llm-gateway.XXXXXX")"
 K=(kubectl --context "$CTX")
@@ -78,8 +79,18 @@ kill_stale_pf "$API_PORT" "$GW_PORT"
 # 메아리 서버와 그 provider(echo_up·echo_provider·echo_down, ECHO_NS·ECHO_URL)는 여기에 있다
 . "$HERE/lib/e2e_llm_echo.sh"
 
+failure_report() { # 실패한 게이트가 정리 앞에 남기는 진단. 정리가 플랫폼을 굴리면 동기화의 로그가 사라진다
+  echo "--- llm gateway diagnostics (namespace $GW_NS)"
+  "${K[@]}" -n "$GW_NS" get deploy,pods,svc,networkpolicy,configmap,secret,role,rolebinding -o wide 2>&1 | head -n 80
+  "${K[@]}" -n "$GW_NS" get events --sort-by=.lastTimestamp 2>&1 | tail -n 40
+  echo "--- platform log without the access lines (every pod, last 200 lines)"
+  "${K[@]}" -n "$PLATFORM_NS" logs -l app=daegam-platform --all-containers --prefix --tail=-1 --max-log-requests=10 2>&1 \
+    | grep -v 'HTTP/1\.1" ' | tail -n 200
+  echo "--- end of llm gateway diagnostics"
+}
 cleanup() {
   bg_stop
+  [ "${1:-0}" != 1 ] || failure_report >&2 || true
   if [ "$PAUSED" = 1 ]; then
     "${K[@]}" annotate namespace "$GW_NS" "$PAUSE_ANNOTATION-" >/dev/null 2>&1 || true
   fi
@@ -344,9 +355,12 @@ for ((i = 0; i < 6; i++)); do
   sleep 5
 done
 [ "$limited" = llm_gateway_rate_limited ] || die 6 "a turn over the tenant limit ended with '$limited'"
+limited_rev="$(api GET /settings/llm-gateway >/dev/null; jq_ 'd["limits_rev"] or ""')"
 code="$(api PATCH /settings "@$LIMITS_SAVED")"
 [ "$code" = 200 ] || die 6 "restoring the limits -> $code"
 LIMITS_SAVED=""
+# 되돌린 한도도 게이트웨이에 닿아야 다음 단계가 429 를 받지 않는다. 한도 서비스가 다시 읽기까지 약 60초다(STEP 7 이 기다린다)
+wait_gateway 6 "$APPLY_WAIT" "(d['limits_rev'] or '') != '$limited_rev'" "the restored limit config"
 pass 6 "a turn over a 1-token tenant limit is llm_gateway_rate_limited"
 
 # ---------- 7. 회수 ----------
@@ -354,7 +368,13 @@ start_pf "$GW_NS" svc/llm-gateway "${GW_PORT}:8080"
 PF_GW=$PF_PID
 wait_port "$GW_PORT" || die 7 "port-forward to svc/llm-gateway did not open :$GW_PORT"
 A_TOKEN="$(secret_field "$A_NS" "$A_SECRET" llm_token)"
-code="$(gw_call "$A_TOKEN")"
+# STEP 6 의 한도가 풀릴 때까지 429 다. 한도 서비스가 되돌린 설정을 다시 읽고(약 60초) 분 단위 통이 비어야 한다
+code=""
+for ((i = 0; i < 36; i++)); do
+  code="$(gw_call "$A_TOKEN")"
+  [ "$code" = 429 ] || break
+  sleep 5
+done
 [ "$code" = 200 ] || die 7 "a live agent token answers $code: $(cat "$WORK/gw-body")"
 new_agent 7 "$AG_B" "$OPENAI"
 B_ID="$SAVED_ID"; B_NS="$(jq_ 'd["k8s"]["namespace"]')"; B_K8S="$(jq_ 'd["k8s"]["name"]')"; B_SECRET="$(jq_ 'd["k8s"]["token_secret"]')"
@@ -379,14 +399,33 @@ SCALED=1
 # 파드가 preStop 동안 남고 kube-proxy 가 그리로 보낸다
 deleted="$("${K[@]}" -n "$GW_NS" delete pod -l app.kubernetes.io/name=llm-gateway --grace-period=0 --force -o name 2>/dev/null || true)"
 [ -n "$deleted" ] || die 8 "no gateway pod was deleted (selector app.kubernetes.io/name=llm-gateway)"
-start_ms="$(now_ms)"
-unreachable="$(turn_error "$B_ID" "게이트웨이 없음")"
-took=$(( ($(now_ms) - start_ms) / 1000 ))
-[ "$unreachable" = llm_gateway_unreachable ] || die 8 "a turn without gateway pods ended with '$unreachable'"
+# 유예 없는 삭제는 API 의 파드 객체만 곧바로 지운다. 컨테이너는 kubelet 이 멈출 때까지, 서비스의 규칙은 kube-proxy 가
+# 따라올 때까지 남아서 그사이의 턴은 게이트웨이를 거쳐 끝나거나 끊긴 연결의 오류로 끝난다. 그런 턴은 다시 보내고, 시간은
+# 마지막 턴만 잰다
+for ((i = 0; i < GONE_WAIT / 2; i++)); do
+  start_ms="$(now_ms)"
+  unreachable="$(turn_error "$B_ID" "게이트웨이 없음")"
+  took=$(( ($(now_ms) - start_ms) / 1000 ))
+  [ "$unreachable" != llm_gateway_unreachable ] || break
+  sleep 2
+done
+[ "$unreachable" = llm_gateway_unreachable ] || {
+  cp "$WORK/sse" "$WORK/body"
+  die 8 "a turn without gateway pods ended with '$unreachable' (events $(sse_ 'names'))"
+}
 [ "$took" -le "$UNREACHABLE_WITHIN" ] || die 8 "llm_gateway_unreachable came after ${took}s (want ${UNREACHABLE_WITHIN}s)"
 "${K[@]}" annotate namespace "$GW_NS" "$PAUSE_ANNOTATION-" >/dev/null
 PAUSED=0
-"${K[@]}" -n "$GW_NS" rollout status deploy/llm-gateway --timeout=180s >/dev/null || die 8 "the sync did not bring the gateway back"
+# 0 으로 줄인 Deployment 는 동기화가 레플리카를 되돌리기 전에도 rollout status 가 곧바로 성공이다. 동기화가 되돌린
+# 레플리카가 모두 준비될 때까지 본다
+back=""
+for ((i = 0; i < 36; i++)); do
+  back="$("${K[@]}" -n "$GW_NS" get deploy/llm-gateway -o jsonpath='{.spec.replicas} {.status.readyReplicas}' 2>/dev/null || true)"
+  read -r gw_want gw_ready <<<"$back"
+  [ "${gw_want:-0}" -ge 1 ] && [ "${gw_ready:-0}" = "$gw_want" ] && break
+  sleep 5
+done
+{ [ "${gw_want:-0}" -ge 1 ] && [ "${gw_ready:-0}" = "$gw_want" ]; } || die 8 "the sync did not bring the gateway back within 180s (replicas and ready: '$back')"
 SCALED=0
 turn 8 "$B_ID" "다시 됨"
 pass 8 "llm_gateway_unreachable in ${took}s without pods; the sync restored them"

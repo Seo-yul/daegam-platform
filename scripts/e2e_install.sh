@@ -176,6 +176,21 @@ hub_tools() {
   done
   die "$2" "GET /hub/$1/tools -> $code, not listed: $(cat "$WORK/body")"
 }
+# wait_tools HUB_ID WANT STEP: 플랫폼이 그 항목에서 한 tools/list 가 WANT 와 같아질 때까지 5초마다 180초 본다. 막 굴러 나온
+# vMCP 는 Ready 여도 첫 백엔드 initialize 가 거절되면(새 파드의 IP 가 프록시의 NetworkPolicy 에 들기 전이다) 다음 상태
+# 검사(30초 간격)까지 백엔드가 없고, 그동안의 tools/call 은 세션이 끊겨 턴이 MCPError 로 끝난다
+wait_tools() {
+  local i code="" got=""
+  for ((i = 0; i < 36; i++)); do
+    code="$(api GET "/hub/$1/tools" || true)"
+    if [ "$code" = "200" ] && [ "$(jq_ 'd["listed"]')" = "True" ]; then
+      got="$(jq_ 'sorted(t["name"] for t in d["tools"])')"
+      [ "$got" = "$2" ] && return 0
+    fi
+    sleep 5
+  done
+  die "$3" "GET /hub/$1/tools -> $code, tools '$got' (want $2) for 180s: $(cat "$WORK/body")"
+}
 # check_resources NS -> 모든 파드의 init·본 컨테이너에 cpu·memory requests·limits 가 있는지. 한 줄 요약을 찍고 빠지면 1
 check_resources() {
   "${K[@]}" -n "$1" get pods -o json | python3 -c '
@@ -746,6 +761,18 @@ fi
 # 기다린다. TURN_TARGET_WAIT 초를 넘기면 마지막 위임 기록을 찍고 die STEP 이다. 그 대상의 토큰을 실은 위임의
 # opened_at·ended_at 을 앞뒤 5초 넓혀 TURN_SINCE·TURN_UNTIL 에 남긴다. 감사 기록과 같은 클러스터의 시계라 이 맥과 노드의
 # 시계가 어긋나도 창이 맞는다. 연 턴 수는 TURN_TRIES 다
+# turn_report: 위임 턴이 서버에 닿지 못했을 때 정리 앞에 $TENANT_NS 의 파드와 최근 이벤트, 파드마다 로그의 끝을 찍는다.
+# 턴의 error 이벤트는 예외의 이름만 싣고, 정리가 Agent 와 Gateway 를 지우면 그 까닭이 사라진다
+turn_report() {
+  local pod
+  echo "--- turn diagnostics (namespace $TENANT_NS)"
+  "${K[@]}" -n "$TENANT_NS" get pods -o wide 2>&1 || true
+  "${K[@]}" -n "$TENANT_NS" get events --sort-by=.lastTimestamp 2>/dev/null | tail -n 30 || true
+  for pod in $("${K[@]}" -n "$TENANT_NS" get pods -o name 2>/dev/null); do
+    echo "--- $pod"
+    "${K[@]}" -n "$TENANT_NS" logs "$pod" --all-containers --tail=40 2>&1 || true
+  done
+} >&2
 turn_with_target() {
   local step="$1" agent="$2" target="$3:$4" code sid note="" result window deadline=$((SECONDS + TURN_TARGET_WAIT))
   TURN_TRIES=0
@@ -761,7 +788,7 @@ turn_with_target() {
     result="$(sse_ 'json.dumps(first("tool_result"), ensure_ascii=False)')"
     { [ "$code" = 200 ] && [ "$(sse_ 'names[-1]')" = "done" ] \
       && [ "$(sse_ '(lambda r: r is not None and r["name"] == "get_pets" and (r["status"] == "success" or "'"$TURN_BACKEND_ERROR"'" in r["content"]))(first("tool_result"))')" = True ]; } \
-      || { cp "$WORK/sse" "$WORK/body"; die "$step" "POST /agents/$agent/chat -> $code $(sse_ 'names'): get_pets did not reach the server, tool_result=$result"; }
+      || { cp "$WORK/sse" "$WORK/body"; turn_report; die "$step" "POST /agents/$agent/chat -> $code $(sse_ 'names'): get_pets did not reach the server, tool_result=$result"; }
     sid="$(sse_ 'first("done")["session_id"]')"
     turn_grants_of "$agent" "$sid" "$WORK/grants.json" || die "$step" "reading the turn grants of session $sid failed"
     note="$(json_of "$WORK/grants.json" 'json.dumps([{k: g.get(k) for k in ("sub", "targets", "end_reason")} for g in d])')"
@@ -830,6 +857,11 @@ else
   # 문이 열려도 Gateway 의 재렌더가 남아 있을 수 있다. 턴 뒤에 vMCP 파드가 바뀌면 수집 전의 감사 줄을 잃으므로
   # (services/audit_collector.py) 굴린 뒤의 틱이 남은 재렌더 없음을 말할 때까지 기다린다
   wait_auth_reapplied "${AUTH[1]#Authorization: Bearer }" "$TT_ROLLED_AT" || die 8t "the data plane still shows pending re-renders after turn tokens were turned on"
+  # 재적용이 끝났다는 틱 뒤에도 오퍼레이터가 vMCP 를 굴리는 중일 수 있고, 그동안의 호출은 곧 지워질 옛 파드가 받는다
+  wait_workloads_rolled "$TENANT_NS" || die 8t "workloads in $TENANT_NS were still rolling 300s after the re-render"
+  # 굴러 나온 vMCP 와 프록시가 백엔드까지 닿는 것을 본 뒤에 턴을 연다. 워크로드가 Ready 인 것만으로는 모자란다
+  wait_tools "$GWPUB" "$TOOLS_WANT" 8t
+  wait_tools "$HMS" "$TOOLS_WANT" 8t
   TURN_MSG="$(stub_call get_pets '{}')"
   turn_with_target 8t "$TT_GW_AG_ID" gateway_instance "$GW_ID"
   GW_SINCE="$TURN_SINCE"; GW_UNTIL="$TURN_UNTIL"; GW_TRIES="$TURN_TRIES"
