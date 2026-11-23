@@ -236,6 +236,8 @@ export const admin = {
         llm_gateway_no_home_cluster: "home 클러스터가 없어 게이트웨이를 렌더하지 않습니다.",
         no_signer: "플랫폼에 서명 키가 없어 토큰을 낼 수 없습니다.",
         llm_gateway_images_missing: "DAEGAM_LLM_GATEWAY_IMAGES 가 비었거나 잘못됐습니다.",
+        llm_gateway_apply_failed:
+          "게이트웨이를 클러스터에 적용하지 못했습니다. 원인은 플랫폼 로그에 있으며, 플랫폼이 잠시 뒤 다시 시도합니다.",
         llm_gateway_config_rejected:
           "게이트웨이 파드가 새 설정을 받지 않아 마지막으로 반영된 설정으로 되돌렸습니다. 그동안의 회수와 키 교체는 반영되지 않았습니다.",
         llm_gateway_config_dollar: "설정에 $ 가 들어 있어 렌더하지 않았습니다.",

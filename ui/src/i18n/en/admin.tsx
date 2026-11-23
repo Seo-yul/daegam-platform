@@ -206,6 +206,8 @@ export const admin: Messages["admin"] = {
         llm_gateway_no_home_cluster: "There is no home cluster, so the gateway is not rendered.",
         no_signer: "The platform has no signing key, so it cannot issue tokens.",
         llm_gateway_images_missing: "DAEGAM_LLM_GATEWAY_IMAGES is empty or invalid.",
+        llm_gateway_apply_failed:
+          "The gateway could not be applied to the cluster. The platform log names the cause, and the platform tries again shortly.",
         llm_gateway_config_rejected:
           "The gateway pods refused the new configuration, so the last applied one was restored. Revocations and key changes made since then are not applied.",
         llm_gateway_config_dollar: "The configuration contains $, so it was not rendered.",
