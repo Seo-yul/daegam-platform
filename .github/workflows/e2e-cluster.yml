@@ -9,8 +9,9 @@
 #          뜬다). 고르면 e2e-agent-redis·e2e-chat-redis·e2e-knowledge·e2e-assistant(e2e-assistant-oidc 를 함께 고르면 돌지
 #          않는다)·e2e-ui-full(Playwright, ingress)
 #   auth   인증 모드를 바꾸는 게이트만 두고, 그 가운데 하나라도 고를 때만 뜬다. e2e-mcp-auth·e2e-agent-oidc·
-#          e2e-assistant-oidc·e2e-oidc-platform(mock-oidc 파드)·e2e-agent-local. 게이트마다 모드를 바꾸고 EXIT trap 으로
-#          되돌리므로 header 모드 게이트와 한 클러스터를 나누지 않는다
+#          e2e-assistant-oidc·e2e-oidc-platform(mock-oidc 파드)·e2e-agent-local·e2e-pat. 게이트마다 모드를 바꾸고 EXIT
+#          trap 으로 되돌리므로 header 모드 게이트와 한 클러스터를 나누지 않는다. e2e-pat 은 설치본 게이트이기도 하며
+#          여기서는 로컬 갈래(파드 다시 띄우기, 내부 홉, 느린 배포 도중의 삭제)가 돈다
 #   sandbox  e2e-sandbox 를 고를 때만 뜬다(샌드박스 이미지를 함께 굽는다). 게이트가 ConfigMap 을 고치고 플랫폼과
 #          daegam-docparse 를 한 벌씩으로 줄여 노드의 메모리를 작업 공간에 비우므로 다른 게이트와 클러스터를 나누지 않는다
 #   provisioning  e2e-provisioning 이나 e2e-evaluation 을 고를 때만 뜬다. e2e-provisioning 은 local 모드와 쉬는 창,
@@ -22,7 +23,7 @@
 # 늘 도는 게이트가 아닌 것은 후보 태그 메시지의 `e2e:` 줄이 이름이나 all 로 고를 때만 돈다. plan 잡이 그 줄을
 # scripts/lib/e2e_select.py 로 matrix 로 바꾸고, 게이트마다의 시간 상한도 거기 있다. 고른 게이트는 실패하면 조각을
 # 막는다. 새로 더해 k3d 에서 아직 통과하지 못한 게이트(soft_gates, 지금은 e2e-llm-gateway, e2e-sandbox, e2e-provisioning,
-# e2e-oidc-platform, e2e-exchange, e2e-evaluation 이고 목록은 e2e_select.py 의 NOT_BLOCKING_YET 이다)만 실패해도 막지
+# e2e-oidc-platform, e2e-exchange, e2e-evaluation, e2e-pat 이고 목록은 e2e_select.py 의 NOT_BLOCKING_YET 이다)만 실패해도 막지
 # 않고, 그 실패는 경고와 잡 요약에 남는다(docs/guide/e2e.md 20절).
 # release-images 가 릴리스 후보 태그에서 테스트 워크플로 일곱과 나란히 부르고, 조각 하나라도 실패하면 candidate 가
 # 돌지 않는다(docs/guide/e2e.md 20절). 로컬 OrbStack 흐름과 같은 make 대상을 부르고 KUBE_CONTEXT 만 k3d 의 컨텍스트로
@@ -129,7 +130,7 @@ jobs:
     needs: plan
     name: e2e (${{ matrix.shard }})
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 135
+    timeout-minutes: 165
     strategy:
       # 한 조각이 실패해도 다른 조각은 끝까지 돌아 자기 결과를 남긴다. 어느 조각이든 실패하면 부른 잡이 실패한다
       fail-fast: false

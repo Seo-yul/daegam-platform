@@ -76,10 +76,11 @@ def test_all_picks_every_gate_and_every_picked_gate_blocks() -> None:
         "e2e-oidc-platform",
         "e2e-exchange",
         "e2e-evaluation",
+        "e2e-pat",
     }
     assert shards["core"]["soft_gates"] == "e2e-llm-gateway:36"
     assert shards["provisioning"]["soft_gates"] == "e2e-provisioning:60 e2e-evaluation:30"
-    assert shards["auth"]["soft_gates"] == "e2e-oidc-platform:35"
+    assert shards["auth"]["soft_gates"] == "e2e-oidc-platform:35 e2e-pat:18"
     assert shards["sandbox"]["blocking_gates"] == shards["provisioning"]["blocking_gates"] == ""
     assert install(picked) == list(INSTALL)
 
@@ -216,6 +217,25 @@ def test_sandbox_runs_on_its_own_k3d_shard_and_on_the_install() -> None:
     assert sandbox["soft_gates"] == "e2e-sandbox:30" and sandbox["kill_grace"] == 6
     assert not any(m["sandbox_image"] for name, m in shards.items() if name != "sandbox")
     assert install(chosen("e2e: e2e-sandbox e2e-runs")) == ["e2e-runs", "e2e-sandbox"]
+
+
+def test_pat_runs_last_in_the_auth_shard_and_on_the_install() -> None:
+    # e2e-pat 의 설치본 갈래는 파드 다시 띄우기, 내부 홉, 느린 배포 도중의 삭제를 건너뛴다. 그
+    # 단계는 k3d 의 auth 조각에서 로컬 갈래로 돈다. local 모드라 mock-oidc 가 필요 없고, ToolHive
+    # 오퍼레이터를 잠시 내리므로 조각의 마지막이다
+    shards = _shards(chosen("e2e: e2e-pat"))
+    assert set(shards) == {"core", "agent", "auth"}
+    alone = shards["auth"]
+    assert alone["soft_gates"] == "e2e-pat:18" and alone["blocking_gates"] == ""
+    assert not (alone["mock_oidc"] or alone["ui"] or alone["sandbox_image"])
+    assert alone["kill_grace"] == 6
+    assert "e2e-pat" in NOT_BLOCKING_YET
+    assert install(chosen("e2e: e2e-pat")) == ["e2e-pat"]
+    assert [g for g, _ in OPTIONAL["auth"]][-1] == "e2e-pat"
+    assert describe(chosen("e2e: e2e-pat")).splitlines()[-2:] == [
+        "k3d auth: e2e-pat(not blocking)",
+        "install e2e-install-extra: e2e-pat",
+    ]
 
 
 def test_provisioning_runs_alone_on_its_own_k3d_shard() -> None:

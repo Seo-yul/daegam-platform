@@ -60,6 +60,12 @@ OPTIONAL = {
         # 상한 35분은 P53b 8절이 정한 몫이다(auth 조각의 남은 시간 40분에서 KILL 유예를 뺀 것). 발급자를 세 번 바꾸고
         # 그때마다 제어면과 vMCP 를 굴린다. 아직 재지 않았다. NOT_BLOCKING_YET 에서 빼기 전에 k3d 에서 잰 값으로 고친다
         ("e2e-oidc-platform", 35),
+        # 개인 MCP 토큰(P32). 설치본 갈래(INSTALL)가 건너뛰는 단계(STEP 5 의 파드 다시 띄우기, STEP 8 의 내부 홉, STEP 9 의
+        # 느린 배포 도중의 삭제)를 여기서 본다. local 모드로 바꾸고 STEP 9 가 ToolHive 오퍼레이터를 잠시 0 으로 내리므로
+        # 조각의 마지막에 돈다. 상한 18분은 스크립트의 기다림(모드 바꾸기와 되돌리기, 대상 배포, 파드 다시 띄우기 셋, JWKS
+        # 에서 키가 빠지기까지 2분, STEP 9 의 5분)을 어림한 값이고 아직 재지 않았다. NOT_BLOCKING_YET 에서 빼기 전에 k3d 에서
+        # 잰 값으로 고친다
+        ("e2e-pat", 18),
     ),
     "sandbox": (("e2e-sandbox", 30),),
     # 상한 60분은 스크립트의 기다림을 더한 값(약 40분, 깨우기 시간 재기 10번 포함)에 P44b 의 미리 보기
@@ -100,7 +106,8 @@ DEFAULT_INSTALL = {"core": 41}
 # 고른 게이트 가운데 k3d 에서 아직 통과하지 못해 실패해도 조각을 막지 않는 것. 새로 더한
 # 게이트는 처음 통과할 때까지 여기 두고, 통과를 기록하는 PR 에서 뺀다(docs/guide/e2e.md
 # 20절). e2e-llm-gateway(P38)는 그 첫 통과를 기다리고, e2e-sandbox 와 e2e-provisioning(P44), e2e-oidc-platform
-# (P53b), e2e-exchange(P57), e2e-evaluation(P45)은 아직 한 번도 돌지 않았다
+# (P53b), e2e-exchange(P57), e2e-evaluation(P45)은 아직 한 번도 돌지 않았다. e2e-pat 은 설치본에서만 돌았고 k3d 에서는
+# 아직 돌지 않았다
 NOT_BLOCKING_YET: tuple[str, ...] = (
     "e2e-llm-gateway",
     "e2e-sandbox",
@@ -108,10 +115,12 @@ NOT_BLOCKING_YET: tuple[str, ...] = (
     "e2e-oidc-platform",
     "e2e-exchange",
     "e2e-evaluation",
+    "e2e-pat",
 )
 # 클러스터 안 mock-oidc 가 토큰을 내야 하는 게이트
 NEEDS_MOCK_OIDC = ("e2e-mcp-auth", "e2e-agent-oidc", "e2e-assistant-oidc", "e2e-oidc-platform")
-# 설치본의 배포와 e2e-install 뒤에 이 차례로 돈다. 앞의 셋은 메아리 네임스페이스와
+# 설치본의 배포와 e2e-install 뒤에 이 차례로 돈다. e2e-pat 과 e2e-sandbox 는 k3d 조각(OPTIONAL)에도 있어, 고르면 두
+# 곳에서 돈다. k3d 에서는 로컬 갈래가, 설치본에서는 install 갈래가 돈다. 앞의 셋은 메아리 네임스페이스와
 # Platform Settings 를 함께 쓰므로 겹치면 안 된다. e2e-runs 는 설치본에만 있는 게이트다.
 # e2e-runs 와 e2e-sandbox 는 플랫폼 ConfigMap 을 게이트 동안 고치고 플랫폼을 굴린다
 INSTALL = (
