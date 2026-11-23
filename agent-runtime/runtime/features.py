@@ -120,6 +120,11 @@ SCALE_TO_ZERO = "scale_to_zero"
 # 둔다. 옛 이미지는 IdP 만 받는다
 TWO_ISSUERS = "two_issuers"
 
+# 다른 Agent 를 Tool 로 부르기다(agent_calls.py). 문서의 `tools[]` 에 `source.kind` 가 `agent` 인
+# 항목이 실리고, 런타임이 목록을 읽지 않고 그 항목으로 `ask_*` Tool 을 만들어 플랫폼의 호출 경로로
+# 부른다. 모르는 이미지는 그 항목을 스키마 위반으로 보므로 빼지 않는다
+AGENT_TOOLS = "agent_tools"
+
 # agent.json 의 features[] 에 실리는 문서 기능
 DOCUMENT_FEATURES: tuple[str, ...] = (
     PROVIDER_EXTRA_BODY,
@@ -131,6 +136,7 @@ DOCUMENT_FEATURES: tuple[str, ...] = (
     LLM_GATEWAY,
     IN_POD_STATE,
     INJECTION_CHECK,
+    AGENT_TOOLS,
 )
 # 문서에 실리지 않는 런타임 능력(API·이벤트)
 CAPABILITIES: tuple[str, ...] = (

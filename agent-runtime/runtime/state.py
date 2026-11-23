@@ -18,6 +18,7 @@ from typing import Annotated, Any
 from fastapi import Depends, Request
 from langchain_core.language_models import BaseChatModel
 
+from runtime.agent_calls import AgentCalls
 from runtime.auth import Authenticator, IssuerSettings, read_issuers, split_csv
 from runtime.cancel import CANCEL_POLL_SECONDS, CancelWatch
 from runtime.compile import CompiledAgent, compile_agent
@@ -144,6 +145,8 @@ class RuntimeState:
     repairs: TurnRepairs = field(default_factory=TurnRepairs)
     # 코드 실행 문서의 세션마다 샌드박스다(P40, sandbox.py). 꺼진 문서는 None 이다
     sandboxes: Sandboxes | None = None
+    # Agent 소스의 Tool 이다(agent_calls.py). 기동 때 한 번 만들고 재컴파일은 같은 것을 넘긴다
+    agent_calls: AgentCalls | None = None
 
     async def refresh_tools(self) -> bool:
         """도구 목록을 다시 읽고, 바뀌었거나 아직 준비 전이면 그래프를 다시 컴파일한다. 그래프를
@@ -171,6 +174,7 @@ class RuntimeState:
             model=self.model_override,
             long_term=self.long_term,
             sandboxes=self.sandboxes,
+            agent_calls=self.agent_calls,
         )
 
 

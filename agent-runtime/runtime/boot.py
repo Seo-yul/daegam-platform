@@ -35,6 +35,7 @@ from fastapi import FastAPI
 from langchain_core.language_models import BaseChatModel
 
 from runtime import events as ev
+from runtime.agent_calls import AgentCalls
 from runtime.auth import AGENT_TARGET, Authenticator
 from runtime.background import stop_tasks
 from runtime.compile import compile_agent
@@ -214,6 +215,9 @@ class Boot:
             stack.push_async_callback(sandboxes.aclose)
             # 세션이 닫히거나 지워지거나 실행이 끝나면 그 샌드박스를 닫는다(P40 5절)
             store.on_close = sandboxes.close
+        # Agent 소스의 Tool 은 도구 소스와 같은 위임을 본다
+        agent_calls = AgentCalls(cfg, grants=sources.grants, instance_token=settings.instance_token)
+        stack.push_async_callback(agent_calls.aclose)
         agent = compile_agent(
             cfg,
             tools_by_ref=sources.tools_by_ref,
@@ -222,6 +226,7 @@ class Boot:
             model=injected.model,
             long_term=memory,
             sandboxes=sandboxes,
+            agent_calls=agent_calls,
         )
         # 관측 이벤트의 본문이 에이전트의 pii_mask 규칙을 모두 지난다(P37). 규칙은 문서에서 오므로
         # 도구 목록으로 다시 컴파일해도 같다
@@ -253,6 +258,7 @@ class Boot:
             model_override=injected.model,
             tools_ready=sources.ready,
             sandboxes=sandboxes,
+            agent_calls=agent_calls,
         )
 
 
