@@ -154,6 +154,15 @@ def rule_forbids(clauses: Mapping[str, Sequence[str]]) -> list[str]:
     return out
 
 
+def known_forbid(names: Iterable[str]) -> list[str]:
+    """그 서버가 아는 Tool 이름 밖의 것을 누구에게나 닫는다 (P52 2절). 프록시의 정책이 백엔드보다
+    낡은 동안(이름을 바꾸거나 Tool 을 더한 배포가 굴러가는 동안, 어느 길로 스펙이 적용됐든) 낡은
+    정책이 모르는 이름은 규칙이 있든 없든 열리지 않는다. tools/list 도 Tool 마다 call_tool 로
+    판정되므로 그 이름은 목록에서도 빠진다. 다른 액션은 건드리지 않는다."""
+    known = sorted(set(names))
+    return [f"forbid(principal, {CALL_TOOL}, resource) unless {{ resource in {_tools(known)} }};"]
+
+
 def closing_forbid(names: Iterable[str]) -> list[str]:
     """그 Tool 들을 누구에게나 닫는다. 인자 조건을 지키는지 모르는 서버(4절)와 0.53 아래 클러스터의
     규칙(1절)이 쓴다. 이름이 없으면 빈 목록이다."""

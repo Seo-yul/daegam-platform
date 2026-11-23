@@ -70,9 +70,22 @@ def _deployed(client, fake_clusters, rules, **kw):
     return cid, bp, r.json(), fake_clusters.by_name["edge"]
 
 
-def test_a_server_without_rules_renders_todays_fence(client, fake_clusters):
+PLATFORM = {"sub": "svc:platform", "tenant": "default"}
+KNOWN_BOTH = (
+    'forbid(principal, action == Action::"call_tool", resource) '
+    'unless { resource in [Tool::"Add", Tool::"Divide"] };'
+)
+
+
+def test_a_server_without_rules_closes_only_the_names_it_does_not_know(client, fake_clusters):
+    """규칙이 없는 서버도 울타리 뒤에 아는 이름 밖을 닫는 forbid 하나를 싣는다. 아는 Tool 과 Tool
+    호출이 아닌 액션은 오늘과 같다."""
     _cid, _bp, _inst, fake = _deployed(client, fake_clusters, {})
-    assert _policies(fake, "mcp-calc-mcp") == tenant_fence_policies("default")
+    policies = _policies(fake, "mcp-calc-mcp")
+    assert policies == [*tenant_fence_policies("default"), KNOWN_BOTH]
+    assert allowed(policies, PLATFORM, "Add") and allowed(policies, PLATFORM, "Divide")
+    assert not allowed(policies, PLATFORM, "Multiply")
+    assert allowed(policies, PLATFORM, "anything", action="read_resource")
 
 
 def test_header_mode_closes_conditioned_tools_but_renders_no_caller_rule(client, fake_clusters):
@@ -81,8 +94,9 @@ def test_header_mode_closes_conditioned_tools_but_renders_no_caller_rule(client,
     policies = _policies(fake, "mcp-calc-mcp")
     assert policies[:2] == tenant_fence_policies("default")
     assert policies[2:] == [
+        KNOWN_BOTH,
         'forbid(principal, action == Action::"call_tool", resource) '
-        'when { resource in [Tool::"Add"] };'
+        'when { resource in [Tool::"Add"] };',
     ]
     vmcp = {"sub": "svc:vmcp:gw-a", "tenant": "default", "rules": "x"}
     assert not allowed(policies, vmcp, "Add") and allowed(policies, vmcp, "Divide")
@@ -461,3 +475,97 @@ def test_pods_without_a_revision_label_close_every_earlier_name(client, fake_clu
     renamed = _put_rules(client, bp, inst, {"Add": cond}, overrides={"Add": {"name": "plus"}})
     assert client.post(f"{MS}/{renamed['id']}/redeploy").status_code == 200
     assert 'Tool::"Add", Tool::"plus"' in _policies(fake, "mcp-calc-mcp")[-1]
+
+
+# -- 낡은 정책이 새 백엔드를 만날 때 (2절) -----------------------------------------------------
+
+
+def _selection(client, bp, ms, tools, *, rules=None, overrides=None):
+    body = {
+        "name": ms["name"],
+        "backends": [
+            {
+                "backend_profile_id": bp["id"],
+                "spec_version": 1,
+                "tools": tools,
+                "tool_rules": rules or {},
+                "tool_overrides": overrides or {},
+            }
+        ],
+        "bindings": [],
+    }
+    r = client.put(f"{MS}/{ms['id']}", json=body)
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def test_an_old_policy_refuses_every_caller_a_name_it_does_not_know(
+    local_admin, fake_clusters, mongo
+):
+    """프록시가 옛 정책으로 도는 동안 백엔드가 먼저 바뀌어도, 옛 정책이 모르는 이름은 이름을 바꾼
+    것이든 규칙과 함께 더한 것이든 규칙 없이 더한 것이든 누구에게도 열리지 않는다. 옛 정책이 아는
+    이름은 규칙대로다."""
+    agent = stored_agent(mongo, "helper")
+    rules = {"Add": {"callers": {"roles": ["developer"], "agents": [agent]}}}
+    _cid, _bp, inst, fake = _deployed(local_admin, fake_clusters, rules)
+    old = _policies(fake, "mcp-calc-mcp")
+    own = {"sub": "svc:agent:agent-helper", "agent_id": agent, "tenant": "default"}
+    stranger = {"sub": "svc:agent:agent-other", "agent_id": "other", "tenant": "default"}
+    front = {"sub": f"svc:expose:{inst['k8s']['name']}", "tenant": "default"}
+    vmcp = {"sub": "svc:vmcp:gw-a", "tenant": "default", "rules": "x"}
+    for caller in (own, stranger, front, vmcp, PLATFORM):
+        for unknown in ("plus", "Multiply", "Extra"):
+            assert not allowed(old, caller, unknown), (caller["sub"], unknown)
+    assert allowed(old, own, "Add") and not allowed(old, stranger, "Add")
+    assert allowed(old, PLATFORM, "Add") and allowed(old, stranger, "Divide")
+
+
+def test_an_old_policy_with_conditions_refuses_an_unknown_name(client, fake_clusters):
+    cond = {"conditions": [{"path": "a", "op": "max", "value": 10}]}
+    _cid, _bp, _inst, fake = _deployed(client, fake_clusters, {"Add": cond})
+    old = _policies(fake, "mcp-calc-mcp")
+    assert not allowed(old, PLATFORM, "plus") and not allowed(old, PLATFORM, "Multiply")
+    # 조건을 지키는지 모르는 동안 Add 는 지금처럼 닫혀 있고, 조건 없는 Divide 는 열려 있다
+    assert not allowed(old, PLATFORM, "Add") and allowed(old, PLATFORM, "Divide")
+
+
+def test_a_rename_deploy_applies_once_and_keeps_the_old_backends_names_callable(
+    client, fake_clusters
+):
+    """새 정책이 옛 컨테이너를 만나는 동안 옛 이름도 불린다. 클러스터의 MCPServer 가 실은 리비전과
+    돌고 있는 파드의 리비전이 내놓는 이름을 함께 안다. 그 리비전이 사라지면 이름도 빠진다."""
+    _cid, bp, inst, fake = _deployed(client, fake_clusters, {})
+    labels = {LABEL_ID: inst["id"], LABEL_PROFILE_REVISION: str(inst["deployed_revision"])}
+    renamed = _selection(
+        client, bp, inst, ["Add", "Divide"], overrides={"Divide": {"name": "over"}}
+    )
+    start = len(fake.applied)
+    assert client.post(f"{MS}/{renamed['id']}/redeploy").status_code == 200
+    assert [o["kind"] for o in fake.applied[start:]].count("MCPServer") == 1
+    rolling = _policies(fake, "mcp-calc-mcp")
+    for name in ("Add", "Divide", "over"):
+        assert allowed(rolling, PLATFORM, name), name
+    # 옛 리비전의 파드가 남아 있으면 다음 렌더도 그 이름을 안다
+    fake.add_pod(DEFAULT_NS, "mcp-calc-mcp-0", labels)
+    assert client.post(f"{MS}/{renamed['id']}/redeploy").status_code == 200
+    assert allowed(_policies(fake, "mcp-calc-mcp"), PLATFORM, "Divide")
+    fake.delete("v1", "Pod", "mcp-calc-mcp-0", DEFAULT_NS)
+    assert client.post(f"{MS}/{renamed['id']}/redeploy").status_code == 200
+    settled = _policies(fake, "mcp-calc-mcp")
+    assert allowed(settled, PLATFORM, "over") and not allowed(settled, PLATFORM, "Divide")
+
+
+def test_the_known_names_stay_out_of_the_rules_digest(local_admin, fake_clusters):
+    """아는 이름은 지문에 들지 않는다. Tool 을 더해도 규칙의 forbid 는 글자까지 같아 Entry 토큰을
+    다시 내지 않는다."""
+    _cid, bp, _ds, ms = mcp_server_env(local_admin, ds=False)
+    ms = _selection(local_admin, bp, ms, ["Add"], rules={"Add": DEV})
+    r = clone_and_deploy(local_admin, ms, name="calc-mcp")
+    assert r.status_code == 201, r.text
+    fake = fake_clusters.by_name["edge"]
+    before = _policies(fake, "mcp-calc-mcp")
+    _selection(local_admin, bp, r.json(), ["Add", "Divide"], rules={"Add": DEV})
+    assert local_admin.post(f"{MS}/{r.json()['id']}/redeploy").status_code == 200
+    after = _policies(fake, "mcp-calc-mcp")
+    assert before[2] != after[2] and "unless { resource in" in after[2]
+    assert before[3:] == after[3:] and 'principal.claim_rules == "' in after[3]

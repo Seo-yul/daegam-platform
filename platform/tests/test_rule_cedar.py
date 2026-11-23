@@ -375,3 +375,44 @@ def test_oidc_scopes_compile_roles_through_the_tenants_group_mappings():
     assert ok(policies, {"sub": "u2", "groups": ["eng"]})
     assert not ok(policies, {"sub": "u2", "groups": ["ops"]})
     assert not ok(policies, {"sub": "c", "azp": "agent-client", "groups": ["eng"]})
+
+
+# -- 아는 이름 밖을 닫는 forbid (2절) ---------------------------------------------------------
+
+
+def test_the_known_forbid_closes_tool_calls_outside_its_names_only():
+    from daegam.auth.rule_cedar import known_forbid
+
+    base = ["permit(principal, action, resource);"]
+    caller = {"sub": "svc:platform", "tenant": "t1"}
+    policy = known_forbid(["b", "a", "b"])
+    assert policy == [
+        'forbid(principal, action == Action::"call_tool", resource) '
+        'unless { resource in [Tool::"a", Tool::"b"] };'
+    ]
+    assert allowed(base + policy, caller, "a") and not allowed(base + policy, caller, "c")
+    assert allowed(base + policy, caller, "c", action="get_prompt")
+    assert not allowed(base + known_forbid([]), caller, "a")
+
+
+def test_known_names_follow_the_revision_and_the_running_backends():
+    from daegam.services.rule_compile import known_names
+    from daegam.store.backend_apis import BackendAPIVersion
+    from daegam.store.mcp_servers import MCPServerRevision
+
+    def rev(n: int, **sel) -> MCPServerRevision:
+        backend = {"backend_profile_id": "bp1", "spec_version": 1, **sel}
+        return MCPServerRevision.model_validate({"revision": n, "backends": [backend]})
+
+    one = rev(1, tools=["getA"])
+    two = rev(2, tools=["getA", "getB"], tool_overrides={"getA": {"name": "alpha"}})
+    three = rev(3)
+    revisions = [one, two, three]
+    assert known_names(revisions, two, (), {}) == ["alpha", "getB"]
+    assert known_names(revisions, two, {1}, {}) == ["alpha", "getA", "getB"]
+    # 무엇이 도는지 모르면 모든 리비전의 이름이다. 버전 문서를 못 읽은 다른 리비전의 이름은 뺀다
+    assert known_names(revisions, two, None, {}) == ["alpha", "getA", "getB"]
+    # 필터 없는 리비전은 버전 문서가 있어야 이름을 안다
+    assert known_names(revisions, three, (), {}) is None
+    version = BackendAPIVersion.model_construct(tool_names=["getA", "getC"])
+    assert known_names(revisions, three, (), {("bp1", 1): version}) == ["getA", "getC"]

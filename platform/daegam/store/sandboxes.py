@@ -448,7 +448,12 @@ class MongoSandboxStore:
             doc = await self.probes.find_one({"_id": key})
             if doc is not None and doc.get("state") in ("wanted", "running"):
                 had = doc.get("first_check")
-                marked = {**had, "last_at": now, "message": message} if had else first
+                # 다른 복제본이 더 늦은 87 을 먼저 적었으면 `last_at` 을 앞으로 돌리지 않는다
+                marked = (
+                    {**had, "last_at": max(had.get("last_at", had["at"]), now), "message": message}
+                    if had
+                    else first
+                )
                 res = await self.probes.update_one(
                     {"_id": key, "state": doc["state"], "first_check": had},
                     {"$set": {"first_check": marked}},
