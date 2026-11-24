@@ -146,7 +146,7 @@ export function HubDetailPage() {
         onDeleted={() => navigate("/hub")}
         confirmLabel={unpublishLabel}
         // agent 항목은 그것을 Tool 로 쓰는 Agent 가 있어도 해제된다. 그 Agent 들은 아래의 참조 안내가 보인다
-        description={published ? t.detail.publishSection.unpublishPublished : internal ? t.detail.publishSection.unpublishInternal : agent ? "" : undefined}
+        description={published ? t.detail.publishSection.unpublishPublished : internal ? t.detail.publishSection.unpublishInternal : agent ? t.detail.publishSection.unpublishAgent : undefined}
       />
       <ErrorMessage error={refresh.error} testId="refresh-error" />
       <LastErrorAlert lastError={item.last_error} testId="hub-last-error" />

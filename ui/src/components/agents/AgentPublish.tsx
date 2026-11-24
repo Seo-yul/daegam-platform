@@ -107,6 +107,7 @@ export function UnpublishAgentDialog({ agentId, item, open, onClose }: { agentId
           <p className="font-medium text-heading" data-testid="confirm-target">
             {item?.name}
           </p>
+          <p>{text.unpublishAgent}</p>
           <ReferencesNotice resource="hub" id={item?.id} open={open} testId="unpublish-references" />
         </>
       }

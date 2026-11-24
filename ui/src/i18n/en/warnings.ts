@@ -206,6 +206,14 @@ export const warnings: Messages["warnings"] = {
       label: "Called Agent not serving",
       text: "An Agent connected as a Tool does not take conversations now, so calls are refused.",
     },
+    agent_source_unpublished: {
+      label: "Called Agent unpublished",
+      text: "An Agent connected as a Tool is no longer published to the hub, so calls are refused.",
+    },
+    agent_calls_disabled: {
+      label: "Agent calls off",
+      text: "Agent calls are turned off on this platform, so calls are refused.",
+    },
     agent_call_timeout_short: {
       label: "Wait too short",
       text: "This Agent's turn time is not long enough beyond the called Agent's, so a call may stop before the answer comes.",

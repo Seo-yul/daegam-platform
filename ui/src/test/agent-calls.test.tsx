@@ -70,8 +70,8 @@ describe("lib: 게시한 Agent 의 항목과 그 Tool", () => {
     expect(notServing).toMatchObject({ label: "호출할 Agent 멈춤", known: true, detail: "tools-1" });
     expect(describeWarning(ko, "agent_calls_broken_by_deploy: the deploy dropped the prerequisites").label).toBe("Agent 호출 불가");
     const unpublished = describeWarning(ko, "agent_source_unpublished: agents connected as tools are no longer published, so calls are refused (tools-1, tools-2)");
-    expect(unpublished).toMatchObject({ code: "agent_source_unpublished", text: ko.errors.codes.agent_source_unpublished, known: true, detail: "tools-1, tools-2" });
-    expect(describeWarning(en, "agent_calls_disabled: agent calls are turned off on this platform, so calls are refused").text).toBe(en.errors.codes.agent_calls_disabled);
+    expect(unpublished).toMatchObject({ code: "agent_source_unpublished", label: "게시 해제된 Agent", text: ko.warnings.codes.agent_source_unpublished.text, known: true, detail: "tools-1, tools-2" });
+    expect(describeWarning(en, "agent_calls_disabled: agent calls are turned off on this platform, so calls are refused").text).toBe(en.warnings.codes.agent_calls_disabled.text);
   });
 
   it("서버만 보는 Agent 소스의 이슈는 오류 표와 경고 표의 문장으로 보인다", () => {

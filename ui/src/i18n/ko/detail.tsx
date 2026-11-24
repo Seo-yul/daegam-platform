@@ -126,6 +126,7 @@ export const detail = {
      * published 항목의 게시 해제 확인 문구. Gateway 상세의 게시 카드와 허브 항목 상세가 같이 쓴다. 서버는 이 항목을 쓰는
      * Gateway 가 있으면 409 `in_use` 로 거부한다 (services/hub.py delete).
      */
+    unpublishAgent: "이 항목이 MCP Hub 에서 내려갑니다. Agent 자체는 그대로 남습니다. 이 Agent 를 Tool 로 사용하는 Agent 의 저장과 배포, 호출은 그때부터 거절됩니다.",
     unpublishPublished: "MCP Hub에서 내려갑니다. Gateway 자체는 그대로 남습니다. 이 항목을 쓰는 다른 Gateway가 있으면 해제할 수 없습니다.",
     /** 409 in_use 로 해제가 막혔을 때. 문장 아래에 Gateway 링크 목록이 붙는다. */
     inUse: "먼저 아래 Gateway 에서 이 항목을 빼야 합니다.",

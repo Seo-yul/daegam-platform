@@ -285,6 +285,14 @@ export const warnings = {
       label: "호출할 Agent 멈춤",
       text: "Tool 로 연결한 Agent 가 지금 대화를 받지 않아 호출이 거절됩니다.",
     },
+    agent_source_unpublished: {
+      label: "게시 해제된 Agent",
+      text: "Tool 로 연결한 Agent 의 허브 게시가 해제되어 호출이 거절됩니다.",
+    },
+    agent_calls_disabled: {
+      label: "Agent 호출 꺼짐",
+      text: "이 플랫폼에서 Agent 호출이 꺼져 있어 호출이 거절됩니다.",
+    },
     agent_call_timeout_short: {
       label: "기다리는 시간 부족",
       text: "이 Agent 의 턴 시간이 호출받은 Agent 의 턴 시간보다 충분히 길지 않아 답을 받기 전에 호출이 멈출 수 있습니다.",

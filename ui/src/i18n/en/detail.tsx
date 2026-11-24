@@ -100,6 +100,7 @@ export const detail: Messages["detail"] = {
     unpublish: "Unpublish",
     unpublishing: "Unpublishing…",
     unpublishInternal: "This removes the item from MCP Hub. The MCP Server itself stays. You cannot unpublish while a Gateway uses this item.",
+    unpublishAgent: "This removes the item from MCP Hub. The Agent itself stays. From then on, Agents that use this Agent as a Tool cannot be saved or deployed, and their calls are refused.",
     unpublishPublished: "This removes the item from MCP Hub. The Gateway itself stays. You cannot unpublish while another Gateway uses this item.",
     inUse: "First remove this item from the Gateways below.",
     published: "Published",
