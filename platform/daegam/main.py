@@ -174,6 +174,7 @@ def _add_middleware(app: FastAPI, settings: Settings) -> None:
     # 헤더를 받는다. 감사와 보호 헤더는 요청 본문을 읽지 않는다
     from daegam.api.agent_calls import AGENT_CALL_BODY_LIMIT
     from daegam.api.agent_chat import UPLOAD_BODY_LIMIT
+    from daegam.api.agent_protocol import AGENT_PROTOCOL_BODY_LIMIT
     from daegam.api.sandboxes import SANDBOX_BODY_LIMIT
     from daegam.api.skills import IMPORT_BODY_LIMIT
     from daegam.api.telemetry import INGEST_BODY_LIMIT, OTLP_BODY_LIMIT
@@ -190,6 +191,7 @@ def _add_middleware(app: FastAPI, settings: Settings) -> None:
             TURN_GRANT_BODY_LIMIT,
             SANDBOX_BODY_LIMIT,
             AGENT_CALL_BODY_LIMIT,
+            AGENT_PROTOCOL_BODY_LIMIT,
         ],
     )
     # 감사 미들웨어. 저장소는 lifespan 뒤에 생기므로 호출 시점에 app.state 에서 읽는다
@@ -336,6 +338,7 @@ def create_app(
     from daegam.api.agent_evaluation import router as agent_evaluation_router
     from daegam.api.agent_feedback import router as agent_feedback_router
     from daegam.api.agent_preview import router as agent_preview_router
+    from daegam.api.agent_protocol import router as agent_protocol_router
     from daegam.api.agent_runs import me_router as runs_as_me_router
     from daegam.api.agent_runs import router as agent_runs_router
     from daegam.api.agent_telemetry import router as agent_telemetry_router
@@ -399,6 +402,8 @@ def create_app(
         turn_grants_router,
         # 부르는 Agent 의 런타임이 다른 Agent 의 실행을 시작하고 묻고 취소하는 기계 경로 (P46 6.3절)
         agent_calls_router,
+        # 부르는 Agent 의 런타임이 다른 Agent 에게 작업을 맡기고 읽고 취소하는 기계 경로 (P46 6.7절)
+        agent_protocol_router,
         # 런타임이 세션의 코드 실행 샌드박스를 열고 찾고 닫는 기계 경로 (P40 5절)
         sandboxes_router,
         settings_router,

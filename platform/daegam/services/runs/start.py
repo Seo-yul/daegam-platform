@@ -35,6 +35,10 @@
   수 없는 위임, 위임을 받지 않은 파드(그 턴은 멈춘다), 누구의 이름으로 돌았는지 모르는 앞 시도의
   턴이다. 규칙이 토큰을 주는 대상이 없을 때만 위임 없이 돈다. header 모드는 스케줄 실행처럼 Agent
   의 이름으로 돈다. 다시 할 시작이 호출이 기다리는 끝을 넘으면 `agent_call_timeout` 으로 끝낸다.
+- **맡긴 작업의 실행** (P46 6.7절). 작업 하나의 실행들은 세션 하나의 턴들이다. 기록에 세션이 있으면
+  그 세션으로 부르고 작업의 세션이라고 알린다(`task`). 같은 작업의 앞 실행이 아직 돌면(멈추라고
+  한 턴이 아직 끝나지 않았다) 시도로 세지 않고 잠깐 미룬다. 그래도 런타임이 앞 턴이 돈다고
+  답하면(`turn_in_progress`) 다시 할 수 있는 시작으로 센다.
 """
 
 from __future__ import annotations
@@ -119,6 +123,10 @@ GRANT_NOT_ACCEPTED = "grant_not_accepted"
 RUNTIME_UNREACHABLE = "runtime_unreachable"
 # 다시 할 시작이 호출이 답을 기다리는 끝을 넘는다 (P46 6.3절)
 AGENT_CALL_TIMEOUT = "agent_call_timeout"
+# 같은 작업의 앞 턴이 끝나기를 기다리며 시작을 미루는 시간 (P46 6.7절)
+TASK_TURN_DEFER = timedelta(seconds=2)
+# 작업 세션이 아직 앞 턴을 돌린다고 런타임이 답한 코드다. 작업의 실행만 다시 한다
+TURN_IN_PROGRESS = "turn_in_progress"
 
 
 @dataclass(frozen=True)
@@ -144,6 +152,17 @@ class SleepGate(Protocol):
 
 def _as_agent(acts_as: ActsAs, cause: str) -> ActsAs:
     return acts_as.model_copy(update={"kind": "agent", "cause": cause})
+
+
+def _is_task(run: AgentRun) -> bool:
+    """다른 Agent 가 맡긴 작업의 실행인가 (P46 6.7절)."""
+    return run.caller is not None and run.caller.thread_id is not None
+
+
+def _task_session(run: AgentRun) -> str | None:
+    """맡긴 작업의 다음 실행이 이어 도는 세션이다. 작업의 첫 실행과 그 밖의 실행은 새 세션에서
+    돌아 None 이다."""
+    return run.session_id if _is_task(run) else None
 
 
 class RunStartWorker(LeaseWorker[AgentRun]):
@@ -247,6 +266,9 @@ class RunStartWorker(LeaseWorker[AgentRun]):
             # 지나가는 상태다. 시도로 세지 않고 미룬다
             await self.runs.defer(run.id, self.owner, now + self.wait())
             return
+        if await self._earlier_turn_running(run):
+            await self.runs.defer(run.id, self.owner, now + TASK_TURN_DEFER)
+            return
         kind = self.service.kind_of(run)
         source = await self._source(run, kind)
         # 스케줄 실행은 스케줄의 메시지를, 지금 실행과 웹훅 실행은 기록에 둔 메시지를 보낸다
@@ -263,6 +285,13 @@ class RunStartWorker(LeaseWorker[AgentRun]):
         if not await self._awake(run, agent, now):
             return
         await self._call(run, agent, message or "", now)
+
+    async def _earlier_turn_running(self, run: AgentRun) -> bool:
+        """맡긴 작업의 앞 실행이 아직 도는가 (P46 6.7절). 멈추라고 한 그 턴이 끝나야 세션이 이
+        실행의 턴을 받는다."""
+        if run.caller is None or run.caller.thread_id is None:
+            return False
+        return await self.runs.thread_turn_running(run.caller.thread_id, besides=run.id)
 
     async def _awake(self, run: AgentRun, agent: Agent, now: datetime) -> bool:
         """위임을 열기 전의 쉬기의 게이트 (P44 8절). 잠든 Agent 를 깨우고 활동을 적는다. 깨우는
@@ -357,7 +386,8 @@ class RunStartWorker(LeaseWorker[AgentRun]):
         except _ActsAsUnavailable:
             await self._fail(run, ACTS_AS_UNAVAILABLE, now)
             return
-        plan = TurnPlan(agent, None, now, grant, confirms=person)
+        task = _is_task(run)
+        plan = TurnPlan(agent, _task_session(run), now, grant, confirms=person)
 
         async def call(turn_grant: dict[str, Any] | None) -> ProxyResponse:
             # 묶인 사람이 기억한 거부다(P43 5절). 읽지 못하면 연결 실패처럼 다시 한다
@@ -370,12 +400,13 @@ class RunStartWorker(LeaseWorker[AgentRun]):
                 agent,
                 user_sub=run.acts_as.sub,
                 message=message,
-                session_id=None,
+                session_id=plan.session_id,
                 ephemeral=True,
                 turn_grant=turn_grant,
                 run_id=run.id,
                 # 밖에서 온 글은 런타임 가드의 엄격한 URL 규칙을 받는다 (4절)
                 untrusted=self.service.untrusted(run),
+                task=task,
                 approval_choices=rejects,
             )
 
@@ -416,7 +447,7 @@ class RunStartWorker(LeaseWorker[AgentRun]):
             agent=agent,
             person=person,
             trigger="run" if call is None else CALL_TRIGGER,
-            session_id=None,
+            session_id=_task_session(run),
             long_bound=call.long_bound if call is not None else None,
             run_id=run.id,
         )
@@ -437,7 +468,8 @@ class RunStartWorker(LeaseWorker[AgentRun]):
             # 프록시가 드레인 거절을 바꾼 답이다. 다음 시도의 게이트가 깨운다 (P44 8절)
             await self.runs.defer(run.id, self.owner, now + WAKE_DEFER)
             return
-        if status in RETRY_STATUSES or code in RETRY_CODES:
+        busy_session = code == TURN_IN_PROGRESS and _is_task(run)
+        if status in RETRY_STATUSES or code in RETRY_CODES or busy_session:
             await self._retry_or_fail(run, code or f"http_{status}", now)
             return
         await self._fail(run, code or f"http_{status}", now)
@@ -580,6 +612,7 @@ __all__ = [
     "MAX_ATTEMPTS",
     "MAX_PARALLEL",
     "RETRY_WINDOW",
+    "TASK_TURN_DEFER",
     "RUNS_UNSUPPORTED",
     "RUN_LOST",
     "RunStartWorker",

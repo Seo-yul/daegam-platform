@@ -123,6 +123,8 @@ function reasonTable(t: Messages, days: number): Record<string, string> {
     turn_access_lost: r.accessLost,
     caller_ended: r.callerEnded,
     caller_timeout: r.callerTimeout,
+    caller_cancelled: r.callerCancelled,
+    caller_updated: r.callerUpdated,
     turn_timeout: t.agents.metrics.turnResult.turn_timeout,
     budget_exceeded: t.agents.metrics.turnResult.budget_exceeded,
     agent_undeployed: t.runs.pausedReason.agentUndeployed,

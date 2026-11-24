@@ -676,7 +676,7 @@ def test_a_first_turn_call_records_the_session_once_the_grant_holds_it(settings,
             return await read(grant_id)
 
         first = CallCredentials(token(chat))
-        caller = await rig.calls._caller(CALLED, first)
+        caller = await rig.calls.caller(CALLED, first)
         rig.grants.get = attached  # type: ignore[method-assign]
         assert await rig.calls._caller_session(caller) == "s-new"
 

@@ -715,13 +715,17 @@ class AgentRuntimeProxy:
         turn_grant: dict[str, Any] | None = None,
         run_id: str | None = None,
         untrusted: bool = False,
+        task: bool = False,
         approval_choices: list[dict[str, str]] | None = None,
     ) -> ProxyResponse:
         """POST /chat. 세션 소유자는 호출자의 sub 다. ephemeral 이면 이 턴에 장기 기억 저장소를
         안 붙인다(D34). attachments 는 런타임 모양의 첨부이고 있을 때만 싣는다(P36). turn_grant 는
         플랫폼이 연 턴 위임이고 있을 때만 싣는다(P53). run_id 는 백그라운드 실행의 id 이고 시작
         워커만 싣는다(P41 9절). untrusted 는 웹훅 실행의 표시이고 런타임이 세션에 둔다(4·9절).
-        approval_choices 는 턴의 사람이 기억한 승인 선택이다(P43 5절). 배포된 문서만 된다."""
+        task 는 다른 Agent 가 맡긴 작업의 세션이라는 표시이고 run_id 와 함께만 싣는다(P46 6.7절).
+        작업 세션은 턴이 끝나도 닫히지 않고, 그 작업의 다음 실행은 그 session_id 와 새 run_id 를
+        싣는다. approval_choices 는 턴의 사람이 기억한 승인 선택이다(P43 5절). 배포된 문서만
+        된다."""
         body: dict[str, Any] = {
             "session_id": session_id,
             "message": message,
@@ -734,6 +738,8 @@ class AgentRuntimeProxy:
             body["run_id"] = run_id
         if untrusted:
             body["untrusted"] = True
+        if task:
+            body["task"] = True
         return await self.stream(
             doc,
             "POST",

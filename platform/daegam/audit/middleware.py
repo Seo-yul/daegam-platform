@@ -30,6 +30,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from daegam.audit.store import AuditEvent, MongoAuditStore
 from daegam.urls import (
     AGENT_CALL_PATHS,
+    AGENT_PROTOCOL_PATHS,
     API_PREFIX,
     HOOK_PATHS,
     SANDBOX_PATHS,
@@ -52,7 +53,8 @@ EXCLUDED_SUFFIXES = ("/openapi.yaml", "/profile.json")
 # 맞대므로 같은 끝을 가진 다른 경로는 빠지지 않는다. 웹훅 트리거의 공개 경로는 위조한 호출마다 행을
 # 남기지 않게 스스로 센 행을 쓴다(P41 4절). 샌드박스의 열기·쓰기 표시·닫기는 기록과 이벤트가
 # 남긴다(P40 5절). Teams 봇의 메시지 엔드포인트도 웹훅처럼 스스로 행을 쓴다(P47 7절). 다른 Agent 를
-# Tool 로 부르는 호출 경로는 요청마다 사람과 두 Agent 를 실은 행을 스스로 쓴다(P46 6.8절)
+# Tool 로 부르는 호출 경로와 맡긴 작업의 경로는 요청마다 사람과 두 Agent 를 실은 행을 스스로
+# 쓴다(P46 6.8절)
 UNAUDITED_PATHS = (
     exact_api_paths(TELEMETRY_PATHS),
     TURN_GRANT_PATHS,
@@ -60,6 +62,7 @@ UNAUDITED_PATHS = (
     SANDBOX_PATHS,
     TEAMS_MESSAGES_PATHS,
     AGENT_CALL_PATHS,
+    AGENT_PROTOCOL_PATHS,
 )
 # 성공해도 남기는 읽기. 읽기인데도 플랫폼이 밖으로 나가는 호출을 일으키는 자리다 (D48). 허브 항목의
 # 주소는 사용자가 등록 때 적은 임의의 URL 이라, 누가 어떤 항목으로 플랫폼을 내보냈는지가 보안

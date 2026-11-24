@@ -48,6 +48,7 @@ from daegam.services.agent_citations import CitationSources
 from daegam.services.agent_feedback import AgentFeedbackService
 from daegam.services.agent_preview import AgentPreviews, AgentPreviewWorker
 from daegam.services.agent_sleep import AgentSleepWorker
+from daegam.services.agent_task_runs import AgentTaskRuns
 from daegam.services.agents import AgentService
 from daegam.services.approval_choices import ApprovalChoiceService
 from daegam.services.assistant.catalog import CATALOG
@@ -147,6 +148,7 @@ from daegam.store.agent_previews import MongoAgentPreviewStore
 from daegam.store.agent_runs import MongoAgentRunStore
 from daegam.store.agent_schedules import MongoAgentScheduleStore
 from daegam.store.agent_session_owners import MongoAgentSessionOwnerStore
+from daegam.store.agent_tasks import MongoAgentTaskThreadStore
 from daegam.store.agent_triggers import MongoAgentTriggerStore
 from daegam.store.agents import MongoAgentStore
 from daegam.store.approval_choices import MongoApprovalChoiceStore
@@ -281,6 +283,8 @@ class Stores:
     turn_grants: MongoTurnGrantStore
     # 백그라운드 실행의 기록과 스케줄 (P41 1·3절)
     agent_runs: MongoAgentRunStore
+    # 다른 Agent 에게 맡긴 작업의 묶음 (P46 6.7절)
+    agent_task_threads: MongoAgentTaskThreadStore
     agent_schedules: MongoAgentScheduleStore
     agent_triggers: MongoAgentTriggerStore
     # 웹훅 트리거의 Secret 을 가진 Agent. 리컨실의 쓸기가 Secret 을 이름으로 찾는다 (P41 4절)
@@ -387,6 +391,7 @@ def build_stores(settings: Settings) -> Stores:
         agent_session_owners=MongoAgentSessionOwnerStore(db),
         turn_grants=MongoTurnGrantStore(db),
         agent_runs=MongoAgentRunStore(db),
+        agent_task_threads=MongoAgentTaskThreadStore(db),
         agent_schedules=MongoAgentScheduleStore(db),
         agent_triggers=MongoAgentTriggerStore(db),
         hook_secrets=MongoHookSecretStore(db),
@@ -472,6 +477,7 @@ class Services:
     turn_grants: TurnGrantService
     # 다른 Agent 를 Tool 로 부르는 호출 경로의 판단 (P46 6.3절)
     agent_calls: AgentCallRuns
+    agent_tasks: AgentTaskRuns
     # 백그라운드 실행의 스케줄과 기록 (P41)
     run_service: RunService
     # 웹훅 트리거의 관리와 공개 경로의 판단 (P41 4절)
@@ -1260,6 +1266,8 @@ def build_services(
         audit=stores.audit,
     )
     turn_grants.on_end = agent_calls.caller_ended
+    # 맡긴 작업은 호출의 확인과 시작을 그대로 쓰고 작업의 묶음만 더 쥔다 (P46 6.7절)
+    agent_tasks = AgentTaskRuns(agent_calls, stores.agent_task_threads)
     run_workers: tuple[LeaseWorker[Any], ...] = ()
     if settings.runs_enabled and not settings.runs_workers_enabled:
         logger.warning("background runs are enabled but their workers are off: nothing fires")
@@ -1415,6 +1423,7 @@ def build_services(
         ),
         turn_grants=turn_grants,
         agent_calls=agent_calls,
+        agent_tasks=agent_tasks,
         web_search=WebSearch(
             settings_store=stores.platform_settings,
             hub_store=stores.hub_items,
@@ -1616,6 +1625,7 @@ def attach(app: FastAPI, stores: Stores, services: Services) -> None:
     state.web_search = services.web_search
     state.turn_grants = services.turn_grants
     state.agent_calls = services.agent_calls
+    state.agent_tasks = services.agent_tasks
     state.run_service = services.run_service
     state.run_triggers = services.run_triggers
     state.webhooks = services.webhooks

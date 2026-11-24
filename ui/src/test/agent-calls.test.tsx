@@ -63,6 +63,9 @@ describe("lib: 게시한 Agent 의 항목과 그 Tool", () => {
     expect(calledByText(ko, runFixture(), () => "x")).toBeNull();
     expect(runReasonText(ko, "caller_ended", 30)).toEqual({ text: "부른 Agent 의 턴이 끝나 실행을 취소했습니다.", code: false });
     expect(runReasonText(ko, "caller_timeout", 30)).toEqual({ text: "부른 Agent 가 기다리는 시간을 넘겨 실행을 취소했습니다.", code: false });
+    expect(runReasonText(ko, "caller_cancelled", 30)).toEqual({ text: "부른 Agent 가 작업을 취소했습니다.", code: false });
+    expect(runReasonText(ko, "caller_updated", 30)).toEqual({ text: "부른 Agent 가 새 지시를 보내 이 실행을 취소했습니다.", code: false });
+    expect(runReasonText(en, "caller_updated", 30)?.text).toBe("The calling Agent sent a new instruction, so this run was cancelled.");
   });
 
   it("상태 경고는 경고 표의 문장이고, 게시를 거둔 소스와 꺼진 호출은 오류 표의 문장이다", () => {
