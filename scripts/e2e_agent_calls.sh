@@ -466,6 +466,17 @@ else
   cond_skip 6 "header mode has no people to tell apart; the person rule runs on the install"
 fi
 
+# stop_trail: 중지가 호출받은 실행에 닿지 않았을 때 그 까닭을 가르게, 부른 Agent 의 파드와 플랫폼의 로그에서 취소와 호출 경로의
+# 줄을 찍는다
+stop_trail() {
+  echo "  stop: the calling Agent's log (cancel, stop and call lines)"
+  "${K[@]}" -n "$AG_NS" logs "deploy/agent-$NAME_A" --all-containers --tail=400 </dev/null 2>/dev/null \
+    | grep -iE 'cancel|취소|멈|agent-calls|Traceback|Error' | tail -n 30 || true
+  echo "  stop: the platform's log (call routes and session cancel)"
+  "${K[@]}" -n "$PLATFORM_NS" logs deploy/daegam-platform --all-containers --tail=2000 </dev/null 2>/dev/null \
+    | grep -E 'agent-calls|/cancel' | tail -n 30 || true
+}
+
 # ---------- 7. 부른 턴을 중지하면 호출받은 실행이 취소된다 ----------
 as_person "$U1_TOKEN" chat_bg "/agents/$ID_A/chat" "$(msg "$(ask_call "$ASK_B" "e2e-agent-calls slow {\"sleep\": $SLOW_SECONDS}")")"
 STOP_SID="$(bg_session_id)"
@@ -479,7 +490,7 @@ code="$(as_person "$U1_TOKEN" api POST "/agents/$ID_A/sessions/$STOP_SID/cancel"
 run_wait 7 "$ID_B" "$STOP_RUN" "$RUN_TERMINAL" "$CANCEL_WAIT"
 bg_stop
 [ "$RUN_STATUS $(run_field 'd.get("reason")')" = "cancelled caller_ended" ] \
-  || die 7 "the run $STOP_RUN ended $RUN_STATUS ($(run_field 'd.get("reason")')), want cancelled (caller_ended)" "$(cat "$WORK/run.json")"
+  || { stop_trail; die 7 "the run $STOP_RUN ended $RUN_STATUS ($(run_field 'd.get("reason")')), want cancelled (caller_ended)" "$(cat "$WORK/run.json")"; }
 pass 7 "stopping the turn of $NAME_A in session $STOP_SID cancelled run $STOP_RUN of $NAME_B (caller_ended)"
 
 # ---------- 8. 호출받은 Agent 의 승인 ----------
