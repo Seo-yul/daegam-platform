@@ -22,8 +22,9 @@ Tool 과 같다. tests/test_agent_task_tools.py 가 잠긴 deepagents 와 이름
   실패시키지 않고 Tool 오류다. 목록의 `running` 거름은 `pending` 인 작업도 낸다. 확인은 `error` 칸을
   `cancelled` 에서도 읽는다. 플랫폼이 취소의 까닭을 거기에 싣는다. 확인의 결과는 ASCII 밖의 글자를
   그대로 둔 JSON 이다.
-- **표시.** 문서의 항목이 다섯 이름을 `allow` 에, 읽기만 하는 둘을 `read` 에 싣는다. 결과는 다른
-  Agent 소스처럼 바깥 내용이다(tool_safety.py).
+- **표시.** 문서의 항목이 다섯 이름을 `allow` 에, 읽기만 하는 둘을 `read` 에, 답을 읽어 오는
+  `check_async_task` 를 뺀 넷을 `inside` 에 싣는다. 호출받은 Agent 의 답을 싣는 확인의 결과만 바깥
+  내용이다(tool_safety.py).
 """
 
 from __future__ import annotations
@@ -313,6 +314,16 @@ class AgentTasks:
             )
         return agent
 
+    def _known(
+        self, task_id: str, runtime: ToolRuntime
+    ) -> tuple[AsyncTask, TaskAgent, Caller] | str:
+        """이 세션이 맡긴 작업, 그 작업을 맡은 Agent, 부르는 쪽이다. 모르는 id 면 그렇다고 답할
+        문장이다."""
+        task = _tracked(runtime).get(task_id.strip())
+        if not task:
+            return UNTRACKED_MESSAGE.format(task_id=task_id)
+        return task, self._agent_of(task), Caller.of(runtime)
+
     # -- Tool 다섯 ---------------------------------------------------------------------------
 
     async def start(
@@ -340,10 +351,10 @@ class AgentTasks:
         return _update(runtime, STARTED_MESSAGE.format(task_id=task_id), {task_id: task})
 
     async def check(self, task_id: str, runtime: ToolRuntime) -> str | Command:
-        task = _tracked(runtime).get(task_id.strip())
-        if not task:
-            return UNTRACKED_MESSAGE.format(task_id=task_id)
-        agent, caller = self._agent_of(task), Caller.of(runtime)
+        known = self._known(task_id, runtime)
+        if isinstance(known, str):
+            return known
+        task, agent, caller = known
         run = await self._run_status(CHECK, agent, task, caller)
         status = run["status"]
         result: dict[str, Any] = {"status": status, "thread_id": task["thread_id"]}
@@ -358,10 +369,10 @@ class AgentTasks:
         return _update(runtime, text, {task["task_id"]: updated})
 
     async def update(self, task_id: str, message: str, runtime: ToolRuntime) -> str | Command:
-        task = _tracked(runtime).get(task_id.strip())
-        if not task:
-            return UNTRACKED_MESSAGE.format(task_id=task_id)
-        agent, caller = self._agent_of(task), Caller.of(runtime)
+        known = self._known(task_id, runtime)
+        if isinstance(known, str):
+            return known
+        task, agent, caller = known
         run_id = await self._create_run(
             UPDATE, agent, task["thread_id"], message, caller, **INTERRUPT
         )
@@ -371,10 +382,10 @@ class AgentTasks:
         return _update(runtime, text, {task["task_id"]: updated})
 
     async def cancel(self, task_id: str, runtime: ToolRuntime) -> str | Command:
-        task = _tracked(runtime).get(task_id.strip())
-        if not task:
-            return UNTRACKED_MESSAGE.format(task_id=task_id)
-        agent, caller = self._agent_of(task), Caller.of(runtime)
+        known = self._known(task_id, runtime)
+        if isinstance(known, str):
+            return known
+        task, agent, caller = known
         path = f"/threads/{task['thread_id']}/runs/{task['run_id']}/cancel"
         await self._send(CANCEL, agent, "POST", path, caller, params=CANCEL_QUERY)
         now = _now()

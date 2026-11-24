@@ -22,7 +22,10 @@ export const ORIGIN_INTERNAL: ToolOrigin = "internal";
 export const THIRD_PARTY_ORIGINS: ReadonlySet<ToolOrigin> = new Set<ToolOrigin>(["image", "remote", "entry"]);
 /** code mode Gateway 의 execute_tool_script 다 (P56 6.5절). 결과는 늘 바깥 내용이고 캔버스의 어느 표시도 효과가 없다. */
 export const ORIGIN_SCRIPT: ToolOrigin = "script";
-/** 게시한 Agent 를 부르는 ask_* 다 (P46 6.6절). 늘 쓰기이고 결과는 늘 바깥 내용이며 캔버스의 어느 표시도 효과가 없다. */
+/**
+ * 게시한 Agent 를 부르는 ask_* 와 작업 Tool 다섯이다 (P46 6.6·6.7절). ask_* 는 늘 쓰기이고 결과는 늘 바깥 내용이다. 작업 Tool 의 효과와
+ * 표시는 TASK_READ_TOOLS 와 TASK_ANSWER_TOOL 이 정한다. 캔버스의 어느 표시도 효과가 없다.
+ */
 export const ORIGIN_AGENT: ToolOrigin = "agent";
 
 /**
@@ -48,7 +51,10 @@ export function canvasMarkApplies(origin: ToolOrigin | undefined, marked = false
   return origin !== undefined && THIRD_PARTY_ORIGINS.has(origin) && !marked;
 }
 
-/** 바깥 표시를 바꿀 수 없는 Tool 인가. 웹 Tool, 백엔드 종류를 모르는 이름, code mode 스크립트와 게시한 Agent 를 부르는 Tool 은 늘 바깥이다. */
+/**
+ * 바깥 표시를 바꿀 수 없는 Tool 인가. 웹 Tool, 백엔드 종류를 모르는 이름, code mode 스크립트와 게시한 Agent 를 부르는 Tool 은 늘 바깥이다.
+ * 작업 Tool 의 바깥 여부는 이 함수가 아니라 TASK_ANSWER_TOOL 이 정한다.
+ */
 export function outsideFixed(origin: ToolOrigin | undefined, effect: ToolEffect | undefined): boolean {
   return origin === undefined || origin === ORIGIN_SCRIPT || origin === ORIGIN_AGENT || effect === "web";
 }

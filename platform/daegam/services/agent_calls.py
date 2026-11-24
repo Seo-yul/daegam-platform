@@ -310,7 +310,7 @@ def _own_tools(data: ToolsData, source: AgentSource) -> tuple[str, ...]:
 def _node_issues(
     node_id: str, data: ToolsData, source: AgentSource, turn_timeout: int | None, *, main: bool
 ) -> list[Issue]:
-    """노드 하나의 이슈다. main 은 그 노드가 메인이 아닌 에이전트에 붙지 않았는가다."""
+    """노드 하나의 이슈다. main 은 그 노드가 메인 에이전트에만 붙었는가다."""
     where = f"tools node {node_id!r}"
     if source.refusal is not None:
         return [Issue(source.refusal.code, f"{where}: {source.refusal.message}", node_id=node_id)]

@@ -289,8 +289,9 @@ class RunStartWorker(LeaseWorker[AgentRun]):
     async def _earlier_turn_running(self, run: AgentRun) -> bool:
         """맡긴 작업의 앞 실행이 아직 도는가 (P46 6.7절). 멈추라고 한 그 턴이 끝나야 세션이 이
         실행의 턴을 받는다."""
-        if run.caller is None or run.caller.thread_id is None:
+        if not _is_task(run):
             return False
+        assert run.caller is not None and run.caller.thread_id is not None
         return await self.runs.thread_turn_running(run.caller.thread_id, besides=run.id)
 
     async def _awake(self, run: AgentRun, agent: Agent, now: datetime) -> bool:
@@ -612,8 +613,8 @@ __all__ = [
     "MAX_ATTEMPTS",
     "MAX_PARALLEL",
     "RETRY_WINDOW",
-    "TASK_TURN_DEFER",
     "RUNS_UNSUPPORTED",
     "RUN_LOST",
+    "TASK_TURN_DEFER",
     "RunStartWorker",
 ]

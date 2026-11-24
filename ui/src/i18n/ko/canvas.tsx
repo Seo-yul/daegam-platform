@@ -348,7 +348,7 @@ export const canvas = {
     agentTimeout: "기다리는 시간을 넘기면 호출을 멈추고 호출받은 Agent 의 실행도 취소합니다.",
     /** Agent 소스를 부르는 방식 (P46 6.7절). wait 는 답을 기다리는 ask_* 하나, task 는 작업 Tool 다섯이다. */
     agentMode: {
-      label: "부르는 방식",
+      label: "호출 방식",
       wait: "답을 기다리기",
       task: "작업으로 맡기기",
       hint: {

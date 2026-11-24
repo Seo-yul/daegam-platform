@@ -60,7 +60,7 @@ TOOLS_UNAVAILABLE = "tools_unavailable"
 # 작업 세션이 아닌 세션에 보낸 것도 같은 코드다
 RUN_SESSION = "run_session"
 RUN_SESSION_MESSAGE = "백그라운드 실행의 세션은 새 말도 다시 생성도 받지 않는다"
-NOT_TASK_SESSION_MESSAGE = "작업 세션이 아니라 작업의 다음 실행을 받지 않는다"
+NOT_TASK_SESSION_MESSAGE = "작업 세션이 아닌 세션은 작업의 다음 실행을 받지 않는다"
 TOOLS_UNAVAILABLE_MESSAGE = "Tool 을 아직 준비하지 못했다"
 # 곧 받을 수 있는데 지금은 거절한 요청에 다는 Retry-After 다. 준비되지 않은 런타임(T18·T22, 배경
 # 다시 시도가 따로 돈다)과 drain 표시가 선 인스턴스(P44 7절, 플랫폼이 깨운다)가 같이 쓴다

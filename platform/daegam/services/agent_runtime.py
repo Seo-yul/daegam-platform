@@ -171,6 +171,13 @@ def last_answer(items: list[dict[str, Any]]) -> str | None:
     return turn_answer(items, end)[1] if end is not None else None
 
 
+def ends_undecided(items: list[dict[str, Any]]) -> bool:
+    """전사가 아직 결정되지 않은 인터럽트로 끝나는가. 그 세션은 결정이 올 때까지 새 턴을 받지
+    않는다."""
+    last = items[-1] if items else {}
+    return last.get("kind") == "interrupt" and not last.get("resolved")
+
+
 def _with_choices(body: dict[str, Any], choices: list[dict[str, str]] | None) -> dict[str, Any]:
     """기억한 승인 선택을 실은 본문이다(P43 5절). 실을 것이 있을 때만 칸을 둔다. `tool_safety` 를
     모르는 옛 이미지는 모르는 칸을 버린다."""

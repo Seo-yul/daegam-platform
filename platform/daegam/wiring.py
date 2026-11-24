@@ -477,6 +477,7 @@ class Services:
     turn_grants: TurnGrantService
     # 다른 Agent 를 Tool 로 부르는 호출 경로의 판단 (P46 6.3절)
     agent_calls: AgentCallRuns
+    # 다른 Agent 에게 맡긴 작업의 경로의 판단 (P46 6.7절)
     agent_tasks: AgentTaskRuns
     # 백그라운드 실행의 스케줄과 기록 (P41)
     run_service: RunService

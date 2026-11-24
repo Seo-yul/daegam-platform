@@ -353,6 +353,7 @@ class MongoAgentRunStore:
         `for_session` 처럼 가장 늦게 만든 것이다."""
         if not session_ids:
             return {}
+        # 만든 차례로 읽어 같은 세션의 늦은 기록이 앞의 것을 덮는다
         cursor = self.coll.find(
             {"tenant": tenant, "agent_id": agent_id, "session_id": {"$in": session_ids}}
         ).sort("created_at", ASCENDING)

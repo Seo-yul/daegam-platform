@@ -303,7 +303,7 @@ export const canvas: Messages["canvas"] = {
       task: "Hand off as a task",
       hint: {
         wait: "This turn waits until the called Agent answers.",
-        task: "Hands the work off, and this turn goes on at once. The model checks the task's status and answer when the person asks. Nobody is notified when a task ends.",
+        task: "This turn hands the work off and continues at once. The model checks the task's status and answer when the person asks. Nobody is notified when a task ends.",
       },
     },
     agentTaskMarks: "Starting, updating and cancelling a task count as writes; checking and listing count as reads. The answer a check brings back is marked as outside content.",

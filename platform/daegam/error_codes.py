@@ -53,6 +53,8 @@ STATUS: dict[str, int] = {
     "agent_sleep_ineligible": 409,
     # 맡긴 작업의 끝난 실행이 있는데 그 답을 아직 읽지 못했다 (P46 6.7절). Retry-After 를 단다
     "agent_task_answer_unread": 503,
+    # 맡긴 작업이 아무도 결정하지 않은 승인에서 끝나 다음 실행을 받지 않는다 (P46 6.7절)
+    "agent_task_closed": 409,
     # 맡긴 작업이 승인을 기다려 다음 실행을 받지 않는다 (P46 6.7절)
     "agent_task_waiting": 409,
     # 파드를 다시 띄우는 중이다. Retry-After 뒤에 다시 보낸다 (P44 8절)

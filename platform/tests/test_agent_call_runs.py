@@ -94,6 +94,11 @@ class CallAgent(FakeAgent):
 
     preview: Any = None
     deployed_revision: int | None = 3
+    # 이미지가 알린 기능 이름
+    features: tuple[str, ...] = ()
+
+    def image_reports(self, name: str) -> bool:
+        return name in self.features
 
     @property
     def acting_id(self) -> str:

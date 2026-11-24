@@ -61,6 +61,7 @@ from daegam.services.agent_graph import (
 from daegam.services.agent_publish import CALLS_DISABLED, AgentPublishing
 from daegam.services.agent_runtime import (
     AgentRuntimeProxy,
+    ends_undecided,
     last_answer,
     serves_turns,
     transcript_items,
@@ -200,6 +201,20 @@ def _refused(status: int, code: str, detail: str, **extra: Any) -> AgentCallErro
 
 def not_found() -> AgentCallError:
     return _refused(404, "not_found", "no such agent call")
+
+
+def _fanout() -> AgentCallError:
+    return _refused(
+        429,
+        CALL_FANOUT,
+        f"a turn starts at most {MAX_CALLS_PER_TURN} agent calls",
+        max=MAX_CALLS_PER_TURN,
+    )
+
+
+def _turn_key(caller: CallingTurn) -> str:
+    """위임 없는 턴의 호출을 세는 키다."""
+    return f"{caller.agent.id}:{caller.session_id}:{caller.turn_id}"
 
 
 def _busy(detail: str) -> AgentCallError:
@@ -461,12 +476,7 @@ class AgentCallRuns:
         if cap is not None:
             raise cap
         if not await self._count_call(caller, now):
-            raise _refused(
-                429,
-                CALL_FANOUT,
-                f"a turn starts at most {MAX_CALLS_PER_TURN} agent calls",
-                max=MAX_CALLS_PER_TURN,
-            )
+            raise _fanout()
         size, digest = input_digest(message)
         run = new_run(
             tenant=called.tenant,
@@ -568,8 +578,20 @@ class AgentCallRuns:
     async def _count_call(self, caller: CallingTurn, now: datetime) -> bool:
         if caller.grant is not None:
             return await self.grants.count_call(caller.grant.id, limit=MAX_CALLS_PER_TURN, now=now)
-        key = f"{caller.agent.id}:{caller.session_id}:{caller.turn_id}"
-        return await self.grants.count_turn_call(key, limit=MAX_CALLS_PER_TURN, now=now)
+        return await self.grants.count_turn_call(
+            _turn_key(caller), limit=MAX_CALLS_PER_TURN, now=now
+        )
+
+    async def require_call_left(self, caller: CallingTurn) -> None:
+        """이 턴이 호출을 더 시작할 수 있는가. 세지 않고 읽기만 한다. 실행을 시작하지 않는 쓰기(작업
+        만들기)가 호출 수를 다 쓴 턴에서 기록을 남기지 않게 한다. 위임의 수는 이 요청이 막 읽은
+        것이다."""
+        if caller.grant is not None:
+            calls = caller.grant.calls
+        else:
+            calls = await self.grants.turn_calls(_turn_key(caller))
+        if calls >= MAX_CALLS_PER_TURN:
+            raise _fanout()
 
     # -- 시작과 답 (6.3절) ---------------------------------------------------------------------
 
@@ -616,6 +638,16 @@ class AgentCallRuns:
 
     async def answer_text(self, called: Agent | None, run: AgentRun) -> str | None:
         """실행 세션의 전사에서 읽은 답이다. 읽지 못했으면 None 이다."""
+        items = await self._transcript(called, run)
+        return last_answer(items) if items is not None else None
+
+    async def ends_undecided(self, called: Agent | None, run: AgentRun) -> bool:
+        """실행 세션의 전사가 결정되지 않은 인터럽트로 끝나는가. 읽지 못했으면 거짓이다."""
+        items = await self._transcript(called, run)
+        return items is not None and ends_undecided(items)
+
+    async def _transcript(self, called: Agent | None, run: AgentRun) -> list[dict[str, Any]] | None:
+        """실행 세션의 전사 항목이다. 읽지 못했으면 None 이다."""
         if called is None or run.session_id is None:
             return None
         try:
@@ -623,9 +655,9 @@ class AgentCallRuns:
                 called, run.session_id, user_sub=run.acts_as.sub, approver=True, view="progress"
             )
         except Exception as e:  # noqa: BLE001 - 다음 묻기가 다시 읽는다
-            logger.warning("run %s: its answer was not read: %s", run.id, type(e).__name__)
+            logger.warning("run %s: its session was not read: %s", run.id, type(e).__name__)
             return None
-        return last_answer(transcript_items(body)) if status == 200 else None
+        return transcript_items(body) if status == 200 else None
 
 
 def _attached_items(agent: Agent) -> list[str]:
@@ -640,6 +672,7 @@ def _unavailable(detail: str, **extra: Any) -> AgentCallError:
 __all__ = [
     "CALLER_ENDED",
     "CALLER_TIMEOUT",
+    "ENDED_WITHOUT_ANSWER",
     "MAX_CALLS_PER_TURN",
     "MAX_CHAIN",
     "REQUEST_WAIT_SECONDS",

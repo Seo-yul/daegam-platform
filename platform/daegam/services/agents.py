@@ -1923,7 +1923,7 @@ class AgentService(ExposureValidationMixin, AgentRollbackMixin, BaseInstanceServ
         check, warnings = agent_features.deploy_check(doc, effective.images.agent_image, wanted)
         for feature in (agent_features.AGENT_TOOLS, agent_features.AGENT_TASKS):
             if check is not None and feature in check.missing:
-                raise _agent_tools_missing(feature)
+                raise _call_feature_missing(feature)
         if check is not None and check.missing:
             raise _image_too_old(check.missing)
         return warnings
@@ -1965,14 +1965,14 @@ def _redeploy_required(refs: list[str]) -> AgentError:
     )
 
 
-def _agent_tools_missing(feature: str) -> AgentError:
+def _call_feature_missing(feature: str) -> AgentError:
     """다른 Agent 를 Tool 로 부르거나 작업을 맡기지 못하는 이미지에 그런 그래프를 배포할 때의 409
     다 (P46 6.2·6.7절)."""
     return AgentError(
         409,
         RUNTIME_FEATURE_MISSING,
-        f"the runtime image has not reported the {feature!r} feature, so it cannot call other "
-        "agents as tools that way",
+        f"the runtime image has not reported the {feature!r} feature that this graph's agent "
+        "sources need; redeploy on a newer image",
         feature=feature,
     )
 

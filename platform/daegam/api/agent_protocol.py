@@ -23,7 +23,7 @@ from fastapi import APIRouter, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from daegam.api.agent_calls import AGENT_CALL_BODY_LIMIT, call_credentials
-from daegam.services.agent_task_runs import AgentTaskRuns
+from daegam.services.agent_task_runs import CANCEL_RUN, AgentTaskRuns
 from daegam.urls import AGENT_PROTOCOL_PATHS, AGENT_PROTOCOL_ROUTES
 
 router = APIRouter(include_in_schema=False)
@@ -60,7 +60,8 @@ def _tasks(request: Request) -> AgentTaskRuns:
 async def create_thread(request: Request, agent_id: str) -> dict[str, Any]:
     """`{thread_id}`. 거절은 호출의 시작과 같다(401, 403 acts_as_unavailable, 409
     agent_calls_disabled·agent_source_unpublished·agent_call_cycle·agent_call_too_deep, 410
-    turn_grant_ended)."""
+    turn_grant_ended). 호출받는 Agent 의 이미지가 작업을 모르면 409 runtime_feature_missing,
+    호출 수를 다 쓴 턴이면 429 agent_call_fanout 이다."""
     return await _tasks(request).create_thread(agent_id, call_credentials(request))
 
 
@@ -76,8 +77,8 @@ async def create_run(
     request: Request, agent_id: str, thread_id: str, body: RunCreateBody
 ) -> dict[str, Any]:
     """`{run_id, thread_id, status}`. 실행의 끝을 기다리지 않는다. `assistant_id` 가 경로의 Agent 가
-    아니면 404, 작업이 승인을 기다리면 409 agent_task_waiting 이고 그 밖의 거절은 호출의 시작과
-    같다."""
+    아니면 404, 작업이 승인을 기다리면 409 agent_task_waiting, 그 승인이 결정 없이 끝났으면 409
+    agent_task_closed 이고 그 밖의 거절은 작업 만들기와 호출의 시작과 같다."""
     return await _tasks(request).create_run(
         agent_id,
         thread_id,
@@ -93,8 +94,8 @@ async def get_run(request: Request, agent_id: str, thread_id: str, run_id: str) 
     return await _tasks(request).get_run(agent_id, thread_id, run_id, call_credentials(request))
 
 
-@router.post(AGENT_PROTOCOL_ROUTES["cancel_run"], status_code=202)
+@router.post(AGENT_PROTOCOL_ROUTES["cancel_run"], status_code=CANCEL_RUN.ok_status)
 async def cancel_run(request: Request, agent_id: str, thread_id: str, run_id: str) -> Response:
     """본문 없는 202 다. 이미 끝난 실행은 그대로 둔다."""
     await _tasks(request).cancel_run(agent_id, thread_id, run_id, call_credentials(request))
-    return Response(status_code=202)
+    return Response(status_code=CANCEL_RUN.ok_status)

@@ -16,6 +16,7 @@ from fastapi import HTTPException
 from daegam.config import Settings
 from daegam.services import agent_call_runs
 from daegam.services.agent_call_runs import MAX_CALLS_PER_TURN, CallCredentials
+from daegam.services.agent_features import AGENT_TASKS
 from daegam.services.agent_task_runs import (
     CALLER_CANCELLED,
     CALLER_UPDATED,
@@ -62,6 +63,8 @@ class TaskRig(Rig):
         threads: MongoAgentTaskThreadStore,
     ) -> None:
         super().__init__(settings, grants, runs)
+        # 호출받는 Agent 의 이미지가 작업 세션을 안다
+        self.agents.by_id[CALLED].features = (AGENT_TASKS,)
         self.threads = threads
         self.tasks = AgentTaskRuns(self.calls, threads)
 
@@ -313,6 +316,12 @@ def test_each_start_counts_against_the_calling_turn_and_the_chain(settings):
         with pytest.raises(REFUSALS) as e:
             await rig.run(grant, thread_id)
         assert _refused(e) == (429, "agent_call_fanout")
+        # 호출 수를 다 쓴 턴은 작업 기록도 남기지 못한다
+        threads = await rig.threads.coll.count_documents({})
+        with pytest.raises(REFUSALS) as e:
+            await rig.thread(grant)
+        assert _refused(e) == (429, "agent_call_fanout")
+        assert await rig.threads.coll.count_documents({}) == threads
         # 사슬에 호출받는 Agent 가 이미 있는 턴은 작업도 만들지 못한다
         calling_run = new_run(
             tenant=TENANT,
@@ -390,6 +399,64 @@ def test_a_task_waiting_for_an_approval_takes_no_new_run(settings):
     _go(settings, body)
 
 
+def test_a_task_whose_approval_ended_undecided_takes_no_new_run(settings):
+    """승인을 기다리던 실행을 취소하면 런타임의 세션은 승인 대기로 남는다. 다음 실행은 기록도 호출
+    수도 남기지 않고 거절된다."""
+
+    async def body(rig: TaskRig) -> None:
+        grant = await rig.grant()
+        thread_id = await rig.thread(grant)
+        waiting = await rig.task_run(thread_id, "waiting_approval")
+        await rig.tasks.cancel_run(CALLED, thread_id, waiting.id, _creds(grant))
+        assert (await rig.stored(waiting.id)).status == "cancelled"
+        assert rig.audit.events[-1].path_params["run_status"] == "cancelled"
+
+        async def pending(agent: Any, session_id: str, **_: Any) -> tuple[int, Any]:
+            items = [{"kind": "user", "text": MESSAGE}, {"kind": "interrupt"}]
+            return 200, {"session": {"running": False}, "transcript": {"items": items}}
+
+        rig.proxy.session = pending  # type: ignore[method-assign]
+        with pytest.raises(REFUSALS) as e:
+            await rig.run(grant, thread_id)
+        assert _refused(e) == (409, "agent_task_closed")
+        assert [r.id for r in await rig.runs.for_thread(TENANT, CALLED, thread_id)] == [waiting.id]
+        counted = await rig.grants.get(grant.id)
+        assert counted is not None and counted.calls == 0 and rig.proxy.calls == []
+
+    _go(settings, body)
+
+
+def test_a_cancelled_run_that_left_no_approval_takes_the_next_run(settings):
+    async def body(rig: TaskRig) -> None:
+        grant = await rig.grant()
+        thread_id = await rig.thread(grant)
+        await rig.task_run(thread_id, "cancelled")
+        answer = await rig.run(grant, thread_id)
+        assert answer["status"] == "running"
+        assert rig.proxy.calls[0]["session_id"] == "s1"
+
+    _go(settings, body)
+
+
+def test_a_called_image_that_takes_no_tasks_refuses_the_routes(settings):
+    """저장과 배포의 확인 뒤에 호출받는 Agent 를 옛 이미지로 다시 배포했다."""
+
+    async def body(rig: TaskRig) -> None:
+        grant = await rig.grant()
+        thread_id = await rig.thread(grant)
+        rig.agents.by_id[CALLED].features = ()
+        with pytest.raises(REFUSALS) as e:
+            await rig.thread(grant)
+        assert _refused(e) == (409, "runtime_feature_missing")
+        with pytest.raises(REFUSALS) as e:
+            await rig.run(grant, thread_id)
+        assert _refused(e) == (409, "runtime_feature_missing")
+        assert await rig.threads.coll.count_documents({}) == 1
+        assert await rig.runs.for_thread(TENANT, CALLED, thread_id) == []
+
+    _go(settings, body)
+
+
 def test_a_session_still_running_its_turn_makes_the_start_retry(settings):
     """앞 턴이 끝났다고 알린 뒤에도 런타임이 그 턴이 돈다고 답하면 작업의 실행은 다시 한다."""
 
@@ -452,6 +519,9 @@ def test_an_ended_run_carries_its_code_and_sentence_in_error(settings):
         assert error_text(done.model_copy(update={"status": "refused"})) == (
             "refused: the run ended as refused"
         )
+        # 승인 대기로 남은 세션이 거절한 실행은 새 작업을 시작하라고 말한다
+        stuck = done.model_copy(update={"status": "failed", "reason": "session_pending"})
+        assert error_text(stuck).endswith("start a new task")
 
     _go(settings, body)
 
