@@ -254,8 +254,9 @@ class AgentCallRuns:
     # -- 경로 셋 -----------------------------------------------------------------------------
 
     async def start(self, called_id: str, creds: CallCredentials, message: str) -> dict[str, Any]:
-        """실행을 시작하고 `REQUEST_WAIT_SECONDS` 안에 그 상태를 답한다. 거절은 실행 기록을 남기지
-        않는다."""
+        """실행을 시작하고 그 상태를 곧바로 답한다. 끝을 기다리는 것은 묻기(`poll`)다. 부른 쪽이
+        실행 id 를 알아야 제 턴이 멈출 때 취소를 보낼 수 있기 때문이다. 깨우는 중인 Agent 만
+        `REQUEST_WAIT_SECONDS` 까지 기다린다. 거절은 실행 기록을 남기지 않는다."""
         ends = self.clock() + REQUEST_WAIT_SECONDS
         seen = _Seen()
 
@@ -265,7 +266,7 @@ class AgentCallRuns:
             run = await self._admit(caller, called, item, creds, message)
             seen.run_id = run.id
             await self._start_inline(run, ends)
-            return await self._settled(called, run, ends)
+            return await self._settled(called, run, self.clock())
 
         return await self._audited(START, called_id, seen, work)
 

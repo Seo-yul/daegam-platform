@@ -75,7 +75,7 @@ def _calls(request: Request) -> AgentCallRuns:
 
 @router.post(AGENT_CALL_ROUTES["start"])
 async def start_agent_call(request: Request, agent_id: str, body: CallStartBody) -> dict[str, Any]:
-    """실행을 시작하고 25초 안에 그 상태를 답한다. 거절은 401, 403 acts_as_unavailable, 409
+    """실행을 시작하고 그 상태를 곧바로 답한다(끝은 묻기가 기다린다). 거절은 401, 403 acts_as_unavailable, 409
     agent_calls_disabled·agent_source_unpublished·agent_call_cycle·agent_call_too_deep·not_deployed,
     410 turn_grant_ended, 413 max_input_chars, 429 agent_call_busy·agent_call_fanout·
     agent_call_rate_limited 다."""

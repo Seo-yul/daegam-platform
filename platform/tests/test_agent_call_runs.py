@@ -496,6 +496,20 @@ def test_an_ended_or_due_grant_and_a_person_without_chat_are_refused(settings, q
 # -- 호출은 실행이다 (6.3절) ----------------------------------------
 
 
+def test_the_start_answers_at_once_with_the_run_id_while_the_run_goes_on(settings):
+    """시작은 실행의 끝을 기다리지 않는다. 부른 쪽은 실행 id 를 받아야 제 턴이 멈출 때 취소를 보낼
+    수 있다."""
+
+    async def body(grants, runs) -> None:
+        rig = Rig(_local(settings), grants, runs)
+        began = time.monotonic()
+        first = await rig.start(await rig.grant(), outside=False)
+        assert first["status"] == "running" and first["run_id"]
+        assert time.monotonic() - began < agent_call_runs.REQUEST_WAIT_SECONDS / 5
+
+    _go(settings, body)
+
+
 def test_a_viewers_call_starts_a_run_as_that_person_and_answers(settings, quick):
     async def body(grants, runs) -> None:
         rig = Rig(_local(settings), grants, runs)
