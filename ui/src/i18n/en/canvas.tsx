@@ -297,6 +297,17 @@ export const canvas: Messages["canvas"] = {
       `This conversation's text goes to the called Agent's LLM provider (${provider}) and follows that Agent's body recording (${recording}).`,
     agentRecording: { on: "on", off: "off" },
     agentTimeout: "Past the wait the call stops and the called Agent's run is cancelled.",
+    agentMode: {
+      label: "How to call",
+      wait: "Wait for the answer",
+      task: "Hand off as a task",
+      hint: {
+        wait: "This turn waits until the called Agent answers.",
+        task: "Hands the work off, and this turn goes on at once. The model checks the task's status and answer when the person asks. Nobody is notified when a task ends.",
+      },
+    },
+    agentTaskMarks: "Starting, updating and cancelling a task count as writes; checking and listing count as reads. The answer a check brings back is marked as outside content.",
+    agentTaskTimeout: "A task is not awaited, so it takes no timeout.",
     timeoutShorter: (tool: string, agent: number, gateway: number): string =>
       `The timeout of ${tool} (${agent} s) is shorter than the Gateway's wait for this Tool (${gateway} s). The Agent cuts slow calls first.`,
   },

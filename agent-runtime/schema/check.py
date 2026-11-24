@@ -86,6 +86,29 @@ AGENT_SOURCE = {
     "description": "Answers research questions.",
     "timeout_seconds": 630,
 }
+# 작업을 맡기는 Agent 소스 하나다. Tool 은 다섯이고 기다리는 시간이 없다
+TASK_TOOLS = [
+    "start_async_task",
+    "check_async_task",
+    "update_async_task",
+    "cancel_async_task",
+    "list_async_tasks",
+]
+TASK_DOC = [
+    ("features", ["agent_tools"]),
+    (
+        "tools",
+        [
+            {
+                **{k: v for k, v in AGENT_SOURCE.items() if k != "timeout_seconds"},
+                "url": "http://platform.daegam-system.svc:8000/api/internal/agent-protocol/ag-research-0001",
+                "allow": TASK_TOOLS,
+                "mode": "task",
+            }
+        ],
+    ),
+    ("main.tools", ["tools-research"]),
+]
 AGENT_DOC = [
     ("features", ["agent_tools"]),
     ("tools", [AGENT_SOURCE]),
@@ -289,6 +312,44 @@ LADDER_CASES: list[tuple[str, str, list[tuple[str, Any]], bool]] = [
         ],
         False,
     ),
+    # 작업을 맡기는 소스는 Tool 다섯을 함께 싣고 기다리는 시간이 없다. 읽는 두 Tool 만 read 에,
+    # 답을 싣지 않는 네 Tool 만 inside 에 적는다
+    ("task_source", MIN, TASK_DOC, True),
+    (
+        "task_source_with_read",
+        MIN,
+        [
+            *TASK_DOC,
+            ("features", ["agent_tools", "tool_safety"]),
+            ("tools.0.inside", [t for t in TASK_TOOLS if t != "check_async_task"]),
+            ("tools.0.read", ["check_async_task", "list_async_tasks"]),
+        ],
+        True,
+    ),
+    (
+        "task_source_answer_marked_inside",
+        MIN,
+        [
+            *TASK_DOC,
+            ("features", ["agent_tools", "tool_safety"]),
+            ("tools.0.inside", ["check_async_task"]),
+        ],
+        False,
+    ),
+    ("task_source_four_tools", MIN, [*TASK_DOC, ("tools.0.allow", TASK_TOOLS[:4])], False),
+    ("task_source_with_timeout", MIN, [*TASK_DOC, ("tools.0.timeout_seconds", 30)], False),
+    ("task_source_unknown_mode", MIN, [*TASK_DOC, ("tools.0.mode", "stream")], False),
+    (
+        "task_source_write_marked_read",
+        MIN,
+        [
+            *TASK_DOC,
+            ("features", ["agent_tools", "tool_safety"]),
+            ("tools.0.read", ["start_async_task"]),
+        ],
+        False,
+    ),
+    ("mcp_source_with_mode", SUP, [("tools.0.mode", "task")], False),
 ]
 
 

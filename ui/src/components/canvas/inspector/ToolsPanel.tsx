@@ -1,7 +1,7 @@
 /**
  * MCP 노드 패널. 소스(Gateway·MCP Server)와 그 소스의 도구 목록에서 허용 도구 체크, 도구별 승인 결정 종류,
  * 타임아웃이다. 소스가 게시한 Agent 면(P46 6.2절) Tool 은 그 항목의 ask_* 하나라 허용 목록과 표시 절 대신 그 Tool 과 호출의
- * 안내를 보인다(./AgentCallNotes.tsx).
+ * 안내를 보인다(./AgentCallNotes.tsx). 부르는 방식을 작업으로 바꾸면(6.7절) 허용 Tool 이 작업 Tool 다섯이 되고 타임아웃이 없다.
  *
  * 검사 뒤에는 바깥 내용 뒤의 승인 규칙(P43)의 표시를 보인다. 바깥 표시(외부 내용을 가져오는 Tool), 승인 기억 켜기, 읽기 전용
  * 표시, 외부 내용 뒤의 승인·거절 배지다(lib/toolSafety.ts, 절과 배지는 ./toolMarks.tsx).
@@ -22,7 +22,7 @@ import { idpDataPlane, useAuthState } from "@/lib/auth";
 import { gatewayToolTimeout } from "@/lib/gateway";
 import { CODE_MODE_TOOL } from "@/lib/hub";
 import { AGENT_TOOL_TIMEOUT_SECONDS } from "@/lib/timeouts";
-import { ORIGIN_SCRIPT, canvasMarkApplies } from "@/lib/toolSafety";
+import { ORIGIN_SCRIPT, TASK_TOOLS, assignsTasks, canvasMarkApplies } from "@/lib/toolSafety";
 
 import { AgentCallNotes } from "./AgentCallNotes";
 import { ResourceLink, Tabs } from "./fields";
@@ -33,6 +33,9 @@ import { sourceChoices, sourcePath, toolNamesOfSource, type InspectorOptions } f
 const SOURCE_RULES_RESET: Partial<ToolsData> = { allow_tools: [], approval: {}, timeouts: {} };
 /** Agent 소스로 바꾸면 더 비우는 칸. 그 소스는 읽기 전용 표시와 바깥 표시를 받지 않는다(서버 `invalid_node_data`). */
 const AGENT_SOURCE_RESET: Partial<ToolsData> = { ...SOURCE_RULES_RESET, read_only: [], outside: {}, rememberable: [] };
+
+/** Agent 소스의 부르는 방식. 저장되는 것은 허용 Tool 이다. wait 는 빈 목록(ask_* 하나), task 는 작업 Tool 다섯이다. */
+type AgentMode = "wait" | "task";
 
 /** 쉼표로 적은 도메인 목록. 공백과 빈 칸은 뺀다. 공개 접미사 같은 규칙은 서버 검사가 본다. */
 function domainList(value: string): string[] {
@@ -80,6 +83,7 @@ export function ToolsPanel({
   // Gateway 가 아직 IdP 토큰만 받는 동안은 Agent 가 agent_oauth 로 부른다는 안내다 (P53b 6.1절)
   const idp = idpDataPlane(useAuthState());
   const isAgent = data.source.kind === AGENT_SOURCE;
+  const isTask = isAgent && assignsTasks(data.allow_tools);
   const sourceHint = data.source.kind === AGENT_SOURCE ? undefined : data.source.kind === "gateway_instance" && idp ? text.sourceHintIdpGateway : text.sourceHint[data.source.kind];
   const [tab, setTab] = useState<"tools" | "approval" | "timeouts">("tools");
   const [extra, setExtra] = useState("");
@@ -105,7 +109,11 @@ export function ToolsPanel({
   const allow = data.allow_tools ?? [];
   // 승인 기억은 이름을 아는 노드에서만 효과가 있다(서버 ChoiceRules). 고른 Tool 이거나, 고른 것이 없으면 검사가 소스의 이름으로 본 Tool 이다
   const namesKnown = (tool: string) => allow.includes(tool) || (!allow.length && effects?.[tool] !== undefined);
-  const names = useMemo(() => [...new Set([...(known ?? []), ...allow, ...Object.keys(data.approval ?? {}), ...Object.keys(data.timeouts ?? {})])], [known, allow, data.approval, data.timeouts]);
+  // 작업을 맡기는 노드의 Tool 은 다섯으로 정해져 있다. 그 밖에는 소스가 내는 이름과 규칙이 댄 이름이다
+  const names = useMemo(
+    () => (isTask ? [...TASK_TOOLS] : [...new Set([...(known ?? []), ...allow, ...Object.keys(data.approval ?? {}), ...Object.keys(data.timeouts ?? {})])]),
+    [isTask, known, allow, data.approval, data.timeouts],
+  );
   // Agent 가 Gateway 보다 먼저 끊는 Tool (P50 7절). 소스가 Gateway 일 때만 그 배포 스냅샷의 백엔드 타임아웃과 맞댄다.
   // 허용 Tool 을 정했으면 그것만 본다(비면 전부다)
   const shorter = useMemo(() => {
@@ -124,6 +132,11 @@ export function ToolsPanel({
 
   function changeKind(kind: ToolsData["source"]["kind"]) {
     update({ source: { kind, id: "" }, ...(kind === AGENT_SOURCE ? AGENT_SOURCE_RESET : SOURCE_RULES_RESET) }, true);
+  }
+
+  /** 부르는 방식을 바꾼다. 앞 방식의 Tool 이름을 대는 규칙은 새 방식에 맞지 않아 비운다. */
+  function changeMode(mode: AgentMode) {
+    update({ allow_tools: mode === "task" ? [...TASK_TOOLS] : [], approval: {}, timeouts: {}, rememberable: [] }, true);
   }
 
   function toggleAllow(tool: string, on: boolean) {
@@ -197,7 +210,15 @@ export function ToolsPanel({
             </Field>
           </div>
           {isAgent ? (
-            <AgentCallNotes tool={known?.[0]} call={options.agentCalls?.[nodeId]} />
+            <>
+              <Field label={text.agentMode.label} htmlFor="tools-agent-mode" hint={text.agentMode.hint[isTask ? "task" : "wait"]}>
+                <Select id="tools-agent-mode" data-testid="tools-agent-mode" value={isTask ? "task" : "wait"} onChange={(e) => changeMode(e.target.value as AgentMode)}>
+                  <option value="wait">{text.agentMode.wait}</option>
+                  <option value="task">{text.agentMode.task}</option>
+                </Select>
+              </Field>
+              <AgentCallNotes tool={known?.[0]} call={options.agentCalls?.[nodeId]} task={isTask} />
+            </>
           ) : (
             <>
               <div className="flex flex-col gap-1">
@@ -311,9 +332,9 @@ export function ToolsPanel({
       {tab === "timeouts" ? (
         <div className="flex flex-col gap-2">
           <p className="text-xs text-muted" data-testid="tools-timeouts-help">
-            {isAgent ? text.agentTimeout : text.timeoutsHelp}
+            {isTask ? text.agentTaskTimeout : isAgent ? text.agentTimeout : text.timeoutsHelp}
           </p>
-          {names.length ? (
+          {isTask ? null : names.length ? (
             names.map((tool) => (
               <div key={tool} className="grid grid-cols-[1fr_7rem] items-center gap-2">
                 <span className="font-mono text-xs text-fg">{tool}</span>

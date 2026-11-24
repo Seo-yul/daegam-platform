@@ -16,10 +16,12 @@
   limits.retries 의 재시도만 건다.
 - 도구는 MCP 도구(tools[] ref)와 knowledge 검색 도구(knowledge[] ref, knowledge.py)를 이어 붙인
   것이다(D32). 기능 agent_tools 의 Agent 소스는 런타임이 만든 Tool 하나를 제 ref 에 둔 소스다
-  (agent_calls.py). 승인 규칙, 바깥 표시, 출처 표가 MCP 소스와 같은 길로 다룬다. 병합 결과에 같은
-  이름이 둘이면 tool_name_conflict 로 막는다. ToolNode 는 같은 이름을 조용히 덮기 때문이다. 소스가
-  그 에이전트의 내장 도구와 같은 이름의 도구를 주면 그 도구를 빼고 경고(builtin_tool_name)한다. 내장
-  이름은 deepagents 가 그 모델로 쌓는 것에서 읽는다. 소스의 목록은 배포 뒤에도 바뀌어서 막지 않는다.
+  (agent_calls.py). 작업을 맡기는 Agent 소스들은 메인에서 Tool 다섯 한 벌을 같이 쓰고 맡긴 작업은
+  그래프 상태에 남는다(agent_task_tools.py). 승인 규칙, 바깥 표시, 출처 표가 MCP 소스와 같은 길로
+  다룬다. 병합 결과에 같은 이름이 둘이면 tool_name_conflict 로 막는다. ToolNode 는 같은 이름을
+  조용히 덮기 때문이다. 소스가 그 에이전트의 내장 도구와 같은 이름의 도구를 주면 그 도구를 빼고
+  경고(builtin_tool_name)한다. 내장 이름은 deepagents 가 그 모델로 쌓는 것에서 읽는다. 소스의
+  목록은 배포 뒤에도 바뀌어서 막지 않는다.
 - 파일 백엔드는 CompositeBackend 이고 기본은 세션 안 StateBackend 다. `/uploads/` 는 첨부 글을
   읽기 전용으로 보이는 라우트이고(uploads.py) 쓰기 막기 규칙(permissions.py)이 메인과
   서브에이전트의 파일 도구에 걸린다. 메인 모델 호출에는 첨부 이미지를 채우는 미들웨어가 우리
@@ -80,6 +82,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph.state import CompiledStateGraph
 
 from runtime.agent_calls import AgentCalls
+from runtime.agent_task_tools import AsyncTaskState, task_tools_by_ref
 from runtime.budget import SessionBudget
 from runtime.config import AgentConfig, ConfigError
 from runtime.guards import (
@@ -442,14 +445,22 @@ def _with_agent_calls(
 ) -> dict[str, list[BaseTool]]:
     """읽어 둔 MCP 도구에 Agent 소스의 Tool 을 제 ref 로 더한 것이다. Agent 소스가 있는데
     AgentCalls 가 없으면 있어야 할 도구가 없는 채 도는 것이므로 ConfigError(agent_calls_missing)
-    다."""
+    다. 작업을 맡기는 소스의 Tool 다섯은 메인만 쓴다. 작업이 메인 세션의 상태에 남기 때문이다.
+    서브에이전트가 그런 소스를 가리키면 ConfigError(agent_task_not_main) 다."""
     if not config.agent_sources:
         return tools_by_ref
     if agent_calls is None:
         raise ConfigError(
             "agent_calls_missing", "tools[] 에 Agent 소스가 있는데 그 Tool 이 만들어지지 않았다"
         )
-    return {**tools_by_ref, **agent_calls.tools_by_ref}
+    task_refs = {source["ref"] for source in config.task_sources}
+    for spec in config.subagents:
+        if task_refs.intersection(spec["tools"]):
+            raise ConfigError(
+                "agent_task_not_main",
+                f"subagents[{spec['name']}] 가 작업을 맡기는 Agent 소스를 가리킨다. 메인만 쓴다",
+            )
+    return {**tools_by_ref, **agent_calls.tools_by_ref, **task_tools_by_ref(config, agent_calls)}
 
 
 def tool_source_table(
@@ -685,6 +696,8 @@ def compile_agent(
                 build_compaction(main_model, backend, main["compaction"]),
                 *main_skills.middleware,
                 build_tool_limit(main["limits"]),
+                # 맡긴 작업을 세션의 상태에 둔다(agent_task_tools.py)
+                *([AsyncTaskState()] if config.task_sources else []),
                 *([SubagentTimeout(sub_timeouts)] if sub_timeouts else []),
                 *main_web.outer,
                 *judge_middleware(judges),

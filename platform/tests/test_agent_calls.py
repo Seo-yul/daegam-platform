@@ -16,6 +16,7 @@ import pytest
 from daegam.services import agent_features, agent_graph
 from daegam.services.agent_calls import (
     CALL_GRACE_SECONDS,
+    TASK_MODE,
     AgentSource,
     Refusal,
     addressed,
@@ -23,19 +24,21 @@ from daegam.services.agent_calls import (
     call_url,
     source_tools,
     status_warnings,
+    task_url,
     tool_name,
 )
-from daegam.services.agent_features import AGENT_TOOLS, TOOL_SAFETY, finish_document
+from daegam.services.agent_features import AGENT_TASKS, AGENT_TOOLS, TOOL_SAFETY, finish_document
 from daegam.services.agent_graph import GraphContext, GraphError
 from daegam.services.agent_tool_safety import safety_issues
 from daegam.services.evaluation.holds import HELD_DECISIONS, hold_writes
 from daegam.services.runs.trigger_rule import unguarded_tools
-from daegam.services.tool_effects import ORIGIN_AGENT, graph_tools
+from daegam.services.tool_effects import ORIGIN_AGENT, TASK_TOOLS, graph_tools
 from daegam.services.tool_pins import apply_pins, pins_of
 from daegam.store.agents import AgentSpec
 from tests.helpers.agent_runtime import DeployedAgent, deployed_agent
 from tests.helpers.agents import (
     CTX_TENANT,
+    add_sub_agent,
     attach,
     compile_spec,
     create_agent,
@@ -341,6 +344,143 @@ def test_agent_sources_are_no_turn_token_targets_but_are_listed_apart():
     assert agent_graph.newer_sources(rev) == {}
 
 
+# -- 작업을 맡기는 노드 ----------------------------------------------------------------------------
+
+TASKS = list(TASK_TOOLS)
+START, CHECK, UPDATE, CANCEL, LIST = TASKS
+
+
+def _tasks_ctx(**over: Any) -> GraphContext:
+    """호출받는 Agent 의 이미지가 `agent_tasks` 를 알린 문맥이다."""
+    return _ctx(_source(takes_tasks=True, **over))
+
+
+def test_a_node_that_picks_the_five_task_tools_assigns_tasks():
+    """맡기고 잇고 취소하는 셋은 쓰기, 상태를 읽는 둘은 읽기이고 다섯 모두 바깥 내용이다. 부르는
+    턴이 기다리지 않으므로 턴 시간의 경고가 없다."""
+    ctx = _tasks_ctx()
+    spec = _calling(allow_tools=TASKS, approval={START: ["approve", "reject"]})
+    node_of(spec, "agent-main")["data"]["turn_timeout_seconds"] = WAIT
+    assert _issues(spec, ctx) == {}
+    rev = AgentSpec.model_validate(spec)
+    tools = graph_tools(rev, ctx.source_tools, tool_safety=True)
+    assert tools.effects[ASK] == {
+        START: "write",
+        CHECK: "read",
+        UPDATE: "write",
+        CANCEL: "write",
+        LIST: "read",
+    }
+    assert tools.origins[ASK] == dict.fromkeys(TASKS, ORIGIN_AGENT)
+    assert _status(_source(takes_tasks=True), spec) == []
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"allow_tools": TASKS[:-1]},
+        {"allow_tools": [*TASKS, TOOL]},
+        {"allow_tools": TASKS, "timeouts": {START: 30}},
+        {"allow_tools": TASKS, "approval": {TOOL: ["approve"]}},
+        {"allow_tools": TASKS, "read_only": [START]},
+        {"allow_tools": TASKS, "outside": {CHECK: False}},
+    ],
+)
+def test_the_task_tools_come_together_with_rules_on_them_alone(data):
+    assert _issues(_calling(**data), _tasks_ctx()) == {"invalid_node_data": "error"}
+
+
+def test_task_tools_connect_only_to_the_main_agent():
+    spec = _calling(allow_tools=TASKS)
+    add_sub_agent(spec, "agent-sub", "helper")
+    attach(spec, "agent-sub", ASK, "tools")
+    found = call_issues(AgentSpec.model_validate(spec), _tasks_ctx())
+    assert [(i.code, i.node_id) for i in found] == [("invalid_node_data", ASK)]
+    assert "main agent" in found[0].message
+
+
+def test_a_called_image_that_takes_no_tasks_refuses_the_node():
+    found = call_issues(AgentSpec.model_validate(_calling(allow_tools=TASKS)), _ctx(_source()))
+    assert [(i.code, i.level, i.data) for i in found] == [
+        ("runtime_feature_missing", "error", {"feature": AGENT_TASKS})
+    ]
+    # 답을 기다리는 노드는 그 능력을 요구하지 않는다
+    assert _issues(_calling(), _ctx(_source())) == {}
+
+
+def test_task_nodes_of_one_agent_share_the_tools_but_no_other_node_may_offer_them():
+    other = _source(takes_tasks=True, agent_id="ag-billing-0001", agent_name="billing")
+    other = replace(other, item_id="hub-billing-0001", tool="ask_billing")
+    ctx = _ctx(_source(takes_tasks=True), other)
+    spec = _calling(allow_tools=TASKS)
+    spec["graph"]["nodes"].append(
+        {
+            "id": "tools-billing",
+            "type": "tools",
+            "data": {"source": {"kind": "agent", "id": other.item_id}, "allow_tools": TASKS},
+        }
+    )
+    attach(spec, "agent-main", "tools-billing", "tools")
+    assert call_issues(AgentSpec.model_validate(spec), ctx) == []
+
+    spec["graph"]["nodes"].append(knowledge_node(tool_name=CHECK))
+    attach(spec, "agent-main", "kb-faq")
+    found = call_issues(AgentSpec.model_validate(spec), ctx)
+    assert {(i.code, i.node_id) for i in found} == {
+        ("duplicate_tool_name", ASK),
+        ("duplicate_tool_name", "tools-billing"),
+    }
+
+
+def test_a_task_node_compiles_to_an_entry_on_the_agent_protocol_path():
+    """항목은 Tool 다섯과 `mode` 를 싣고 주소가 그 Agent 의 Agent Protocol 경로다. 기다리는 시간이
+    없고, 기능 `tool_safety` 가 있으면 읽는 두 Tool 이 `read`, 답을 읽어 오지 않는 넷이 `inside`
+    다."""
+    ctx = _tasks_ctx()
+    spec = _calling(allow_tools=TASKS, approval={START: ["approve", "reject"]})
+    rev = AgentSpec.model_validate(spec)
+    pin = pins_of(rev, ctx.source_tools, ctx.agent_sources)[ASK]
+    assert pin.names == TASKS and pin.call is not None
+    assert pin.effects[CHECK] == "read" and pin.effects[START] == "write"
+
+    assert _compiled(spec, ctx) == {
+        "ref": ASK,
+        "source": {"kind": "agent", "id": CALLED, "name": "research"},
+        "url": f"{PLATFORM}/api/internal/agent-protocol/{CALLED}",
+        "allow": TASKS,
+        "approval": {START: ["approve", "reject"]},
+        "timeouts": {},
+        "description": "Answers research questions.",
+        "mode": TASK_MODE,
+    }
+    assert task_url(PLATFORM + "/", CALLED) == f"{PLATFORM}/api/internal/agent-protocol/{CALLED}"
+
+    document = apply_pins(compile_spec(spec, ctx), rev, ctx.tool_pins, ctx.source_tools)
+    final = finish_document(document, frozenset({AGENT_TOOLS, TOOL_SAFETY}), ctx, rev)
+    entry = next(s for s in final["tools"] if s["ref"] == ASK)
+    assert (entry["inside"], entry["read"]) == ([START, UPDATE, CANCEL, LIST], [CHECK, LIST])
+
+
+def test_a_graph_that_assigns_tasks_requires_the_capability_of_its_own_image_too():
+    doc = agent_doc(spec=_calling(allow_tools=TASKS), tenant=CTX_TENANT)
+    wanted = agent_features.agent_features(doc, doc.current, {})
+    assert {AGENT_TOOLS, AGENT_TASKS} <= wanted.required
+    waits = agent_doc(spec=_calling(), tenant=CTX_TENANT)
+    assert AGENT_TASKS not in agent_features.agent_features(waits, waits.current, {}).wanted
+    # 능력은 문서의 features 에 실리지 않는다
+    document = agent_features.attach_features({}, frozenset({AGENT_TOOLS, AGENT_TASKS}))
+    assert document == {"features": [AGENT_TOOLS]}
+
+
+def test_a_trigger_needs_approval_rules_on_the_task_tools_that_write():
+    ctx = _tasks_ctx()
+    spec = _calling(allow_tools=TASKS)
+    pins = pins_of(AgentSpec.model_validate(spec), ctx.source_tools, ctx.agent_sources)
+    doc = agent_doc(spec=spec, state="deployed", tool_pins=pins)
+    unguarded = {name for name in unguarded_tools(doc) if name.startswith(f"{ASK}/")}
+    assert unguarded == {f"{ASK}/{name}" for name in (START, UPDATE, CANCEL)}
+
+
 # -- 상태 경고 -----------------------------------------------------------------------------------
 
 
@@ -380,6 +520,8 @@ def test_a_status_line_names_its_tools_nodes():
 # 호출을 받는 Agent 와 부르는 Agent 의 런타임이 알리는 이름
 CALLED_FEATURES = "runs,turn_tokens"
 CALLING_FEATURES = "runs,turn_tokens,agent_tools,tool_safety"
+# 맡긴 작업의 세션을 아는 이미지가 알리는 이름
+TASK_FEATURES = f"{CALLED_FEATURES},agent_tasks"
 DESCRIPTION = "Answers billing questions"
 
 
@@ -582,6 +724,31 @@ def test_a_deploy_onto_an_image_that_cannot_call_agents_is_refused(
     r = call_client.post(f"{AG}/{caller['id']}/redeploy", json={})
     assert detail_code(r) == (409, "runtime_feature_missing")
     assert r.json()["detail"]["feature"] == AGENT_TOOLS
+
+
+def test_a_task_node_needs_the_capability_of_both_images(call_client, mongo, fake_clusters):
+    """호출받는 Agent 의 이미지가 `agent_tasks` 를 알리지 않았으면 저장과 배포가 그 노드를 막는다.
+    알린 뒤에는 배포되고, 부르는 Agent 의 이미지도 그 이름을 알려야 문서를 받는다."""
+    called, item = _published(call_client, fake_clusters, mongo)
+    spec = _calling(called.spec(), item["id"], allow_tools=TASKS)
+    assert _codes(_validate(call_client, spec)) == {"runtime_feature_missing": "error"}
+    assert create_agent(call_client, spec, "caller").status_code == 422
+
+    reported = {agent_features.IMAGE_HEADER: IMAGE, agent_features.FEATURES_HEADER: TASK_FEATURES}
+    fetched = call_client.get(f"{called.url}/agent.json", headers={**called.auth, **reported})
+    assert fetched.status_code == 200
+    assert _codes(_validate(call_client, spec)) == {}
+    created = create_agent(call_client, spec, "caller")
+    caller = deploy_agent(call_client, created.json()["id"])
+    assert caller.status_code == 201, caller.text
+
+    old = _agent_json(call_client, called.fake, caller.json())
+    assert detail_code(old) == (409, "runtime_image_too_old")
+    taken = _agent_json(call_client, called.fake, caller.json(), f"{CALLING_FEATURES},agent_tasks")
+    entry = next(s for s in taken.json()["tools"] if s["ref"] == ASK)
+    assert (entry["mode"], entry["allow"], entry["read"]) == (TASK_MODE, TASKS, [CHECK, LIST])
+    assert entry["url"].endswith(f"/api/internal/agent-protocol/{called.id}")
+    assert AGENT_TASKS not in taken.json()["features"]
 
 
 def test_the_save_warns_when_the_called_agent_calls_back(call_client, mongo, fake_clusters):

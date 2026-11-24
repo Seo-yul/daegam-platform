@@ -34,6 +34,8 @@ DEFAULT_CONFIG_PATH = "/config/agent.json"
 ENV_CONFIG_PATH = "DAEGAM_AGENT_CONFIG"
 AGENT_SOURCE_KIND = "agent"
 """다른 Agent 를 Tool 로 부르는 소스의 `tools[].source.kind` 다(기능 agent_tools)."""
+AGENT_TASK_MODE = "task"
+"""Agent 소스가 답을 기다리지 않고 작업을 맡기는 소스일 때의 `tools[].mode` 다."""
 KNOWLEDGE_VERSIONS = ("2", "3")
 """knowledge 키 셋을 가진 schema_version 이다. "1" 에는 그 키가 없다(D32, D34 의 사다리)."""
 
@@ -51,7 +53,7 @@ class ConfigError(Exception):
         runtime_image_too_old · web_guard_unpinned_source
     모델(models.py): provider_key_missing · unknown_provider_kind · harness_key
     컴파일(compile.py): harness_profile_not_applied · tool_name_conflict · knowledge_missing ·
-        agent_calls_missing
+        agent_calls_missing · agent_task_not_main
         (한 에이전트의 두 웹 소스가 같은 Tool 이름을 주는 것도 tool_name_conflict 다)
     가드레일(guards.py): guardrail_pattern_invalid · guardrail_rule_unknown ·
         guardrail_rule_position
@@ -231,6 +233,17 @@ class AgentConfig:
         """tools[] 가운데 Agent 소스다. 목록을 읽지 않고 항목으로 Tool 을 만든다(agent_calls.py).
         기능 agent_tools 가 없는 문서에는 없다(스키마가 막는다)."""
         return [t for t in self.tools if t["source"]["kind"] == AGENT_SOURCE_KIND]
+
+    @property
+    def ask_sources(self) -> list[dict[str, Any]]:
+        """Agent 소스 가운데 답을 기다리는 호출이다. 소스마다 Tool 하나(`ask_*`)다."""
+        return [t for t in self.agent_sources if t.get("mode") != AGENT_TASK_MODE]
+
+    @property
+    def task_sources(self) -> list[dict[str, Any]]:
+        """Agent 소스 가운데 작업을 맡기는 것이다. 모두가 작업 Tool 다섯 한 벌을 같이 쓴다
+        (agent_task_tools.py)."""
+        return [t for t in self.agent_sources if t.get("mode") == AGENT_TASK_MODE]
 
     @property
     def knowledge(self) -> list[dict[str, Any]]:

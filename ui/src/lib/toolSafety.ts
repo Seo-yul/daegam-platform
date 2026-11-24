@@ -26,6 +26,21 @@ export const ORIGIN_SCRIPT: ToolOrigin = "script";
 export const ORIGIN_AGENT: ToolOrigin = "agent";
 
 /**
+ * 게시한 Agent 에게 작업을 맡기는 tools 노드의 Tool 다섯 (P46 6.7절). 노드가 이 다섯을 허용 Tool 로 두면 답을 기다리지 않고 작업을
+ * 맡긴다. 서버 `tool_effects.TASK_TOOLS` 와 같은 이름이다.
+ */
+export const TASK_TOOLS = ["start_async_task", "check_async_task", "update_async_task", "cancel_async_task", "list_async_tasks"] as const;
+/** 작업 Tool 가운데 상태와 답을 읽기만 하는 것. 서버 `TASK_READ_TOOLS`. */
+export const TASK_READ_TOOLS: ReadonlySet<string> = new Set(["check_async_task", "list_async_tasks"]);
+/** 작업 Tool 가운데 호출받은 Agent 의 답을 가져오는 것. 이 결과만 바깥 내용이다. 서버 `TASK_ANSWER_TOOL`. */
+export const TASK_ANSWER_TOOL = "check_async_task";
+
+/** Agent 소스의 tools 노드가 작업을 맡기는 노드인가. 허용 Tool 에 작업 Tool 이 있으면 그렇다(서버 `assigns_tasks`). */
+export function assignsTasks(allowTools: readonly string[] | undefined): boolean {
+  return (allowTools ?? []).some((tool) => (TASK_TOOLS as readonly string[]).includes(tool));
+}
+
+/**
  * 캔버스의 읽기 전용 표시가 효과를 내는 Tool 인가. 서버가 읽기 전용 여부를 알려 주지 않는 Tool 가운데 서버나 허브 항목의 표시가 서지 않는
  * Tool 만이다. marked 는 검사의 `tool_marked` 에 그 이름이 있는가다(플랫폼 `SourceTools.canvas_mark_counts`).
  */

@@ -28,6 +28,14 @@ tools 노드의 소스 종류 `agent` 는 허브의 `agent` 항목 하나를 가
   `agent_source_not_serving`, `agent_call_timeout_short`, `agent_calls_disabled` 를 낸다
   (`status_warnings`).
 
+- **작업을 맡기는 노드 (6.7절).** 노드가 작업 Tool 다섯(`tool_effects.TASK_TOOLS`)을 고르면 답을
+  기다리지 않고 작업을 맡긴다. 다섯을 함께 골라야 하고 `ask_*` 와 섞지 못한다. 작업은 부르는
+  세션의 상태에 남으므로 메인 에이전트에만 붙이고, 호출받는 Agent 의 이미지가 `agent_tasks` 를
+  알려야 한다(`runtime_feature_missing`). 메인에 붙은 그런 노드들은 Tool 다섯 한 벌을 같이 쓰므로
+  서로 이름이 겹치는 것은 오류가 아니다. 기다리는 시간이 없어 `timeouts` 를 받지 않고
+  `agent_call_timeout_short` 도 내지 않는다. 문서의 항목은 `mode` 가 `task` 이고 `url` 이 그 Agent
+  의 Agent Protocol 경로다.
+
 Tool 의 효과와 바깥 표시는 `tool_effects.agent_source` 와 `agent_tool_safety` 가 정한다.
 """
 
@@ -40,6 +48,7 @@ from typing import Any, NamedTuple
 from daegam.auth.hub_access import can
 from daegam.auth.principal import Principal
 from daegam.k8s.templates.mcpserver import api_base
+from daegam.services.agent_features import AGENT_TASKS, RUNTIME_FEATURE_MISSING
 from daegam.services.agent_graph import (
     AGENT_SOURCE,
     Analysis,
@@ -55,9 +64,11 @@ from daegam.services.agent_publish import CALLS_DISABLED, RUNS_UNMET, AgentPubli
 from daegam.services.agent_runtime import serves_turns
 from daegam.services.hub import HubService
 from daegam.services.tool_effects import (
+    TASK_TOOLS,
     UNKNOWN_SOURCE,
     SourceTools,
     agent_source,
+    assigns_tasks,
     node_names,
     tools_nodes,
 )
@@ -65,13 +76,15 @@ from daegam.services.tool_rules import coded_warning
 from daegam.services.toolnames import RESERVED_TOOL_NAMES
 from daegam.store.agents import Agent, AgentCallPin, AgentSpec, MongoAgentStore, ToolPin
 from daegam.store.hub import AGENT_KIND, HubItem
-from daegam.urls import AGENT_CALL_PATH
+from daegam.urls import AGENT_CALL_PATH, AGENT_PROTOCOL_PATH
 
 # Tool 이름의 머리다. 뒤에 항목 이름이 붙는다
 TOOL_PREFIX = "ask_"
 # 호출 하나가 호출받는 Agent 의 턴 시간보다 더 기다리는 시간(초)이다. 실행을 시작하고 답을 읽어
 # 오는 데 든다
 CALL_GRACE_SECONDS = 30
+# 작업을 맡기는 소스의 문서 항목이 싣는 `mode` 다. 답을 기다리는 소스의 항목에는 그 칸이 없다
+TASK_MODE = "task"
 
 SOURCE_UNPUBLISHED = "agent_source_unpublished"
 SOURCE_NO_CONSUME = "agent_source_no_consume"
@@ -104,6 +117,12 @@ def call_url(platform_url: str, agent_id: str) -> str:
     return api_base(platform_url) + AGENT_CALL_PATH.format(agent_id=agent_id)
 
 
+def task_url(platform_url: str, agent_id: str) -> str:
+    """부르는 파드가 그 Agent 에게 작업을 맡기는 플랫폼 주소다. 그 아래에 Agent Protocol 의 경로가
+    있다."""
+    return api_base(platform_url) + AGENT_PROTOCOL_PATH.format(agent_id=agent_id)
+
+
 class Refusal(NamedTuple):
     """저장하는 사람이 그 항목을 Tool 로 쓸 수 없는 까닭이다."""
 
@@ -117,8 +136,8 @@ class AgentSource:
     배포가 그 코드로 막는다. tool 부터 record_bodies 까지는 항목과 호출받는 Agent 를 읽었을 때만
     차고, state 는 그 Agent 의 state 다. timeout_seconds 는 호출 하나가 답을 기다리는 시간이다.
     provider 와 record_bodies 는 부르는 대화의 글이 가는 곳이라 캔버스가 보인다. cycle 은 그 Agent
-    가 저장하는 Agent 를 다시 부르는가다. platform_url 은 컴파일하는 파드가 플랫폼을 부르는
-    주소이고 컴파일 문맥에서만 찬다."""
+    가 저장하는 Agent 를 다시 부르는가다. takes_tasks 는 그 Agent 의 이미지가 맡긴 작업의 세션을
+    아는가다. platform_url 은 컴파일하는 파드가 플랫폼을 부르는 주소이고 컴파일 문맥에서만 찬다."""
 
     item_id: str
     refusal: Refusal | None = None
@@ -131,6 +150,7 @@ class AgentSource:
     provider: str = ""
     record_bodies: bool = False
     cycle: bool = False
+    takes_tasks: bool = False
     platform_url: str = ""
 
     def pin(self) -> AgentCallPin | None:
@@ -146,22 +166,30 @@ class AgentSource:
 
     def tool_doc(self, ref: str, data: ToolsData, pin: ToolPin | None) -> dict[str, Any]:
         """agent.json 의 `tools[]` 항목이다. 배포 때의 핀을 따르고, 핀이 없으면 지금 읽은 것이다.
-        둘 다 없으면 `GraphError` 다. 승인 규칙은 제 Tool 의 것만 싣는다."""
+        둘 다 없으면 `GraphError` 다. 승인 규칙은 제 Tool 의 것만 싣는다. 작업을 맡기는 노드의
+        항목은 Tool 다섯과 `mode` 를 싣고 기다리는 시간이 없다."""
         call, tool = self.pin(), self.tool
         if pin is not None and pin.call is not None and pin.names:
             call, tool = pin.call, pin.names[0]
         if call is None:
             code, message = self.refusal or _unpublished(self.item_id)
             raise GraphError([Issue(code, f"tools node {ref!r}: {message}", node_id=ref)])
-        wait = call.timeout_seconds
-        return {
+        task = assigns_tasks(data)
+        own = TASK_TOOLS if task else (tool,)
+        entry = {
             "ref": ref,
             "source": {"kind": AGENT_SOURCE, "id": call.agent_id, "name": call.agent_name},
-            "url": call_url(self.platform_url, call.agent_id),
-            "allow": [tool],
-            "approval": {t: list(d) for t, d in data.approval.items() if t == tool},
+            "allow": list(own),
+            "approval": {t: list(d) for t, d in data.approval.items() if t in own},
             "timeouts": {},
             "description": call.description,
+        }
+        if task:
+            return {**entry, "url": task_url(self.platform_url, call.agent_id), "mode": TASK_MODE}
+        wait = call.timeout_seconds
+        return {
+            **entry,
+            "url": call_url(self.platform_url, call.agent_id),
             "timeout_seconds": min(wait, data.timeouts.get(tool, wait)),
         }
 
@@ -219,37 +247,87 @@ def _waits_too_long(source: AgentSource, turn_timeout: int | None) -> bool:
     return turn_timeout is not None and turn_timeout <= source.timeout_seconds
 
 
-def _stray_rules(data: ToolsData, tool: str) -> list[str]:
-    """노드의 규칙 가운데 그 노드가 받지 않는 것(`칸: 이름`)이다. 고른 Tool, 승인, 타임아웃, 승인
-    기억은 제 Tool 만 대고, 읽기 전용 표시와 바깥 표시는 어느 이름도 대지 못한다."""
+def _stray_rules(data: ToolsData, own: Iterable[str], *, waits: bool) -> list[str]:
+    """노드의 규칙 가운데 그 노드가 받지 않는 것(`칸: 이름`)이다. 고른 Tool, 승인, 승인 기억은 제
+    Tool(own)만 대고, 읽기 전용 표시와 바깥 표시는 어느 이름도 대지 못한다. 타임아웃은 답을
+    기다리는 노드(waits)만 제 Tool 에 건다."""
     named = {
         "allow_tools": data.allow_tools,
         "approval": data.approval,
-        "timeouts": data.timeouts,
         "rememberable": data.rememberable,
+        **({"timeouts": data.timeouts} if waits else {}),
     }
-    fixed = {"read_only": data.read_only, "outside": data.outside}
-    stray = [f"{key}: {name}" for key, names in named.items() for name in names if name != tool]
+    fixed = {
+        "read_only": data.read_only,
+        "outside": data.outside,
+        **({} if waits else {"timeouts": data.timeouts}),
+    }
+    mine = set(own)
+    stray = [f"{key}: {name}" for key, names in named.items() for name in names if name not in mine]
     return stray + [f"{key}: {name}" for key, names in fixed.items() for name in names]
 
 
+def _task_issues(node_id: str, data: ToolsData, source: AgentSource, main: bool) -> list[Issue]:
+    """작업을 맡기는 노드에만 있는 오류다(모듈 머리)."""
+    where = f"tools node {node_id!r}"
+    out: list[Issue] = []
+    missing = [name for name in TASK_TOOLS if name not in data.allow_tools]
+    if missing:
+        out.append(
+            Issue(
+                "invalid_node_data",
+                f"{where}: the task tools come together; add {', '.join(missing)}",
+                node_id=node_id,
+            )
+        )
+    if not main:
+        out.append(
+            Issue(
+                "invalid_node_data",
+                f"{where}: task tools connect only to the main agent, whose session keeps the "
+                "tasks",
+                node_id=node_id,
+            )
+        )
+    if not source.takes_tasks:
+        out.append(
+            Issue(
+                RUNTIME_FEATURE_MISSING,
+                f"{where}: the runtime image of agent {source.agent_name!r} has not reported "
+                f"the {AGENT_TASKS!r} capability, so it takes no tasks; redeploy that agent",
+                node_id=node_id,
+                data={"feature": AGENT_TASKS},
+            )
+        )
+    return out
+
+
+def _own_tools(data: ToolsData, source: AgentSource) -> tuple[str, ...]:
+    """노드가 내는 Tool 이다. 작업을 맡기는 노드는 다섯, 답을 기다리는 노드는 `ask_*` 하나다."""
+    return TASK_TOOLS if assigns_tasks(data) else (source.tool,)
+
+
 def _node_issues(
-    node_id: str, data: ToolsData, source: AgentSource, turn_timeout: int | None
+    node_id: str, data: ToolsData, source: AgentSource, turn_timeout: int | None, *, main: bool
 ) -> list[Issue]:
+    """노드 하나의 이슈다. main 은 그 노드가 메인이 아닌 에이전트에 붙지 않았는가다."""
     where = f"tools node {node_id!r}"
     if source.refusal is not None:
         return [Issue(source.refusal.code, f"{where}: {source.refusal.message}", node_id=node_id)]
     out: list[Issue] = []
-    stray = _stray_rules(data, source.tool)
+    waits = not assigns_tasks(data)
+    stray = _stray_rules(data, _own_tools(data, source), waits=waits)
     if stray:
         out.append(
             Issue(
                 "invalid_node_data",
-                f"{where}: an agent source offers only the tool {source.tool!r}, always a write "
-                f"with outside content; remove {', '.join(stray)}",
+                f"{where}: an agent source offers the tool {source.tool!r} or the five task "
+                f"tools, with fixed effects and outside content; remove {', '.join(stray)}",
                 node_id=node_id,
             )
         )
+    if not waits:
+        out.extend(_task_issues(node_id, data, source, main))
     if source.tool in RESERVED_TOOL_NAMES:
         out.append(
             Issue(
@@ -268,7 +346,7 @@ def _node_issues(
                 node_id=node_id,
             )
         )
-    if _waits_too_long(source, turn_timeout):
+    if waits and _waits_too_long(source, turn_timeout):
         out.append(
             Issue(
                 CALL_TIMEOUT_SHORT,
@@ -294,15 +372,25 @@ def _offered(a: Analysis, ctx: GraphContext, agent_id: str) -> list[tuple[str, s
     return out
 
 
-def _name_issues(a: Analysis, ctx: GraphContext, calls: Mapping[str, str]) -> list[Issue]:
+def _name_issues(
+    a: Analysis, ctx: GraphContext, calls: Mapping[str, tuple[str, ...]]
+) -> list[Issue]:
     """같은 에이전트에 붙은 다른 노드가 Agent 소스의 Tool 이름을 내면 런타임에서 하나가 다른 하나를
-    덮으므로 `duplicate_tool_name` 이다. calls 는 Agent 소스 노드 id → 그 Tool 이름이다."""
+    덮으므로 `duplicate_tool_name` 이다. calls 는 Agent 소스 노드 id → 그 노드의 Tool 이름이다.
+    작업을 맡기는 노드끼리는 Tool 다섯 한 벌을 같이 쓰므로 겹침이 아니다."""
     found: dict[str, Issue] = {}
     for agent_id in a.of_type("agent"):
         offered = _offered(a, ctx, agent_id)
         for node_id, name in offered:
-            others = sorted({n for n, other in offered if other == name and n != node_id})
-            if calls.get(node_id) != name or not others:
+            shares = name in TASK_TOOLS
+            others = sorted(
+                {
+                    n
+                    for n, other in offered
+                    if other == name and n != node_id and not (shares and name in calls.get(n, ()))
+                }
+            )
+            if name not in calls.get(node_id, ()) or not others:
                 continue
             found.setdefault(
                 node_id,
@@ -324,14 +412,21 @@ def call_issues(spec: AgentSpec, ctx: GraphContext, *, enabled: bool = True) -> 
     if not nodes:
         return []
     issues: list[Issue] = []
-    calls: dict[str, str] = {}
+    calls: dict[str, tuple[str, ...]] = {}
     turn_timeout = _turn_timeout(a)
+    on_subs = {
+        node_id
+        for agent_id in a.of_type("agent")
+        if agent_id != a.main
+        for node_id in a.targets(agent_id, "tools")
+    }
     for node_id, data in nodes:
         source = ctx.agent_sources.get(data.source.id)
         if source is None:
             source = AgentSource(data.source.id, refusal=_unpublished(data.source.id))
-        calls[node_id] = source.tool
-        issues.extend(_node_issues(node_id, data, source, turn_timeout))
+        calls[node_id] = _own_tools(data, source)
+        main = node_id not in on_subs
+        issues.extend(_node_issues(node_id, data, source, turn_timeout, main=main))
     issues.extend(_name_issues(a, ctx, calls))
     if not enabled:
         issues.append(Issue(CALLS_DISABLED, CALLS_DISABLED_TEXT, "warning"))
@@ -341,12 +436,15 @@ def call_issues(spec: AgentSpec, ctx: GraphContext, *, enabled: bool = True) -> 
 # -- 상태 경고 -----------------------------------------------------------------------------------
 
 
-def _status_code(source: AgentSource | None, turn_timeout: int | None) -> str | None:
-    """배포된 소스 하나가 내는 상태 경고의 코드다. 낼 것이 없으면 None 이다."""
+def _status_code(
+    source: AgentSource | None, turn_timeout: int | None, *, waits: bool
+) -> str | None:
+    """배포된 소스 하나가 내는 상태 경고의 코드다. 낼 것이 없으면 None 이다. waits 는 그 노드가
+    답을 기다리는가다."""
     if source is None or (source.refusal is not None and source.refusal.code == SOURCE_UNPUBLISHED):
         return SOURCE_UNPUBLISHED
     if source.refusal is None:
-        return CALL_TIMEOUT_SHORT if _waits_too_long(source, turn_timeout) else None
+        return CALL_TIMEOUT_SHORT if waits and _waits_too_long(source, turn_timeout) else None
     stopped = source.refusal.code == SOURCE_NOT_DEPLOYED and source.state != _DEPLOYING
     return SOURCE_NOT_SERVING if stopped or source.refusal.code == RUNS_UNMET else None
 
@@ -362,7 +460,8 @@ def status_warnings(
     turn_timeout = _turn_timeout(analyze_structure(rev))
     found: dict[str, list[str]] = {}
     for node_id, data in nodes:
-        code = _status_code(sources.get(data.source.id), turn_timeout)
+        waits = not assigns_tasks(data)
+        code = _status_code(sources.get(data.source.id), turn_timeout, waits=waits)
         if code is not None:
             found.setdefault(code, []).append(node_id)
     lines = [] if enabled else [coded_warning(CALLS_DISABLED, CALLS_DISABLED_TEXT)]
@@ -506,4 +605,5 @@ def _read(item: HubItem, doc: Agent, refusal: Refusal | None, *, cycle: bool) ->
         provider=model.provider if model is not None else "",
         record_bodies=rev.service.observability.record_bodies if rev is not None else False,
         cycle=cycle,
+        takes_tasks=doc.image_reports(AGENT_TASKS),
     )

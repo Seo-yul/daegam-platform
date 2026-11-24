@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Agent 가 게시한 다른 Agent 를 Tool 로 부르는 호출의 e2e. 게시와 캔버스의 Agent 소스, 호출이 호출받은 Agent 의 실행으로 도는 것,
-# 사슬의 거절, 부른 턴의 중지, 호출받은 Agent 의 승인, 실행 기록, 호출의 스위치를 본다. 대상은 둘이다.
+# 사슬의 거절, 부른 턴의 중지, 호출받은 Agent 의 승인, 실행 기록, 답을 기다리지 않고 맡기는 작업, 호출의 스위치를 본다. 대상은
+# 둘이다.
 #
 #   make e2e-agent-calls                                               로컬 클러스터(태그의 클러스터 e2e 잡의 agent 조각)
 #   make e2e-agent-calls E2E_TARGET=install E2E_INSTALL_USER=<관리자>   설치본(make e2e-install-extra 가 고르면 돈다)
@@ -15,7 +16,8 @@
 # 모델은 스텁이다. 스텁은 메시지 안의 {"tool", "args"} 조각으로 Tool 을 부르므로, 부르는 Agent 에 보내는 메시지가 ask_* 호출을
 # 싣고 그 message 가 호출받은 Agent 의 Tool 호출을 싣는다(agent-runtime/runtime/stub.py). Agent 는 넷이다. a 가 b 를, b 가
 # Gateway 의 Tool 과 c 와 a 를, c 가 d 를 부른다. 넷 모두 호출의 메시지를 사람이 쓴 것으로 다루게(calls_trusted) 게시한다.
-# 그래야 토큰 인증 모드에서 호출받은 Agent 의 다음 호출이 승인 없이 이어진다.
+# 그래야 토큰 인증 모드에서 호출받은 Agent 의 다음 호출이 승인 없이 이어진다. 다섯째 t 는 b 에게 작업을 맡긴다. 게시하지
+# 않는다. 작업 Tool 의 메시지는 스텁 조각 하나(Tool 이름과 인자)이고, 맡기는 글이 b 의 스텁이 읽는 조각을 싣는다.
 #
 # 기다림의 한도(초)는 E2E_RUNS_WAIT(실행 기록, 기본 240), E2E_AGENT_CALLS_PERSON_WAIT(호출이 사람 이름으로 돌기까지, 480),
 # E2E_AGENT_CALLS_TLS_WAIT(설치본의 memory 바인딩의 TLS 전환, 240)로 바꾼다.
@@ -28,7 +30,8 @@
 #            addPet)를 배포해 게시하고 그것을 백엔드로 묶은 Gateway 를 배포한다
 #   STEP 2   d, c, b, a 를 차례로 배포해 게시한다(memory, 세션 예산). c 는 d 를, b 는 Gateway 의 Tool(addPet 은 승인 규칙)과
 #            c 를, a 는 b 를 Tool 로 붙인다. 그 뒤 b 에 a 를 더해 저장하면 경고 agent_call_cycle 이고 다시 배포한다. 런타임은
-#            runs·turn_tokens·agent_tools 를 알리고, 허브는 넷을 종류 agent 로 보이며 b 의 항목의 참조에 a 가 있다
+#            runs·turn_tokens·agent_tools·agent_tasks 를 알리고, 허브는 넷을 종류 agent 로 보이며 b 의 항목의 참조에 a 가
+#            있다
 #   STEP 3   a 와의 대화에서 ask_calls_b 가 b 의 답을 돌려준다. b 의 실행 기록은 출처 agent, 부른 Agent a, 부른 세션이고
 #            succeeded 다. 설치본에서는 u1 의 이름(acts_as person)으로 돈다. MCP Server 와 Gateway 가 위임 토큰을 받기 전의
 #            실패(acts_as_unavailable 등)면 30초마다 새 턴으로 다시 본다
@@ -42,9 +45,19 @@
 #            선다. 승인하면 succeeded 다
 #   STEP 9   b 의 실행 목록이 출처 agent 의 기록마다 부른 Agent 를 싣고, 끝난 호출의 기록에 원장의 토큰이 있다
 #   STEP 10  d 의 게시를 해제하면 c 의 호출이 agent_source_unpublished 로 거절되고 c 의 상태가 같은 코드로 경고한다
-#   STEP 11  호출을 끄면(DAEGAM_AGENT_CALLS_ENABLED=false) a 는 계속 대화하고 ask_calls_b 는 agent_calls_disabled 로 답하며
+#   STEP 11  b 에게 작업을 맡기는 t 를 배포한다. t 와의 대화에서 start_async_task 가 작업 id 를 곧바로 돌려주고, b 의 실행
+#            기록은 출처 agent, 부른 Agent t 다. check_async_task 가 success 와 b 의 답을 돌려줄 때까지 턴마다 확인한다.
+#            list_async_tasks 가 그 작업을 success 로 보인다
+#   STEP 12  새 대화에서 오래 걸리는 작업을 맡기고 b 의 실행이 running 일 때 update_async_task 로 새 지시를 보낸다. 앞
+#            실행은 cancelled(caller_updated)로 끝나고 다음 실행이 같은 세션에서 succeeded 다
+#   STEP 13  같은 대화에서 오래 걸리는 작업을 하나 더 맡기고 cancel_async_task 로 취소한다. 그 실행은
+#            cancelled(caller_cancelled)다. 이 대화는 확인을 부르지 않는다. 확인의 답은 바깥 내용이라 그 뒤의 맡기기,
+#            잇기, 취소가 승인을 기다리기 때문이다
+#   STEP 14  (설치본) 다른 사람 u2 는 u1 의 작업에 닿지 못한다. u2 의 대화에서 그 작업 id 의 확인은 모르는 작업이라는
+#            답이고 플랫폼에 요청이 가지 않는다. u2 의 로그인 토큰으로 그 작업의 경로를 직접 부르면 401 이나 404 다
+#   STEP 15  호출을 끄면(DAEGAM_AGENT_CALLS_ENABLED=false) a 는 계속 대화하고 ask_calls_b 는 agent_calls_disabled 로 답하며
 #            게시는 409 agent_calls_disabled 다
-#   정리     ConfigMap 을 먼저 되돌린다. Agent 넷(게시 항목이 함께 지워진다)과 그 Redis 키, Gateway, MCP Server 의 게시와 그
+#   정리     ConfigMap 을 먼저 되돌린다. Agent 다섯(게시 항목이 함께 지워진다)과 그 Redis 키, Gateway, MCP Server 의 게시와 그
 #            서버, Backend API, Database, 설치본의 두 사람, 스텁 provider 를 지운 뒤 플랫폼을 굴린다
 #
 # 출력은 `STEP <n> PASS|SKIP|FAIL: ...` 이고 종료 코드 계약은 lib/e2e_report.sh 에 있다.
@@ -79,7 +92,7 @@ READY_TIMEOUT="${READY_TIMEOUT:-600}"
 SPEC="$ROOT/mcp-runtime/tests/fixtures/petstore.openapi.yaml"
 U1="calls-u1-e2e"; U2="calls-u2-e2e"
 DS_NAME="calls-redis-e2e"; BP_NAME="calls-petstore"; MS_NAME="calls-petstore"; GW_NAME="calls-gw"
-NAME_A="calls-a"; NAME_B="calls-b"; NAME_C="calls-c"; NAME_D="calls-d"
+NAME_A="calls-a"; NAME_B="calls-b"; NAME_C="calls-c"; NAME_D="calls-d"; NAME_T="calls-t"
 # 게시한 항목이 캔버스에서 내는 Tool 이름이다. ask_ 뒤에 항목 이름의 - 를 _ 로 바꿔 붙인다
 ASK_A="ask_calls_a"; ASK_B="ask_calls_b"; ASK_C="ask_calls_c"; ASK_D="ask_calls_d"
 # b 가 Gateway 로 부르는 읽기 Tool 과 승인 규칙을 둔 쓰기 Tool
@@ -102,6 +115,11 @@ USAGE_TRIES=30
 WAITING_TEXT="승인을 기다린다"
 # 스텁이 Tool 없이 답하는 조각이다. 끝까지 done 으로 가야 하는 메시지가 싣는다
 DONE_FRAGMENT='{"sleep": 0}'
+# 작업 Tool 이 모델에게 주는 답의 머리다(agent-runtime/runtime/agent_task_tools.py)
+TASK_STARTED="Launched async subagent. task_id: "
+TASK_UPDATED="Updated async subagent. task_id: "
+TASK_CANCELLED="Cancelled async subagent task: "
+TASK_UNTRACKED="No tracked task found for task_id"
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/daegam-e2e-agent-calls.XXXXXX")"
 K=("${KUBECTL:-kubectl}" --context "$CTX")
@@ -109,9 +127,10 @@ AUTH=()                            # header 모드는 Bearer 가 없다. 설치�
 PF_API=""
 ADMIN_TOKEN=""; U1_TOKEN=""; U2_TOKEN=""; U1_ID=""; U2_ID=""
 HOME_ID=""; DS_ID=""; BP_ID=""; MS_ID=""; HMS=""; GW_ID=""
-ID_A=""; ID_B=""; ID_C=""; ID_D=""; ITEM_A=""; ITEM_B=""; ITEM_C=""; ITEM_D=""
+ID_A=""; ID_B=""; ID_C=""; ID_D=""; ID_T=""; ITEM_A=""; ITEM_B=""; ITEM_C=""; ITEM_D=""
 AG_NS=""; K8S_B=""
 CALL_SID=""                        # ask_turn 이 남기는 부른 세션
+TASK_SID=""                        # task_turn 이 잇는 t 와의 대화. 비우면 새 대화다
 STUB_BEFORE=""; CONFIG_CHANGED=0
 
 # start_pf·stop_pf·restart_pf·kill_stale_pf·wait_port·wait_http 는 여기에 있다 (K·WORK 를 쓴다)
@@ -151,8 +170,54 @@ ask_turn() {
   CALL_SID="$(sse_ 'first("done")["session_id"]')"
 }
 
-# answer_has TEXT : 마지막 ask_turn 의 Tool 결과에 TEXT 가 있으면 0 이다
+# answer_has TEXT : 마지막 ask_turn 이나 task_turn 의 Tool 결과에 TEXT 가 있으면 0 이다
 answer_has() { grep -qF -- "$1" "$WORK/answer"; }
+
+# task_turn STEP TOKEN TOOL ARGS_JSON : TOKEN 의 사람이 t 와의 대화 TASK_SID(비었으면 새 대화)에서 작업 Tool 하나를 부르는
+# 턴이다. 턴이 done 으로 끝나고 첫 Tool 결과가 TOOL 의 것이어야 한다. 그 결과의 글(바깥 내용 감싸개 안)을 $WORK/answer 에,
+# 상태를 TOOL_STATUS 에, 세션을 TASK_SID 에 남긴다
+task_turn() {
+  local step="$1" token="$2" tool="$3" code
+  code="$(as_person "$token" chat "/agents/$ID_T/chat" "$(msg "$(stub_call "$tool" "$4")" "$TASK_SID")")"
+  { [ "$code" = 200 ] && [ "$(sse_ 'names[-1]')" = "done" ] && [ "$(sse_ 'first("tool_result")["name"]')" = "$tool" ]; } \
+    || { cp "$WORK/sse" "$WORK/body"; die "$step" "POST /agents/$ID_T/chat -> $code $(sse_ 'names'): no $tool result and done"; }
+  sse_ 'inner(first("tool_result")["content"])' >"$WORK/answer"
+  TOOL_STATUS="$(sse_ 'first("tool_result")["status"]')"
+  TASK_SID="$(sse_ 'first("done")["session_id"]')"
+}
+
+# task_start STEP TOKEN TEXT : b 에게 TEXT 를 작업으로 맡기고 그 작업 id 를 TASK_ID 에 남긴다
+TASK_ID=""
+task_start() {
+  local args
+  args="$(python3 -c 'import json, sys; print(json.dumps({"description": sys.argv[1], "subagent_type": sys.argv[2]}))' "$3" "$NAME_B")"
+  task_turn "$1" "$2" start_async_task "$args"
+  TASK_ID="$(sed -n "s/^$TASK_STARTED//p" "$WORK/answer")"
+  { [ "$TOOL_STATUS" = success ] && [ -n "$TASK_ID" ]; } \
+    || die "$1" "start_async_task answered $TOOL_STATUS without a task id" "$(cat "$WORK/answer")"
+}
+
+# task_args TASK_ID [MESSAGE] : 작업 하나를 대는 Tool 의 인자다. MESSAGE 를 주면 잇는 지시를 싣는다
+task_args() {
+  python3 -c 'import json, sys
+print(json.dumps({"task_id": sys.argv[1], **({"message": sys.argv[2]} if len(sys.argv) > 2 else {})}))' "$@"
+}
+
+# task_run STEP INDEX : 대화 TASK_SID 에서 맡긴 b 의 실행 가운데 만든 차례로 INDEX 째(0 부터)의 id 를 RUN_ID 에 남긴다.
+# 생길 때까지 RUN_POLL 초마다 본다
+task_run() {
+  local step="$1" code i
+  RUN_ID=""
+  for ((i = 0; i < RUN_WAIT / RUN_POLL; i++)); do
+    code="$(api GET "/agents/$ID_B/runs?limit=500")"
+    if [ "$code" = 200 ]; then
+      RUN_ID="$(jq_ "(lambda runs: runs[$2]['id'] if len(runs) > $2 else '')(sorted((r for r in d['runs'] if (r.get('caller') or {}).get('session_id') == '$TASK_SID'), key=lambda r: r['created_at']))")"
+      [ -z "$RUN_ID" ] || return 0
+    fi
+    sleep "$RUN_POLL"
+  done
+  die "$step" "no run #$2 of $NAME_B from session $TASK_SID within ${RUN_WAIT}s (GET /agents/$ID_B/runs -> $code)"
+}
 
 # agent_doc OUT NAME DISPLAY [FLAG...] : 스텁 모델, Redis memory, 세션 예산을 갖춘 Agent 의 저장 본문을 OUT 에 쓴다. FLAG 는
 # lib/agent_body.py 의 것이다
@@ -220,6 +285,7 @@ drop_agent() {
 # 만든 것을 거꾸로 걷는다. 게시 항목을 Gateway 가, MCP Server 를 게시가 붙들고 있다
 teardown() {
   local uid
+  drop_agent "$ID_T" "$NAME_T"
   drop_agent "$ID_A" "$NAME_A"; drop_agent "$ID_B" "$NAME_B"; drop_agent "$ID_C" "$NAME_C"; drop_agent "$ID_D" "$NAME_D"
   if [ -n "$GW_ID" ]; then
     api_delete "/gateways/$GW_ID"
@@ -283,7 +349,7 @@ if [ "$TARGET" = install ]; then
   [ "$(platform_config DAEGAM_TURN_TOKENS_ENABLED)" != false ] \
     || die 0 "ConfigMap $AUTH_MODE_CONFIGMAP has DAEGAM_TURN_TOKENS_ENABLED=false: calls need the turn's grant"
 fi
-# 창은 스텁 허용을 열고, STEP 11 이 끄는 호출의 스위치도 읽은 값으로 되돌린다
+# 창은 스텁 허용을 열고, STEP 15 가 끄는 호출의 스위치도 읽은 값으로 되돌린다
 config_window_plan DAEGAM_ALLOW_STUB_PROVIDER=true "DAEGAM_AGENT_CALLS_ENABLED=${CALLS_BEFORE:-true}" \
   || die 0 "reading ConfigMap $AUTH_MODE_CONFIGMAP failed"
 CONFIG_CHANGED=1
@@ -341,7 +407,7 @@ code="$(api GET /agents/templates)"; [ "$code" = 200 ] || die 2 "GET /agents/tem
 cp "$WORK/body" "$WORK/templates.json"
 agent_doc "$WORK/d.json" "$NAME_D" "호출 사슬 d"
 launch 2 "$NAME_D" "$WORK/d.json"; ID_D="$LAUNCHED_ID"
-require_features 2 runs turn_tokens agent_tools
+require_features 2 runs turn_tokens agent_tools agent_tasks
 publish 2 "$ID_D" "Answers the request it is given."; ITEM_D="$PUBLISHED_ITEM"
 agent_doc "$WORK/c.json" "$NAME_C" "호출 사슬 c" --agent-source "$ITEM_D:$ASK_D"
 launch 2 "$NAME_C" "$WORK/c.json"; ID_C="$LAUNCHED_ID"
@@ -538,17 +604,104 @@ code="$(api GET "/agents/$ID_C")"
   || die 10 "the status of $NAME_C does not warn agent_source_unpublished ($code)"
 pass 10 "unpublishing $NAME_D refused the call of $NAME_C (agent_source_unpublished) and its status warns with the same code"
 
-# ---------- 11. 호출을 끈 플랫폼 ----------
+# ---------- 11. 작업을 맡기고 끝날 때까지 확인한다 ----------
+agent_doc "$WORK/t.json" "$NAME_T" "작업을 맡기는 t" --agent-task "$ITEM_B"
+launch 11 "$NAME_T" "$WORK/t.json"; ID_T="$LAUNCHED_ID"
+require_features 11 agent_tools agent_tasks
+TASK_SID=""
+task_start 11 "$U1_TOKEN" "e2e-agent-calls task $DONE_FRAGMENT"
+FIRST_TASK="$TASK_ID"
+task_run 11 0
+run_wait 11 "$ID_B" "$RUN_ID" "$RUN_TERMINAL"
+[ "$RUN_STATUS $(run_field "d['source'], d['caller']['agent_id'], d['caller']['session_id']")" = "succeeded agent $ID_T $TASK_SID" ] \
+  || die 11 "the task's run $RUN_ID: $(cat "$WORK/run.json") (want succeeded, source agent, caller $ID_T, session $TASK_SID)"
+if [ "$TARGET" = install ]; then
+  [ "$(run_field 'd["acts_as"]["sub"]')" = "$U1_ID" ] || die 11 "the task's run acts as $(run_field 'd["acts_as"]["sub"]'), want $U1 ($U1_ID)"
+fi
+checks=0; deadline=$((SECONDS + RUN_WAIT)); status=""
+while :; do
+  task_turn 11 "$U1_TOKEN" check_async_task "$(task_args "$FIRST_TASK")"
+  checks=$((checks + 1))
+  status="$(json_of "$WORK/answer" 'd["status"]' 2>/dev/null || true)"
+  [ "$status" != success ] || break
+  case "$status" in
+    pending | running) [ "$SECONDS" -lt "$deadline" ] || die 11 "task $FIRST_TASK is still $status after $checks checks and ${RUN_WAIT}s" "$(cat "$WORK/answer")" ;;
+    *) die 11 "check_async_task answered '$status' ($TOOL_STATUS) for task $FIRST_TASK" "$(cat "$WORK/answer")" ;;
+  esac
+  sleep "$RUN_POLL"
+done
+[ "$(json_of "$WORK/answer" '"기다린 뒤 답합니다" in d["result"]')" = True ] \
+  || die 11 "check_async_task returned success without the answer of $NAME_B" "$(cat "$WORK/answer")"
+task_turn 11 "$U1_TOKEN" list_async_tasks '{}'
+answer_has "task_id: $FIRST_TASK  agent: $NAME_B  status: success" \
+  || die 11 "list_async_tasks does not show task $FIRST_TASK as success" "$(cat "$WORK/answer")"
+pass 11 "$NAME_T started task $FIRST_TASK on $NAME_B at once; its run succeeded with source agent and caller $NAME_T; check $checks returned success with the answer and the list shows it"
+
+# ---------- 12. 돌고 있는 작업에 새 지시를 보낸다 ----------
+# 새 대화다. 앞 대화는 확인의 답(바깥 내용)을 받아 그 뒤의 맡기기, 잇기, 취소가 승인을 기다린다
+TASK_SID=""
+task_start 12 "$U1_TOKEN" "e2e-agent-calls slow task {\"sleep\": $SLOW_SECONDS}"
+SLOW_TASK="$TASK_ID"
+task_run 12 0; OLD_RUN="$RUN_ID"
+run_wait 12 "$ID_B" "$OLD_RUN" "running $RUN_TERMINAL" 60
+[ "$RUN_STATUS" = running ] || die 12 "the slow run $OLD_RUN is $RUN_STATUS before the update, want running" "$(cat "$WORK/run.json")"
+task_turn 12 "$U1_TOKEN" update_async_task "$(task_args "$SLOW_TASK" "e2e-agent-calls follow-up $DONE_FRAGMENT")"
+{ [ "$TOOL_STATUS" = success ] && answer_has "$TASK_UPDATED$SLOW_TASK"; } \
+  || die 12 "update_async_task answered $TOOL_STATUS without the task id" "$(cat "$WORK/answer")"
+run_wait 12 "$ID_B" "$OLD_RUN" "$RUN_TERMINAL" "$CANCEL_WAIT"
+[ "$RUN_STATUS $(run_field 'd.get("reason")')" = "cancelled caller_updated" ] \
+  || die 12 "the interrupted run $OLD_RUN ended $RUN_STATUS ($(run_field 'd.get("reason")')), want cancelled (caller_updated)" "$(cat "$WORK/run.json")"
+OLD_SESSION="$(run_field 'd["session_id"]')"
+task_run 12 1; NEXT_RUN="$RUN_ID"
+run_wait 12 "$ID_B" "$NEXT_RUN" "$RUN_TERMINAL"
+[ "$RUN_STATUS $(run_field 'd["session_id"]')" = "succeeded $OLD_SESSION" ] \
+  || die 12 "the next run $NEXT_RUN ended $RUN_STATUS ($(run_field 'd.get("reason")')) in session $(run_field 'd["session_id"]'), want succeeded in $OLD_SESSION" "$(cat "$WORK/run.json")"
+pass 12 "updating task $SLOW_TASK interrupted run $OLD_RUN of $NAME_B (caller_updated) and run $NEXT_RUN succeeded in the same session $OLD_SESSION"
+
+# ---------- 13. 작업을 취소한다 ----------
+task_start 13 "$U1_TOKEN" "e2e-agent-calls cancelled task {\"sleep\": $SLOW_SECONDS}"
+GONE_TASK="$TASK_ID"
+task_run 13 2; GONE_RUN="$RUN_ID"
+run_wait 13 "$ID_B" "$GONE_RUN" "running $RUN_TERMINAL" 60
+[ "$RUN_STATUS" = running ] || die 13 "the run $GONE_RUN is $RUN_STATUS before the cancel, want running" "$(cat "$WORK/run.json")"
+task_turn 13 "$U1_TOKEN" cancel_async_task "$(task_args "$GONE_TASK")"
+{ [ "$TOOL_STATUS" = success ] && answer_has "$TASK_CANCELLED$GONE_TASK"; } \
+  || die 13 "cancel_async_task answered $TOOL_STATUS without the task id" "$(cat "$WORK/answer")"
+run_wait 13 "$ID_B" "$GONE_RUN" "$RUN_TERMINAL" "$CANCEL_WAIT"
+[ "$RUN_STATUS $(run_field 'd.get("reason")')" = "cancelled caller_cancelled" ] \
+  || die 13 "the cancelled run $GONE_RUN ended $RUN_STATUS ($(run_field 'd.get("reason")')), want cancelled (caller_cancelled)" "$(cat "$WORK/run.json")"
+pass 13 "cancelling task $GONE_TASK cancelled run $GONE_RUN of $NAME_B (caller_cancelled)"
+
+# ---------- 14. 다른 사람은 그 작업에 닿지 못한다 ----------
+if [ "$TARGET" = install ]; then
+  TASK_SID=""
+  task_turn 14 "$U2_TOKEN" check_async_task "$(task_args "$FIRST_TASK")"
+  answer_has "$TASK_UNTRACKED" || die 14 "$U2 checked the task of $U1 ($TOOL_STATUS)" "$(cat "$WORK/answer")"
+  code="$(api GET "/agents/$ID_B/runs?limit=500")"; [ "$code" = 200 ] || die 14 "GET /agents/$ID_B/runs -> $code"
+  [ "$(jq_ "any((r.get('caller') or {}).get('session_id') == '$TASK_SID' for r in d['runs'])")" = False ] \
+    || die 14 "the session of $U2 ($TASK_SID) started a run of $NAME_B"
+  # 작업의 경로는 부른 턴의 토큰만 받는다. 사람의 로그인 토큰은 그 작업을 읽지 못한다
+  code="$(as_person "$U2_TOKEN" api GET "/internal/agent-protocol/$ID_B/threads/$FIRST_TASK")"
+  case "$code" in
+    401 | 404) ;;
+    *) die 14 "GET /internal/agent-protocol/$ID_B/threads/$FIRST_TASK as $U2 -> $code (want 401 or 404)" ;;
+  esac
+  pass 14 "$U2 cannot check task $FIRST_TASK of $U1 (untracked in the session of $U2, no request sent) and the task route answers $code to the login token of $U2"
+else
+  cond_skip 14 "header mode has no people to tell apart; the person rule runs on the install"
+fi
+
+# ---------- 15. 호출을 끈 플랫폼 ----------
 "${K[@]}" -n "$PLATFORM_NS" patch configmap "$AUTH_MODE_CONFIGMAP" --type merge -p '{"data": {"DAEGAM_AGENT_CALLS_ENABLED": "false"}}' >/dev/null \
-  || die 11 "patching ConfigMap $AUTH_MODE_CONFIGMAP failed"
-roll_platform || die 11 "the platform did not come back after turning agent calls off"
+  || die 15 "patching ConfigMap $AUTH_MODE_CONFIGMAP failed"
+roll_platform || die 15 "the platform did not come back after turning agent calls off"
 code="$(as_person "$U1_TOKEN" chat "/agents/$ID_A/chat" "$(msg "e2e-agent-calls off $DONE_FRAGMENT")")"
-[ "$code" = 200 ] && [ "$(sse_ 'names[-1]')" = "done" ] || { cp "$WORK/sse" "$WORK/body"; die 11 "$NAME_A does not chat with calls off: $code $(sse_ 'names')"; }
-ask_turn 11 "$U1_TOKEN" "$(ask_call "$ASK_B" "e2e-agent-calls off $DONE_FRAGMENT")"
-answer_has agent_calls_disabled || die 11 "$ASK_B did not answer agent_calls_disabled with calls off ($TOOL_STATUS)" "$(cat "$WORK/answer")"
+[ "$code" = 200 ] && [ "$(sse_ 'names[-1]')" = "done" ] || { cp "$WORK/sse" "$WORK/body"; die 15 "$NAME_A does not chat with calls off: $code $(sse_ 'names')"; }
+ask_turn 15 "$U1_TOKEN" "$(ask_call "$ASK_B" "e2e-agent-calls off $DONE_FRAGMENT")"
+answer_has agent_calls_disabled || die 15 "$ASK_B did not answer agent_calls_disabled with calls off ($TOOL_STATUS)" "$(cat "$WORK/answer")"
 code="$(api POST "/agents/$ID_D/publish" '{"description": "Answers the request it is given."}')"
 [ "$code" = 409 ] && [ "$(error_code "$WORK/body")" = agent_calls_disabled ] \
-  || die 11 "publishing $NAME_D with calls off -> $code (want 409 agent_calls_disabled)"
-pass 11 "with DAEGAM_AGENT_CALLS_ENABLED=false $NAME_A still chats, $ASK_B answers agent_calls_disabled and publishing is 409 agent_calls_disabled"
+  || die 15 "publishing $NAME_D with calls off -> $code (want 409 agent_calls_disabled)"
+pass 15 "with DAEGAM_AGENT_CALLS_ENABLED=false $NAME_A still chats, $ASK_B answers agent_calls_disabled and publishing is 409 agent_calls_disabled"
 
 finish
