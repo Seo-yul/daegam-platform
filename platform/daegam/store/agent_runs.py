@@ -690,18 +690,31 @@ class MongoAgentRunStore:
     async def cancel_first_turn_for_grants(
         self, grant_ids: Collection[str], reason: str, now: datetime
     ) -> list[AgentRun]:
-        """grant_ids 의 위임이 시작한 호출 가운데 아직 첫 턴인 것을 중지처럼 끝낸다. 표시만 남은
-        도는 실행을 돌려준다. 승인을 기다리거나 기다린 적이 있는 실행은 두고, 그 실행은 제 마감이
+        """grant_ids 의 위임이 시작한 호출 가운데 아직 첫 턴이고 중지 표시가 없는 것을 중지처럼
+        끝낸다. 이번에 표시를 남긴 도는 실행만 돌려준다. 이미 표시가 남은 실행은 건드리지 않는다.
+        끝난 위임은 틱마다 다시 오므로, 건드리면 `last_event_at` 이 새로 적혀 지켜보기가 그 실행을
+        조용하다고 보지 못한다. 승인을 기다리거나 기다린 적이 있는 실행은 두고, 그 실행은 제 마감이
         끝낸다 (P46 6.5절)."""
         if not grant_ids:
             return []
         query = {"caller.grant_id": {"$in": list(grant_ids)}, **_FIRST_TURN}
-        await self.coll.update_many(query, _first_stop(now, reason))
+        unmarked = {**query, "stop_requested_at": None}
+        ids = [d["_id"] async for d in self.coll.find(unmarked, {"_id": 1})]
+        marked = [
+            run_id
+            for run_id in ids
+            if await self._mark_unmarked({"_id": run_id, **unmarked}, reason, now)
+        ]
         await self.coll.update_many(
             {**query, "status": "starting"}, {"$set": end_fields("cancelled", now, reason)}
         )
-        cursor = self.coll.find({**query, "status": "running"})
+        # 표시를 남긴 뒤에 읽는다. 그사이 시작돼 running 이 된 실행도 돌려준다
+        cursor = self.coll.find({"_id": {"$in": marked}, "status": "running"})
         return [AgentRun.from_doc(d) async for d in cursor]
+
+    async def _mark_unmarked(self, query: dict[str, Any], reason: str, now: datetime) -> bool:
+        result = await self.coll.update_one(query, _first_stop(now, reason))
+        return result.modified_count == 1
 
     async def _cancel_open(
         self, query: dict[str, Any], reason: str, now: datetime

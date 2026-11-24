@@ -113,8 +113,8 @@ CONFIG_CHANGED=0    # ConfigMap 을 바꿨다
 # wait_http 는 여기에 있다
 . "$HERE/lib/e2e_pf.sh"
 . "$HERE/lib/e2e_report.sh"
-# api·api_as·jq_·find_id·api_delete·wait_ready·wait_gone·upload_backend_api·register_data_service·save_doc·deploy_doc·
-# require_features·ensure_stub_provider·drop_stub_provider 는 여기에 있다
+# api·api_as·as_person·jq_·find_id·api_delete·wait_ready·wait_gone·upload_backend_api·register_data_service·save_doc·
+# deploy_doc·require_features·ensure_stub_provider·drop_stub_provider 는 여기에 있다
 . "$HERE/lib/e2e_api.sh"
 # chat·msg·stub_call 은 여기에 있다
 . "$HERE/lib/e2e_sse.sh"
@@ -131,14 +131,6 @@ install_run_passwords
 # RUN_TERMINAL·runs_on·run_now·run_wait·run_field·source_run·run_sessions·run_schedule_due·schedule_moved_on·
 # audit_since·run_documents·secret_leaks·hook_audit 는 여기에 있다
 . "$HERE/lib/e2e_runs.sh"
-
-# as_user TOKEN CMD... : 다른 사람의 토큰으로 CMD 를 부른다. api 하나는 api_as 로 부르고, 이것은 api 를 안에서 부르는
-# run_now 와 chat 에 쓴다. 그 함수들이 읽는 AUTH 를 이 호출 동안만 바꾼다
-as_user() {
-  local AUTH=(-H "Authorization: Bearer $1")
-  shift
-  "$@"
-}
 
 # hook_now STEP : 웹훅 타임스탬프를 클러스터의 시계로 HOOK_TS 에 둔다. 서명의 5분 허용은 플랫폼의 시계로 잰다
 hook_now() {
@@ -192,7 +184,7 @@ wait_lost_access() {
 
 # waiting_run STEP : u1 의 지금 실행이 승인 규칙의 Tool 을 불러 waiting_approval 에 서야 한다. 세션을 RUN_SID 에 남긴다
 waiting_run() {
-  as_user "$U1_TOKEN" run_now "$1" "$AG_ID" "$(stub_call "$TOOL" '{"name": "e2e-runs"}')"
+  as_person "$U1_TOKEN" run_now "$1" "$AG_ID" "$(stub_call "$TOOL" '{"name": "e2e-runs"}')"
   run_wait "$1" "$AG_ID" "$RUN_ID" "waiting_approval $RUN_TERMINAL"
   [ "$RUN_STATUS" = waiting_approval ] \
     || die "$1" "run $RUN_ID ended $RUN_STATUS ($(run_field 'd.get("reason")')) instead of waiting for approval" "$(cat "$WORK/run.json")"
@@ -315,7 +307,7 @@ DONE_FRAGMENT='{"sleep": 0}'
 RUN_TEXT="e2e-runs run now $DONE_FRAGMENT"
 tries=0; deadline=$((SECONDS + RUN_PERSON_WAIT))
 while :; do
-  as_user "$U1_TOKEN" run_now 2 "$AG_ID" "$RUN_TEXT"
+  as_person "$U1_TOKEN" run_now 2 "$AG_ID" "$RUN_TEXT"
   tries=$((tries + 1))
   run_wait 2 "$AG_ID" "$RUN_ID" "$RUN_TERMINAL"
   kind="$(run_field 'd["acts_as"]["kind"]')"
@@ -359,7 +351,7 @@ if [ "$why" = setting_off ]; then
 else
   [ "$why" = None ] || die 2s "agent $AG_NAME cannot sleep with its switch on: ineligible $why"
   sleep_route 2s "$AG_ID"
-  as_user "$U1_TOKEN" run_now 2s "$AG_ID" "$RUN_TEXT"
+  as_person "$U1_TOKEN" run_now 2s "$AG_ID" "$RUN_TEXT"
   run_wait 2s "$AG_ID" "$RUN_ID" "$RUN_TERMINAL"
   [ "$RUN_STATUS" = succeeded ] \
     || die 2s "run now on the sleeping Agent ended $RUN_STATUS ($(run_field 'd.get("reason")'))" "$(cat "$WORK/run.json")"
@@ -449,7 +441,7 @@ row="$(jq_ "json.dumps(next((s.get('run') for s in d['sessions'] if s['session_i
 code="$(api_as "$U2_TOKEN" GET "/agents/$AG_ID/sessions?all_users=true")"
 [ "$code" = 200 ] && [ "$(jq_ "any(s['session_id'] == '$RUN_SID' for s in d['sessions'])")" = False ] \
   || die 5 "the run session $RUN_SID is in $U2's chat list ($code)"
-code="$(as_user "$U2_TOKEN" chat "/agents/$AG_ID/sessions/$RUN_SID/decisions" '{"decisions": [{"type": "approve"}]}')"
+code="$(as_person "$U2_TOKEN" chat "/agents/$AG_ID/sessions/$RUN_SID/decisions" '{"decisions": [{"type": "approve"}]}')"
 [ "$code" = 200 ] || { cp "$WORK/sse" "$WORK/body"; die 5 "$U2's decision -> $code"; }
 run_wait 5 "$AG_ID" "$WAIT_RUN" "$RUN_TERMINAL"
 [ "$RUN_STATUS" = succeeded ] || die 5 "the approved run $WAIT_RUN ended $RUN_STATUS ($(run_field 'd.get("reason")'))" "$(cat "$WORK/run.json")"
@@ -462,7 +454,7 @@ echo ">> run $LATE_RUN waits for approval until $DEADLINE"
 run_wait 6 "$AG_ID" "$LATE_RUN" "$RUN_TERMINAL" "$RUN_DEADLINE_WAIT"
 [ "$RUN_STATUS $(run_field 'd.get("reason")')" = "refused approval_deadline" ] \
   || die 6 "run $LATE_RUN ended $RUN_STATUS ($(run_field 'd.get("reason")')), want refused (approval_deadline)" "$(cat "$WORK/run.json")"
-code="$(SSE_OUT="$WORK/late.json" as_user "$U2_TOKEN" chat "/agents/$AG_ID/sessions/$RUN_SID/decisions" '{"decisions": [{"type": "approve"}]}')"
+code="$(SSE_OUT="$WORK/late.json" as_person "$U2_TOKEN" chat "/agents/$AG_ID/sessions/$RUN_SID/decisions" '{"decisions": [{"type": "approve"}]}')"
 [ "$code" = 409 ] && [ "$(error_code "$WORK/late.json")" = run_closed ] \
   || die 6 "a decision after the deadline -> $code $(cat "$WORK/late.json") (want 409 run_closed)"
 pass 6 "run $LATE_RUN refused at its deadline $DEADLINE (approval_deadline); $U2's later decision 409 run_closed"

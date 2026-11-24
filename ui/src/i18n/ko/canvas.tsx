@@ -342,6 +342,8 @@ export const canvas = {
     /** 부르는 대화의 글이 가는 곳. provider 는 호출받은 Agent 의 메인 모델 provider, recording 은 그 Agent 의 본문 기록이 켜졌는지다. */
     agentDataFlow: (provider: string, recording: string): string =>
       `이 대화의 내용은 호출받은 Agent 의 LLM provider(${provider})로 보내고, 그 Agent 의 본문 기록 설정(${recording})을 따릅니다.`,
+    /** `agentDataFlow` 의 recording 자리에 서는 말. */
+    agentRecording: { on: "켜짐", off: "꺼짐" },
     /** Agent 소스의 타임아웃 탭. */
     agentTimeout: "기다리는 시간을 넘기면 호출을 멈추고 호출받은 Agent 의 실행도 취소합니다.",
     /** Agent 가 이 Tool 을 Gateway 보다 먼저 끊는다 (P50 7절). agent·gateway 는 초다. */

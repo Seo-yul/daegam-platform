@@ -118,8 +118,8 @@ STUB_BEFORE=""; CONFIG_CHANGED=0
 . "$HERE/lib/e2e_pf.sh"
 kill_stale_pf "$API_PORT"
 . "$HERE/lib/e2e_report.sh"
-# api·api_as·jq_·find_id·api_delete·wait_ready·wait_gone·error_code·upload_backend_api·register_data_service·save_doc·
-# deploy_doc·require_features·ensure_stub_provider·drop_stub_provider·remove_providers 는 여기에 있다
+# api·api_as·as_person·jq_·find_id·api_delete·wait_ready·wait_gone·error_code·upload_backend_api·register_data_service·
+# save_doc·deploy_doc·require_features·ensure_stub_provider·drop_stub_provider·remove_providers 는 여기에 있다
 . "$HERE/lib/e2e_api.sh"
 # chat·sse_·msg·stub_call·ask_call·chat_bg·bg_session_id·bg_stop 은 여기에 있다
 . "$HERE/lib/e2e_sse.sh"
@@ -136,19 +136,6 @@ kill_stale_pf "$API_PORT"
 . "$HERE/lib/e2e_redis.sh"
 # RUN_TERMINAL·runs_on·run_wait·run_field·call_run·run_sessions 는 여기에 있다
 . "$HERE/lib/e2e_runs.sh"
-
-# as_person TOKEN CMD... : TOKEN 의 사람으로 CMD 를 부른다. TOKEN 이 비면(header 모드) 그대로 부른다. CMD 가 안에서 읽는
-# AUTH 를 이 호출 동안만 바꾼다
-as_person() {
-  local token="$1"
-  shift
-  if [ -n "$token" ]; then
-    local AUTH=(-H "Authorization: Bearer $token")
-    "$@"
-  else
-    "$@"
-  fi
-}
 
 # ask_turn STEP TOKEN MESSAGE : TOKEN 의 사람이 a 에게 MESSAGE 를 보내는 새 대화의 턴이다. 턴이 done 으로 끝나고 첫 Tool
 # 결과가 ASK_B 의 것이어야 한다. 그 결과의 글(바깥 내용 감싸개 안)을 $WORK/answer 에, 상태를 TOOL_STATUS 에, 세션을 CALL_SID

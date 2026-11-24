@@ -57,7 +57,7 @@ from daegam.services.agent_sleep import RUN
 from daegam.services.approval_choices import ApprovalChoiceService
 from daegam.services.lease_worker import LeaseWorker
 from daegam.services.runs.fire import GONE_STATES
-from daegam.services.runs.person import ended_reason
+from daegam.services.runs.person import ACTS_AS_UNAVAILABLE, ended_reason
 from daegam.services.runs.service import (
     AGENT_CHANGED,
     AGENT_UNDEPLOYED,
@@ -117,8 +117,6 @@ NO_TURN_TOKEN = "no_turn_token"
 GRANT_NOT_ACCEPTED = "grant_not_accepted"
 # 런타임을 부르지 못한 시작의 코드
 RUNTIME_UNREACHABLE = "runtime_unreachable"
-# 다른 Agent 가 부른 실행을 부른 턴의 사람으로 돌릴 수 없다 (P46 6.4절)
-ACTS_AS_UNAVAILABLE = "acts_as_unavailable"
 # 다시 할 시작이 호출이 답을 기다리는 끝을 넘는다 (P46 6.3절)
 AGENT_CALL_TIMEOUT = "agent_call_timeout"
 
@@ -577,7 +575,6 @@ class RunStartWorker(LeaseWorker[AgentRun]):
 
 
 __all__ = [
-    "ACTS_AS_UNAVAILABLE",
     "AGENT_CALL_TIMEOUT",
     "GRANT_NOT_ACCEPTED",
     "MAX_ATTEMPTS",

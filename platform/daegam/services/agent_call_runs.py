@@ -27,9 +27,11 @@
 - **답.** 끝난 실행의 답은 실행 세션의 전사에서 마지막 `done` 으로 끝난 턴의 말이다. 전사를 아직
   읽지 못했으면 끝나지 않은 것처럼 `running` 으로 답해 다시 묻게 한다.
 - **끝.** 부른 턴의 위임이 끝나면 아직 첫 턴인 실행을 `caller_ended` 로 취소한다(`caller_ended`,
-  위임의 끝이 부른다). 마감이 지났거나 그 끝을 놓친 위임의 호출은 지켜보기의 틱이 쓴다(`sweep`).
+  위임의 끝이 부른다). 마감이 지났거나 그 끝을 놓친 위임의 호출은 지켜보기의 틱이 취소한다(`sweep`).
 - **끄기.** 호출이나 실행이 꺼진 플랫폼은 세 경로가 409 `agent_calls_disabled` 다.
 - **감사.** 요청마다 사람, 부르는 Agent 와 호출받는 Agent, 실행, 결과를 실은 행 하나를 쓴다.
+  Bearer 가 없는 요청과 뜻밖의 오류(500)도 행을 남긴다. 본문의 모양(422)과 크기(413)로 경로에
+  닿기 전에 거절된 요청은 행이 없다.
 """
 
 from __future__ import annotations
@@ -50,12 +52,22 @@ from daegam.auth.oidc import AuthError
 from daegam.auth.service_token import InternalIssuer, verify_agent_call_token
 from daegam.config import Settings
 from daegam.errors import ServiceError, retry_after_header, unauthorized
-from daegam.services.agent_graph import AGENT_SOURCE, EntryData, analyze_structure
+from daegam.services.agent_calls import CALL_CYCLE, CALL_GRACE_SECONDS, SOURCE_UNPUBLISHED
+from daegam.services.agent_graph import (
+    AGENT_SOURCE,
+    EntryData,
+    agent_source_items,
+    analyze_structure,
+)
 from daegam.services.agent_publish import CALLS_DISABLED, AgentPublishing
-from daegam.services.agent_runtime import AgentRuntimeProxy, last_answer, transcript_items
-from daegam.services.runs.person import CALL_SCOPES, ended_reason
+from daegam.services.agent_runtime import (
+    AgentRuntimeProxy,
+    last_answer,
+    serves_turns,
+    transcript_items,
+)
+from daegam.services.runs.person import ACTS_AS_UNAVAILABLE, CALL_SCOPES, ended_reason
 from daegam.services.runs.service import AGENT_CALL_BUSY, CALL_CAPS, CAP_RETRY_AFTER, RunService
-from daegam.services.runs.start import ACTS_AS_UNAVAILABLE
 from daegam.services.telemetry.ingest import KeyedBuckets
 from daegam.services.tool_effects import tools_nodes
 from daegam.services.turn_grants import call_targets, turn_limits
@@ -72,7 +84,7 @@ from daegam.store.agent_runs import (
 )
 from daegam.store.agents import Agent, MongoAgentStore
 from daegam.store.base import ItemLease, new_id, utcnow
-from daegam.store.hub import AGENT_KIND, MongoHubStore
+from daegam.store.hub import AGENT_KIND, HubItem, MongoHubStore
 from daegam.store.turn_grants import GrantTarget, MongoTurnGrantStore, TurnGrant
 from daegam.urls import AGENT_CALL_PATH, API_PREFIX
 
@@ -85,8 +97,10 @@ MAX_CALLS_PER_TURN = 5
 REQUEST_WAIT_SECONDS = 25.0
 # 기다리는 동안 실행 기록을 다시 읽는 간격(초)
 POLL_STEP_SECONDS = 0.5
-# 호출 하나가 호출받는 Agent 의 턴 시간보다 더 기다리는 시간. 컴파일이 Tool 에 박는 값과 같다
-CALL_GRACE = timedelta(seconds=30)
+# 호출 하나가 호출받는 Agent 의 턴 시간보다 더 기다리는 시간. 컴파일이 Tool 에 박는 값이다
+CALL_GRACE = timedelta(seconds=CALL_GRACE_SECONDS)
+# 위임에 세션이 아직 붙지 않은 턴의 호출이 위임을 다시 읽기까지 기다리는 시간(초)
+SESSION_ATTACH_WAIT_SECONDS = 0.5
 # 취소가 받는 까닭. 런타임의 `CANCEL_TIMEOUT`, `CANCEL_ENDED` 와 같다
 CancelReason = Literal["caller_timeout", "caller_ended"]
 CALLER_TIMEOUT, CALLER_ENDED = get_args(CancelReason)
@@ -99,11 +113,9 @@ RATE_IDLE_SECONDS = 3600.0
 RATE_ENTRIES = 10_000
 RATE_RETRY_AFTER = timedelta(seconds=10)
 
-CALL_CYCLE = "agent_call_cycle"
 CALL_TOO_DEEP = "agent_call_too_deep"
 CALL_FANOUT = "agent_call_fanout"
 CALL_RATE_LIMITED = "agent_call_rate_limited"
-SOURCE_UNPUBLISHED = "agent_source_unpublished"
 TURN_GRANT_ENDED = "turn_grant_ended"
 # 감사 행의 리소스와 요청마다의 action
 AUDIT_RESOURCE = "agent-calls"
@@ -125,10 +137,10 @@ class InlineStarter(Protocol):
 
 @dataclass(frozen=True)
 class CallCredentials:
-    """요청 하나가 실어 온 것이다. session_id, turn_id, owner 는 위임 없는 턴만 대고 header
-    모드에서만 읽는다. outside 는 부르는 대화가 바깥 내용을 가졌는가다."""
+    """요청 하나가 실어 온 것이다. bearer 가 없으면 401 이다. session_id, turn_id, owner 는 위임
+    없는 턴만 대고 header 모드에서만 읽는다. outside 는 부르는 대화가 바깥 내용을 가졌는가다."""
 
-    bearer: str
+    bearer: str | None
     session_id: str | None = None
     turn_id: str | None = None
     owner: str | None = None
@@ -249,8 +261,8 @@ class AgentCallRuns:
 
         async def work() -> dict[str, Any]:
             caller = seen.caller = await self._caller(called_id, creds)
-            called = await self._called(caller, called_id)
-            run = await self._admit(caller, called, creds, message)
+            called, item = await self._called(caller, called_id)
+            run = await self._admit(caller, called, item, creds, message)
             seen.run_id = run.id
             await self._start_inline(run, ends)
             return await self._settled(called, run, ends)
@@ -307,20 +319,22 @@ class AgentCallRuns:
     # -- 누구의 호출인가 (6.4절) ---------------------------------------------------------------
 
     async def _caller(self, called_id: str, creds: CallCredentials) -> _Caller:
+        if creds.bearer is None:
+            raise unauthorized("Bearer token required")
         if not self.settings.agent_calls_on:
             raise _refused(409, CALLS_DISABLED, "agent calls are turned off on this platform")
         if not self.settings.token_auth:
-            return await self._header_caller(called_id, creds)
-        return await self._granted_caller(called_id, creds)
+            return await self._header_caller(called_id, creds.bearer, creds)
+        return await self._granted_caller(called_id, creds.bearer)
 
-    async def _granted_caller(self, called_id: str, creds: CallCredentials) -> _Caller:
+    async def _granted_caller(self, called_id: str, bearer: str) -> _Caller:
         """토큰이 댄 위임의 턴이다. 위임이 열려 있고 그 사람과 대상과 부르는 Agent 의 것일 때다."""
         try:
             claims = verify_agent_call_token(
-                creds.bearer, self.issuer.signer, issuer=self.issuer.issuer, agent_id=called_id
+                bearer, self.issuer.signer, issuer=self.issuer.issuer, agent_id=called_id
             )
         except (AuthError, RuntimeError) as e:
-            if InternalIssuer.peek(creds.bearer) is None:
+            if InternalIssuer.peek(bearer) is None:
                 # JWT 가 아니다. 위임 없는 턴이 인스턴스 토큰으로 불렀다
                 raise _unavailable("this platform takes agent calls only with a turn token") from e
             raise unauthorized("invalid agent call token") from e
@@ -349,9 +363,9 @@ class AgentCallRuns:
         await self._check_person(caller)
         return caller
 
-    async def _header_caller(self, called_id: str, creds: CallCredentials) -> _Caller:
+    async def _header_caller(self, called_id: str, bearer: str, creds: CallCredentials) -> _Caller:
         """header 모드의 턴이다. 파드의 인스턴스 토큰과 파드가 댄 세션, 턴, 소유자를 믿는다."""
-        agent = await agent_of_token(self.callers, self.instance_tokens, creds.bearer)
+        agent = await agent_of_token(self.callers, self.instance_tokens, bearer)
         if not creds.session_id or not creds.turn_id:
             raise unauthorized("the calling session and turn are required")
         if GrantTarget(kind=AGENT_SOURCE, id=called_id) not in call_targets(agent):
@@ -399,9 +413,12 @@ class AgentCallRuns:
 
     # -- 시작 전의 거절 (6.3·6.5절) ------------------------------------------------------------
 
-    async def _called(self, caller: _Caller, called_id: str) -> Agent:
-        """호출받는 Agent 다. 같은 테넌트에 있고 게시돼 있어야 한다. 사슬도 여기서 본다. 지워진
-        Agent 와 다른 테넌트의 Agent 는 게시하지 않은 Agent 와 같이 답한다."""
+    async def _called(self, caller: _Caller, called_id: str) -> tuple[Agent, HubItem]:
+        """호출받는 Agent 와 그 게시 항목이다. 같은 테넌트에 있고 게시돼 있어야 하며, 그 항목이
+        부르는 리비전이 Tool 로 붙인 항목이어야 한다. 게시를 거뒀다가 다시 게시한 Agent 는 새
+        항목이라, 옛 항목을 붙인 리비전은 새 항목의 사용 권한을 보는 저장과 배포를 다시 거쳐야
+        부른다. 사슬도 여기서 본다. 지워진 Agent 와 다른 테넌트의 Agent 는 게시하지 않은 Agent 와
+        같이 답한다."""
         called = await self.agents.get(called_id, tenant=caller.agent.tenant)
         item = await self.hub.get_by_agent(called.id) if called is not None else None
         if (
@@ -409,6 +426,7 @@ class AgentCallRuns:
             or item is None
             or item.kind != AGENT_KIND
             or item.tenant != called.tenant
+            or item.id not in _attached_items(caller.agent)
         ):
             raise _refused(409, SOURCE_UNPUBLISHED, "that agent is not published to the hub")
         chain = caller.chain
@@ -418,18 +436,15 @@ class AgentCallRuns:
             raise _refused(
                 409, CALL_TOO_DEEP, f"a call chain holds at most {MAX_CHAIN} agents", max=MAX_CHAIN
             )
-        return called
+        return called, item
 
     async def _admit(
-        self, caller: _Caller, called: Agent, creds: CallCredentials, message: str
+        self, caller: _Caller, called: Agent, item: HubItem, creds: CallCredentials, message: str
     ) -> AgentRun:
         """전제 조건, 속도, 상한, 한 턴의 호출 수를 지난 호출의 실행 기록을 리스를 건 채 넣는다."""
         if called.state == "deploying":
             raise _busy(f"agent {called.name!r} is deploying")
-        self.run_service.ready(called, message)
-        refusal = self.publishing.call_refusal(called)
-        if refusal is not None:
-            raise _refused(refusal.status, refusal.code, refusal.detail, **refusal.extra)
+        self._require_callable(called, message)
         self._take_rate(called, caller.acts_as.sub)
         now = utcnow()
         cap = await self.run_service.cap_error(called.tenant, called.id, now, CALL_CAPS)
@@ -442,8 +457,6 @@ class AgentCallRuns:
                 f"a turn starts at most {MAX_CALLS_PER_TURN} agent calls",
                 max=MAX_CALLS_PER_TURN,
             )
-        item = await self.hub.get_by_agent(called.id)
-        trusted = item is not None and bool(item.calls_trusted)
         size, digest = input_digest(message)
         run = new_run(
             tenant=called.tenant,
@@ -456,13 +469,13 @@ class AgentCallRuns:
             input_sha256=digest,
             caller=RunCaller(
                 agent_id=caller.agent.acting_id,
-                session_id=caller.session_id,
+                session_id=await self._caller_session(caller),
                 turn_id=caller.turn_id,
                 grant_id=caller.grant.id if caller.grant is not None else None,
                 chain=caller.chain,
                 long_bound=caller.long_bound,
                 untrusted=(
-                    not trusted
+                    not item.calls_trusted
                     or caller.grant is None
                     or creds.outside
                     or turns_outside_off(caller.agent)
@@ -479,6 +492,28 @@ class AgentCallRuns:
         )
         await self.runs.insert(run)
         return run
+
+    def _require_callable(self, called: Agent, message: str) -> None:
+        """호출받는 Agent 가 이 메시지의 호출을 받는가. 게시와 저장이 보는 전제 조건을 먼저 보아
+        memory 노드와 세션 예산을 잃은 리비전이 그때와 같은 409 agent_source_runs_unmet 으로
+        답한다. 턴을 받지 않는 Agent(409 not_deployed)와 입력 한도(413)는 실행의 것이다."""
+        if called.deployed is not None and serves_turns(called):
+            refusal = self.publishing.call_refusal(called)
+            if refusal is not None:
+                raise _refused(refusal.status, refusal.code, refusal.detail, **refusal.extra)
+        self.run_service.ready(called, message)
+
+    async def _caller_session(self, caller: _Caller) -> str | None:
+        """실행 기록에 적을 부르는 세션이다. 새 세션의 첫 턴은 런타임이 턴을 받아들인 뒤에야 위임에
+        세션이 붙으므로, 그 전에 온 호출은 부르는 실행의 세션을 읽고 없으면 위임을 한 번 다시
+        읽는다. 사슬과 호출 수는 위임으로 세므로 세션을 끝내 모르는 호출도 받는다."""
+        if caller.session_id is not None or caller.grant is None:
+            return caller.session_id
+        if caller.run is not None and caller.run.session_id is not None:
+            return caller.run.session_id
+        await asyncio.sleep(SESSION_ATTACH_WAIT_SECONDS)
+        grant = await self.grants.get(caller.grant.id)
+        return grant.session_id if grant is not None else None
 
     def _take_rate(self, called: Agent, sub: str) -> None:
         """그 사람이 이 Agent 에 보내는 호출을 채팅처럼 센다. 한도는 호출받는 리비전의 것이고
@@ -580,6 +615,10 @@ class AgentCallRuns:
             detail = e.detail if isinstance(e.detail, dict) else {}
             await self._audit(action, called_id, seen, e.status_code, detail.get("code"))
             raise
+        except Exception:
+            # 뜻밖의 오류도 요청 하나의 행을 남긴다. 답은 앱의 500 이고 코드는 없다
+            await self._audit(action, called_id, seen, 500, None)
+            raise
         seen.status = answer.get("status")
         await self._audit(action, called_id, seen, 200, answer.get("code"))
         return answer
@@ -615,6 +654,11 @@ class AgentCallRuns:
             await self.audit.record(event)
         except Exception as e:  # noqa: BLE001 - 감사가 막혀도 답은 같다
             logger.warning("agent call audit row %s not written: %s", action, e)
+
+
+def _attached_items(agent: Agent) -> list[str]:
+    """부르는 Agent 의 배포된 리비전이 Tool 로 붙인 허브 항목의 id 다."""
+    return agent_source_items(agent.deployed) if agent.deployed is not None else []
 
 
 def _unavailable(detail: str, **extra: Any) -> AgentCallError:

@@ -15,10 +15,9 @@ from daegam.services.agent_runtime import ClosingBody, ProxyResponse
 from daegam.services.lease_worker import LeaseWorker
 from daegam.services.runs.events import RunEvents
 from daegam.services.runs.fire import ScheduleFireWorker
-from daegam.services.runs.person import BoundPersonCheck
+from daegam.services.runs.person import ACTS_AS_UNAVAILABLE, BoundPersonCheck
 from daegam.services.runs.service import MAX_CALLS_RUNNING, MAX_RUNNING
 from daegam.services.runs.start import (
-    ACTS_AS_UNAVAILABLE,
     AGENT_CALL_TIMEOUT,
     MAX_PARALLEL,
     RETRY_BASE,

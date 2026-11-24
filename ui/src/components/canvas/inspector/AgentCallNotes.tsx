@@ -12,7 +12,7 @@ export function AgentCallNotes({ tool, call }: { tool: string | undefined; call:
   const text = t.canvas.tools;
   // 검사가 읽은 이름이 먼저다. 검사 전에는 허브 목록의 항목 이름에서 만든 이름이다
   const name = call?.tool ?? tool;
-  const recording = t.clusters.detail.usageMetrics[call?.record_bodies ? "on" : "off"];
+  const recording = text.agentRecording[call?.record_bodies ? "on" : "off"];
   return (
     <div className="flex flex-col gap-2" data-testid="tools-agent-call">
       {name ? (

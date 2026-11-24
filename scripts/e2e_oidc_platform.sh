@@ -110,6 +110,7 @@ kill_stale_pf "$API_PORT" "$OIDC_PORT" "$VMCP_PORT"
 . "$HERE/lib/e2e_control_plane.sh"
 . "$HERE/lib/e2e_auth_mode.sh"
 . "$HERE/lib/e2e_report.sh"
+# as_person 은 여기에 있다
 . "$HERE/lib/e2e_api.sh"
 . "$HERE/lib/e2e_calc.sh"
 # lab Redis 를 Database 로 등록하는 lab_database 는 여기에 있다 (STEP 9 의 Agent 의 memory)
@@ -175,13 +176,6 @@ claims_ok() {
   c="$(jwt_json "$2" 1)"
   [ "$(python3 -c 'import json, sys; c = json.loads(sys.argv[1]); print(bool(eval(sys.argv[2])))' "$c" "$3")" = True ] \
     || die "$1" "token claims $c do not hold: $3"
-}
-
-# as_person TOKEN COMMAND... -> COMMAND 를 그 사람의 Bearer 로 부른다. api·chat·run_now 는 AUTH 를 싣는다
-as_person() {
-  local AUTH=(-H "Authorization: Bearer $1")
-  shift
-  "$@"
 }
 
 # revoked COLLECTION ID -> 그 문서가 회수됐으면 "<rc1 이 아는 까닭> <새 까닭>" 을 찍는다(새 까닭이 없으면 None).

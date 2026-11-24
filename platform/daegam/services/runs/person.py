@@ -28,7 +28,7 @@ Teams 턴(P47 6.3절)도 같은 확인을 쓴다. 요구하는 scope 는 인자�
 from __future__ import annotations
 
 from collections.abc import Collection
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from daegam.auth import rbac
 from daegam.config import Settings
@@ -52,6 +52,9 @@ LOST_ACCESS = "acts_as_lost_access"
 # 묶인 사람의 마지막 IdP 확인이 긴 한도를 넘어 끝낸 실행의 까닭 (P53b 6.3절). 소스는 LOST_ACCESS 와
 # 원인 unconfirmed 로 멈추고, 화면은 실행과 소스 모두 그 사람이 며칠 동안 로그인하지 않았다고 말한다
 ACTS_AS_UNCONFIRMED = "acts_as_unconfirmed"
+# 실행을 그 사람의 이름으로 돌릴 수 없어 끝낸 까닭이다. 평가 실행과 다른 Agent 가 부른 실행이 쓰고,
+# 호출 경로는 같은 코드로 거절한다
+ACTS_AS_UNAVAILABLE = "acts_as_unavailable"
 CAUSE_ACCOUNT = "account"
 CAUSE_PASSWORD = "password"
 CAUSE_ROLE = "role"
@@ -122,27 +125,30 @@ class BoundPersonCheck:
         rows = await self.memberships.list_for_sub(acts_as.sub)
         tenants = [m.tenant for m in rows]
         held = HeldAccess.of(acts_as.sub, acts_as.tv, tenant)
-        # 위임과 같은 끝이다. 토큰 한 수명이 남지 않으면 위임이 거절되어 Agent 의 이름으로 돌게
-        # 되므로 시작에서 멈춘다
-        ttl = timedelta(seconds=self.settings.turn_token_ttl_seconds)
-        bound = self.settings.interactive_bound if interactive else self.settings.idp_confirm_bound
-        oldest = utcnow() - bound + ttl
         reason: Revocation | None = None
         if self.settings.auth_mode == "local":
             user = await self.users.get(acts_as.sub)
             reason = lost_access(held, user, tenants)
             # local 모드의 끝은 Teams 턴만 보고 늘 긴 한도다
-            oldest = utcnow() - self.settings.idp_confirm_bound + ttl
+            oldest = self._oldest(self.settings.idp_confirm_bound)
             stale = user is not None and (user.last_login_at is None or user.last_login_at < oldest)
             if reason is None and strict and stale:
                 reason = UNCONFIRMED
         elif self.settings.auth_mode == "oidc":
             person = await self.people.get(acts_as.sub)
+            bound = (
+                self.settings.interactive_bound if interactive else self.settings.idp_confirm_bound
+            )
             if person is not None or strict:
-                reason = lost_idp_access(held, person, tenants, oldest=oldest)
+                reason = lost_idp_access(held, person, tenants, oldest=self._oldest(bound))
         if reason is not None:
             return cause_of(reason)
         return None if _grants(rows, tenant, scopes) else CAUSE_ROLE
+
+    def _oldest(self, bound: timedelta) -> datetime:
+        """bound 한도에서 마지막 확인이 이보다 앞이면 끝난 것이다. 위임과 같은 끝이다. 토큰 한
+        수명이 남지 않으면 위임이 거절되어 Agent 의 이름으로 돌게 되므로 시작에서 멈춘다."""
+        return utcnow() - bound + timedelta(seconds=self.settings.turn_token_ttl_seconds)
 
     async def lost_for(self, run: AgentRun) -> str | None:
         """실행의 사람이 접근을 잃은 원인을 그 출처의 규칙으로 본다. 다른 Agent 가 부른 실행은
@@ -169,6 +175,7 @@ def _grants(rows: list[Membership], tenant: str, scopes: Collection[str]) -> boo
 
 
 __all__ = [
+    "ACTS_AS_UNAVAILABLE",
     "ACTS_AS_UNCONFIRMED",
     "CALL_SCOPES",
     "CAUSE_ACCOUNT",

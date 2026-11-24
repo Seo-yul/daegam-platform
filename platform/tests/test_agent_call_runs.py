@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import dataclasses
 import time
 from datetime import timedelta
@@ -56,12 +57,13 @@ from daegam.services.runs.service import (
     RunService,
 )
 from daegam.services.runs.start import RunStartWorker
+from daegam.services.runs.watch import RunWatchWorker
 from daegam.services.turn_person import TurnDelegation
 from daegam.store.agent_runs import ActsAs, AgentRun, MongoAgentRunStore, RunCaller, new_run
 from daegam.store.agents import AgentCallPin, ToolPin
 from daegam.store.base import ItemLease, hash_token, utcnow
 from daegam.store.turn_grants import PURGE_AFTER, GrantTarget, MongoTurnGrantStore, TurnGrant
-from tests.helpers.agents import node_of
+from tests.helpers.agents import node_of, template_spec
 from tests.helpers.aio import run_stores
 from tests.helpers.consts import ISSUER
 from tests.helpers.runs import (
@@ -98,9 +100,28 @@ class CallAgent(FakeAgent):
         return self.id
 
 
-def _uses(called: str) -> dict[str, ToolPin]:
-    pin = AgentCallPin(agent_id=called, agent_name=called, description="d", timeout_seconds=630)
-    return {"tools-call": ToolPin(names=["ask_x"], call=pin)}
+def _item(agent_id: str) -> str:
+    """그 Agent 를 게시한 허브 항목의 id 다."""
+    return f"hub-{agent_id}"
+
+
+def _uses(*called: str) -> dict[str, Any]:
+    """called 를 Tool 로 붙여 배포한 Agent 의 칸이다. 리비전의 tools 노드가 그 항목을 대고 핀이
+    호출받는 Agent 를 댄다."""
+    spec = template_spec()
+    nodes = spec["graph"]["nodes"]
+    first = node_of(spec, "tools-calculator")
+    pins: dict[str, ToolPin] = {}
+    for n, agent_id in enumerate(called):
+        node = first if n == 0 else copy.deepcopy(first) | {"id": f"tools-call-{n}"}
+        node["data"]["source"] = {"kind": "agent", "id": _item(agent_id)}
+        if n:
+            nodes.append(node)
+        pin = AgentCallPin(
+            agent_id=agent_id, agent_name=agent_id, description="d", timeout_seconds=630
+        )
+        pins[node["id"]] = ToolPin(names=["ask_x"], call=pin)
+    return {"spec": spec, "tool_pins": pins}
 
 
 class Agents:
@@ -120,11 +141,18 @@ class Hub:
 
     def __init__(self, **trusted: bool) -> None:
         self.trusted = trusted
+        # 게시를 거뒀다가 다시 게시한 Agent 의 새 항목 id
+        self.republished: dict[str, str] = {}
 
     async def get_by_agent(self, agent_id: str) -> Any:
         if agent_id not in self.trusted:
             return None
-        return SimpleNamespace(kind="agent", tenant=TENANT, calls_trusted=self.trusted[agent_id])
+        return SimpleNamespace(
+            id=self.republished.get(agent_id, _item(agent_id)),
+            kind="agent",
+            tenant=TENANT,
+            calls_trusted=self.trusted[agent_id],
+        )
 
 
 class InstanceTokens:
@@ -182,9 +210,9 @@ class Rig:
     ) -> None:
         self.settings, self.grants, self.runs = settings, grants, runs
         self.agents = Agents(
-            CallAgent(id=ROOT, name="root", tool_pins=_uses(CALLING)),
-            CallAgent(id=CALLING, name="support", tool_pins=_uses(CALLED)),
-            CallAgent(id=CALLED, name="billing", tool_pins=_uses(THIRD)),
+            CallAgent(id=ROOT, name="root", **_uses(CALLING)),
+            CallAgent(id=CALLING, name="support", **_uses(CALLED)),
+            CallAgent(id=CALLED, name="billing", **_uses(THIRD, ROOT)),
             CallAgent(id=THIRD, name="third"),
         )
         self.hub = Hub(**(published or {CALLED: True, THIRD: True, ROOT: True}))
@@ -324,6 +352,12 @@ def _refused(error: pytest.ExceptionInfo[Any]) -> tuple[int, str]:
 def quick(monkeypatch: pytest.MonkeyPatch) -> None:
     """요청이 끝나지 않은 실행을 기다리지 않고 답한다."""
     monkeypatch.setattr(agent_call_runs, "REQUEST_WAIT_SECONDS", 0.0)
+
+
+@pytest.fixture(autouse=True)
+def no_session_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    """세션이 아직 붙지 않은 위임을 다시 읽기 전에 기다리지 않는다."""
+    monkeypatch.setattr(agent_call_runs, "SESSION_ATTACH_WAIT_SECONDS", 0.0)
 
 
 # -- 토큰은 호출 경로만 연다 (7절) ----------------------------------------
@@ -524,6 +558,113 @@ def test_a_settled_run_answers_at_once_with_its_code(settings, status, reason, w
         answer = await rig.calls.poll(CALLED, run.id, CallCredentials(token(grant)), 25)
         assert answer == {"run_id": run.id, **want}
         assert time.monotonic() - began < 2
+
+    _go(settings, body)
+
+
+def test_a_republished_agent_refuses_the_revisions_that_attached_its_old_item(settings, quick):
+    """게시를 거뒀다가 다시 게시한 Agent 는 새 항목이다. 옛 항목을 붙여 배포한 리비전은 새 항목의
+    사용 권한을 보는 저장과 배포를 거치지 않았으므로 부르지 못한다. header 모드도 같다."""
+
+    async def body(grants, runs) -> None:
+        rig = Rig(_local(settings), grants, runs)
+        grant = await rig.grant()
+        assert (await rig.start(grant))["status"] == "running"
+        del rig.hub.trusted[CALLED]
+        with pytest.raises(REFUSALS) as e:
+            await rig.start(grant)
+        assert _refused(e) == (409, "agent_source_unpublished")
+        rig.hub.trusted[CALLED] = True
+        rig.hub.republished[CALLED] = "hub-billing-again"
+        with pytest.raises(REFUSALS) as e:
+            await rig.start(grant)
+        assert _refused(e) == (409, "agent_source_unpublished")
+        header = Rig(settings, grants, runs)
+        header.hub.republished[CALLED] = "hub-billing-again"
+        with pytest.raises(REFUSALS) as e:
+            await header.calls.start(CALLED, CallCredentials(INSTANCE_TOKEN, "s", "t"), MESSAGE)
+        assert _refused(e) == (409, "agent_source_unpublished")
+        # 새 항목을 붙여 다시 배포한 리비전은 부른다
+        source = node_of(rig.agents.by_id[CALLING].spec, "tools-calculator")["data"]["source"]
+        source["id"] = "hub-billing-again"
+        assert (await rig.start(grant))["status"] == "running"
+
+    _go(settings, body)
+
+
+def test_a_called_revision_that_lost_its_prerequisites_answers_the_call_code(settings, quick):
+    """memory 노드나 세션 예산을 잃은 리비전은 게시와 저장이 답하는 코드로 거절한다. 실행의 코드가
+    먼저 나가지 않는다."""
+
+    async def body(grants, runs) -> None:
+        rig = Rig(_local(settings), grants, runs)
+        grant = await rig.grant()
+        unmet = ServiceError(409, "agent_source_runs_unmet", "needs a memory node and a budget")
+        rig.calls.publishing.call_refusal = lambda doc: unmet  # type: ignore[method-assign]
+
+        def ready(agent: Any, message: str | None) -> int:
+            raise ServiceError(409, "runs_need_memory", "no memory node")
+
+        rig.service.ready = ready  # type: ignore[method-assign,assignment]
+        with pytest.raises(REFUSALS) as e:
+            await rig.start(grant)
+        assert _refused(e) == (409, "agent_source_runs_unmet")
+        # 턴을 받지 않는 Agent 는 실행의 코드 그대로다
+        rig.agents.by_id[CALLED].state = "draft"
+        with pytest.raises(REFUSALS) as e:
+            await rig.start(grant)
+        assert _refused(e) == (409, "runs_need_memory")
+
+    _go(settings, body)
+
+
+def test_a_request_without_a_bearer_and_an_unexpected_error_leave_an_audit_row(settings, quick):
+    async def body(grants, runs) -> None:
+        rig = Rig(_local(settings), grants, runs)
+        with pytest.raises(REFUSALS) as e:
+            await rig.calls.start(CALLED, CallCredentials(None), MESSAGE)
+        assert _refused(e)[0] == 401
+        grant = await rig.grant()
+
+        async def down(agent_id: str) -> Any:
+            raise RuntimeError("the hub store is down")
+
+        rig.hub.get_by_agent = down  # type: ignore[method-assign]
+        with pytest.raises(RuntimeError):
+            await rig.start(grant)
+        rows = [(e.action, e.sub, e.status, e.result, e.error_code) for e in rig.audit.events]
+        assert rows == [
+            ("agent_call_start", None, 401, "error", "unauthorized"),
+            ("agent_call_start", "alice", 500, "error", None),
+        ]
+
+    _go(settings, body)
+
+
+def test_a_first_turn_call_records_the_session_once_the_grant_holds_it(settings, quick):
+    """새 세션의 첫 턴은 위임에 세션이 붙기 전에 호출이 올 수 있다. 부르는 실행의 세션을 읽고,
+    없으면 위임을 한 번 다시 읽는다."""
+
+    async def body(grants, runs) -> None:
+        rig = Rig(_local(settings), grants, runs)
+        calling = _calling_run()
+        await runs.insert(calling)
+        of_run = await rig.grant("g-run", trigger="run", session_id=None, run_id=calling.id)
+        run = await rig.stored((await rig.start(of_run))["run_id"])
+        assert run.caller is not None and run.caller.session_id == "s-run"
+
+        chat = await rig.grant("g-chat", session_id=None)
+        read = rig.grants.get
+
+        async def attached(grant_id: str) -> Any:
+            # 런타임이 턴을 받아들여 세션이 붙었다
+            await rig.grants.coll.update_one({"_id": grant_id}, {"$set": {"session_id": "s-new"}})
+            return await read(grant_id)
+
+        first = CallCredentials(token(chat))
+        caller = await rig.calls._caller(CALLED, first)
+        rig.grants.get = attached  # type: ignore[method-assign]
+        assert await rig.calls._caller_session(caller) == "s-new"
 
     _go(settings, body)
 
@@ -840,7 +981,46 @@ def test_the_sweep_cancels_first_turn_calls_of_closed_grants_only(settings):
             docs[name].id for name in ("ended-running", "due", "purged")
         }
         assert after["ended-running"].status == "running"
-        assert await rig.calls.sweep() == 3 and len(rig.turns.stopped) == 6
+        # 끝난 위임은 틱마다 다시 온다. 이미 표시한 실행은 건드리지도 다시 멈추지도 않는다
+        seen_at = after["ended-running"].last_event_at
+        assert await rig.calls.sweep() == 0 and len(rig.turns.stopped) == 3
+        assert (await rig.stored(docs["ended-running"].id)).last_event_at == seen_at
+
+    _go(settings, body)
+
+
+def test_a_marked_call_whose_turn_never_ends_is_settled_by_the_watch(settings):
+    """멈추라고 했지만 `turn_end` 가 오지 않는 호출(파드가 없어졌다)이다. 쓸기가 틱마다 그 기록을
+    다시 건드리지 않아야 조용한 시간이 지난 뒤 지켜보기가 `caller_ended` 로 끝낸다."""
+
+    async def body(grants, runs) -> None:
+        rig = Rig(_local(settings), grants, runs)
+        await rig.grant("g-ended", ended_at=utcnow(), end_reason="done")
+        run = _call_run("g-ended")
+        await runs.insert(run)
+        worker = RunWatchWorker(
+            rig.agents,  # type: ignore[arg-type]
+            runs,
+            rig.proxy,  # type: ignore[arg-type]
+            owner="w1",
+            interval=15,
+            lease_seconds=60,
+            caller_sweep=rig.calls.sweep,
+        )
+        for _ in range(3):
+            await worker.tick()
+        marked = await rig.stored(run.id)
+        assert (marked.status, marked.stop_reason) == ("running", CALLER_ENDED)
+        assert [r.id for r in rig.turns.stopped] == [run.id]
+        # 표시를 남긴 뒤로 조용한 시간이 지났다
+        await runs.coll.update_one(
+            {"_id": run.id}, {"$set": {"last_event_at": utcnow() - timedelta(hours=2)}}
+        )
+        for _ in range(3):
+            await worker.tick()
+        settled = await rig.stored(run.id)
+        assert (settled.status, settled.reason) == ("cancelled", CALLER_ENDED)
+        assert [r.id for r in rig.turns.stopped] == [run.id]
 
     _go(settings, body)
 

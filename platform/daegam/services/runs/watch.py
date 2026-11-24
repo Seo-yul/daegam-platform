@@ -15,7 +15,7 @@
   없거나 내려간 실행은 `agent_deleted`·`agent_undeployed` 로 `cancelled` 다. 배포 중인 Agent 는
   롤아웃이 끝난 뒤에 본다.
 
-틱마다 먼저 부른 턴이 끝난 Agent 호출을 쓴다(`caller_sweep`, P46 6.5절). 위임의 끝이 호출을 그
+틱마다 먼저, 부른 턴이 끝난 Agent 호출을 취소한다(`caller_sweep`, P46 6.5절). 위임의 끝이 호출을 그
 자리에서 끝내지만, 이벤트 없이 지나는 위임의 마감과 그 끝을 받은 레플리카가 호출을 끝내지 못한
 때를 이 쓸기가 덮는다.
 """
@@ -70,7 +70,7 @@ class RunWatchWorker(LeaseWorker[AgentRun]):
         self.agents = agents
         self.runs = runs
         self.proxy = proxy
-        # 부른 턴이 끝난 Agent 호출을 끝낸다. 없으면(호출을 끈 플랫폼, 시험) 쓸지 않는다
+        # 부른 턴이 끝난 Agent 호출을 끝낸다. 없으면(호출을 끈 플랫폼, 시험) 건너뛴다
         self.caller_sweep = caller_sweep
 
     async def tick(self) -> int:

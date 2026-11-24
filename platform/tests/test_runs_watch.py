@@ -302,7 +302,8 @@ def test_a_quiet_marked_run_or_one_whose_agent_is_gone_is_cancelled(fields, agen
 
 
 def test_each_tick_sweeps_the_calls_of_ended_turns_first_and_survives_its_failure():
-    """틱은 부른 턴이 끝난 Agent 호출을 먼저 쓴다 (P46 6.5절). 쓸기가 실패해도 지켜보기는 돈다."""
+    """틱은 부른 턴이 끝난 Agent 호출을 먼저 취소한다 (P46 6.5절). 쓸기가 실패해도 지켜보기는
+    돈다."""
     swept: list[str] = []
 
     async def sweep() -> int:

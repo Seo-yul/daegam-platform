@@ -41,6 +41,7 @@ def test_screen_origin_rules_match_the_platform() -> None:
     source = read_source(TOOL_SAFETY_TS)
     assert _ts_const(source, "ORIGIN_INTERNAL") == f'"{ORIGIN_INTERNAL}"', FIX
     assert _ts_const(source, "ORIGIN_SCRIPT") == f'"{ORIGIN_SCRIPT}"', FIX
+    assert _ts_const(source, "ORIGIN_AGENT") == f'"{ORIGIN_AGENT}"', FIX
     third_party = re.findall(r'"([a-z]+)"', _ts_const(source, "THIRD_PARTY_ORIGINS"))
     assert set(third_party) == THIRD_PARTY_ORIGINS, FIX
 

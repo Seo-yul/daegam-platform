@@ -79,7 +79,7 @@ from daegam.services.evaluation.grader import (
 from daegam.services.evaluation.holds import EVALUATION_TOOLS_UNKNOWN
 from daegam.services.evaluation.verdicts import CHANGED, totals
 from daegam.services.lease_worker import QueuedLeaseWorker
-from daegam.services.runs.person import BoundPersonCheck
+from daegam.services.runs.person import ACTS_AS_UNAVAILABLE, BoundPersonCheck
 from daegam.services.turn_grants import (
     GrantPerson,
     OpenedGrant,
@@ -149,8 +149,7 @@ RUNTIME_REFUSALS = frozenset(
     }
 )
 
-# 실행이 끝난 까닭 (13절)
-ACTS_AS_UNAVAILABLE = "acts_as_unavailable"
+# 실행이 끝난 까닭 (13절). `ACTS_AS_UNAVAILABLE` 은 `services/runs/person.py` 의 것이다
 CASE_NOT_STARTED = "case_not_started"
 DAILY_BUDGET = "daily_budget"
 PREVIEW_ENDED = "preview_ended"
@@ -872,7 +871,6 @@ class EvaluationRunWorker(QueuedLeaseWorker[EvaluationRun]):
 
 
 __all__ = [
-    "ACTS_AS_UNAVAILABLE",
     "CASE_NOT_STARTED",
     "DAILY_BUDGET",
     "EVALUATIONS_DISABLED",

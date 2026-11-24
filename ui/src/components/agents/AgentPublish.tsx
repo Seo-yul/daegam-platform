@@ -25,7 +25,7 @@ import { hubItemsKey } from "@/lib/queryKeys";
 import { useTenant } from "@/lib/tenant";
 
 /** Tool 설명 길이의 위 끝 (서버 `store/hub.AGENT_DESCRIPTION_MAX`). */
-const DESCRIPTION_MAX = 1024;
+export const DESCRIPTION_MAX = 1024;
 /** 게시와 해제가 끝나면 다시 읽는 목록. 항목이 생기거나 사라지고, 이 Agent 를 Tool 로 쓰는 Agent 의 상태 경고가 바뀐다. */
 const PUBLISH_INVALIDATES = ["hub", "agents"] as const;
 

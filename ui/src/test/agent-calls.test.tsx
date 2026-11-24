@@ -226,6 +226,16 @@ describe("허브의 agent 항목", () => {
     expect(within(card).getByTestId("hub-agent-description")).toHaveTextContent("Researches a topic");
     expect(lastRequest("GET", `/hub/${ITEM.id}/tools`)).toBeUndefined();
   });
+
+  it("게시 해제 확인 창은 삭제 문장을 빌리지 않고 빈 문단도 두지 않는다", async () => {
+    const user = userEvent.setup();
+    hubState.items = [ITEM];
+    render(<TestApp initialPath={`/hub/${ITEM.id}`} />);
+    await user.click(await screen.findByTestId("delete-button"));
+    const target = await screen.findByTestId("confirm-target");
+    expect(target).toHaveTextContent(ITEM.name);
+    expect(target.parentElement?.querySelectorAll("p:empty")).toHaveLength(0);
+  });
 });
 
 describe("자동 실행 탭의 Agent 호출", () => {
