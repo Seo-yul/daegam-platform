@@ -39,9 +39,9 @@ ALWAYS = {
 # 상한은 아래 BEFORE_PICKED·KILL_GRACE 와 합쳐 조각이 잡의 시간 안에 끝나게 잡는다
 # (platform/tests/test_e2e_select.py 가 e2e-cluster.yml 의 timeout-minutes 와 맞대 본다)
 OPTIONAL = {
-    # 상한 36분은 스크립트의 기다림을 더한 값(약 25-35분)이고 아직 재지 않았다. NOT_BLOCKING_YET 에서
-    # 빼기 전에 k3d 에서 잰 값으로 고친다
-    "core": (("e2e-netpol", 15), ("e2e-llm-gateway", 36)),
+    # e2e-llm-gateway 는 k3d 에서 1050 s 였다(e2e-cluster run 45277964972). 아래 상한은 모두 그 실행에서 잰 값에
+    # 여유를 더한 것이다
+    "core": (("e2e-netpol", 15), ("e2e-llm-gateway", 28)),
     "agent": (
         ("e2e-agent-redis", 10),
         ("e2e-chat-redis", 5),
@@ -57,20 +57,15 @@ OPTIONAL = {
         # Agent 를 하나씩 배포하고 스크립트의 감사 기록을 기다린다)는 아직 재지 않았고 약 4분을 어림해 더했다. 24분이 auth
         # 조각이 잡의 시간 안에 받는 끝이다
         ("e2e-agent-local", 24),
-        # 상한 35분은 P53b 8절이 정한 몫이다(auth 조각의 남은 시간 40분에서 KILL 유예를 뺀 것). 발급자를 세 번 바꾸고
-        # 그때마다 제어면과 vMCP 를 굴린다. 아직 재지 않았다. NOT_BLOCKING_YET 에서 빼기 전에 k3d 에서 잰 값으로 고친다
-        ("e2e-oidc-platform", 35),
+        # 발급자를 세 번 바꾸고 그때마다 제어면과 vMCP 를 굴린다. k3d 에서 1010 s 였다
+        ("e2e-oidc-platform", 28),
     ),
-    "sandbox": (("e2e-sandbox", 30),),
-    # 상한 60분은 스크립트의 기다림을 더한 값(약 40분, 깨우기 시간 재기 10번 포함)에 P44b 의 미리 보기
-    # 단계(규칙을 둔 서버 굴리기, 미리 보기 둘, 끝내기 워커, 약 10분)를 더한 것이고 아직 재지 않았다.
-    # NOT_BLOCKING_YET 에서 빼기 전에 k3d 에서 잰 값으로 고친다
-    # e2e-evaluation 의 상한 30분은 스크립트의 기다림(Agent 의 배포와 재배포 다섯, 평가 실행 셋과 그 미리 보기의 기동, 약
-    # 15-20분)을 어림한 값이고 아직 재지 않았다. NOT_BLOCKING_YET 에서 빼기 전에 k3d 에서 잰 값으로 고친다
-    "provisioning": (("e2e-provisioning", 60), ("e2e-evaluation", 30)),
-    # 상한 40분은 스크립트의 기다림(모드 바꾸기, Gateway 다섯의 배포와 다시 배포 넷, 재적용이 소비자와 사슬을
-    # 따라오는 틱들, 약 25-30분)을 어림한 값이고 아직 재지 않았다. NOT_BLOCKING_YET 에서 빼기 전에 k3d 에서 잰 값으로 고친다
-    "exchange": (("e2e-exchange", 40),),
+    # e2e-sandbox 는 k3d 에서 210 s 였다
+    "sandbox": (("e2e-sandbox", 10),),
+    # e2e-provisioning 은 k3d 에서 1110 s(깨우기 시간 재기 10번과 미리 보기 단계 포함), e2e-evaluation 은 135 s 였다
+    "provisioning": (("e2e-provisioning", 30), ("e2e-evaluation", 8)),
+    # e2e-exchange 는 k3d 에서 950 s 였다(e2e-cluster run 45291833539)
+    "exchange": (("e2e-exchange", 26),),
 }
 # 함께 고르면 덮는 쪽만 도는 게이트. 덮는 게이트가 같은 단계를 모두 돈다. header 모드의
 # e2e-assistant 는 STEP 0~8 이고 e2e-assistant-oidc 는 같은 STEP 0~8 뒤에 9~12 를 돈다
@@ -99,16 +94,8 @@ AFTER_PICKED = 5
 DEFAULT_INSTALL = {"core": 41}
 # 고른 게이트 가운데 k3d 에서 아직 통과하지 못해 실패해도 조각을 막지 않는 것. 새로 더한
 # 게이트는 처음 통과할 때까지 여기 두고, 통과를 기록하는 PR 에서 뺀다(docs/guide/e2e.md
-# 20절). e2e-llm-gateway(P38)는 그 첫 통과를 기다리고, e2e-sandbox 와 e2e-provisioning(P44), e2e-oidc-platform
-# (P53b), e2e-exchange(P57), e2e-evaluation(P45)은 아직 한 번도 돌지 않았다
-NOT_BLOCKING_YET: tuple[str, ...] = (
-    "e2e-llm-gateway",
-    "e2e-sandbox",
-    "e2e-provisioning",
-    "e2e-oidc-platform",
-    "e2e-exchange",
-    "e2e-evaluation",
-)
+# 20절). 지금은 없다
+NOT_BLOCKING_YET: tuple[str, ...] = ()
 # 클러스터 안 mock-oidc 가 토큰을 내야 하는 게이트
 NEEDS_MOCK_OIDC = ("e2e-mcp-auth", "e2e-agent-oidc", "e2e-assistant-oidc", "e2e-oidc-platform")
 # 설치본의 배포와 e2e-install 뒤에 이 차례로 돈다. 앞의 셋은 메아리 네임스페이스와

@@ -46,8 +46,7 @@
 #           열고 pending 이 0 이며, vMCP·앞단·노출 Agent 가 바꾼 뒤 확인된 검증기로 든다
 #   정리    만든 것을 지우고 Group Mapping·Tenant Settings·스텁 provider 를 되돌린 뒤 모드를 되돌려 재적용을 기다린다
 #
-# make e2e-oidc-platform 이고 k3d 의 auth 조각에서 상한 35분으로 돈다(scripts/lib/e2e_select.py). 첫 통과 전에는
-# NOT_BLOCKING_YET 이다. macOS 에는 timeout 이 없으므로 기다림은 모두 폴링이다. 출력과 종료 코드는 lib/e2e_report.sh 의
+# make e2e-oidc-platform 이고 k3d 의 auth 조각에서 돈다(상한은 scripts/lib/e2e_select.py). macOS 에는 timeout 이 없으므로 기다림은 모두 폴링이다. 출력과 종료 코드는 lib/e2e_report.sh 의
 # 계약이다.
 set -euo pipefail
 

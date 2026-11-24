@@ -336,9 +336,11 @@ step_2() {
   # 그때까지 규칙 있는 Divide 는 C 에 없다(rules_digest_behind). 규칙 없는 Add 가 한 틱 먼저 열린다
   wait_outcome 2 "$SETTLE_WAIT" "$TOK_DEV" "$C_URL" Divide "$DIV_ARGS" called "$DEV through C after C applied P's rule"
   until="$(cluster_now)"
+  # 감사는 Divide 로 본다. Add 는 P 와 C 가 서로의 렌더를 따라 파드를 바꾸는 사이에 불려, 옛 파드의 그 줄을 수집기가
+  # 읽기 전에 파드가 사라질 수 있다. Divide 는 두 Gateway 가 자리 잡은 뒤의 호출이다
   audit_expect 2 "$since" \
-    "p|$since|$until|$P_ID|Add|svc:vmcp:gw-$C_NAME|*|1" \
-    "c|$since|$until|$C_ID|Add|$DEV_ID|-|1"
+    "p|$since|$until|$P_ID|Divide|svc:vmcp:gw-$C_NAME|*|1" \
+    "c|$since|$until|$C_ID|Divide|$DEV_ID|-|1"
   pass 2 "C's Entry token is bound to gateway:$P_ID with no groups, cid or act; once P named C (no published_consumer_pending) $DEV called Add and Divide through C; P's audit records svc:vmcp:gw-$C_NAME and C's records $DEV"
 }
 
