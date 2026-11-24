@@ -60,27 +60,16 @@ def test_all_picks_every_gate_and_every_picked_gate_blocks() -> None:
     assert set(shards) == {"core", "agent", "auth", "sandbox", "provisioning", "exchange"}
     assert shards["auth"]["mock_oidc"] and shards["agent"]["ui"]
     assert shards["core"]["netpol_minutes"] == 15
-    assert shards["core"]["blocking_gates"] == ""
+    assert shards["core"]["blocking_gates"] == "e2e-llm-gateway:28"
     assert shards["agent"]["blocking_gates"].split()[0] == "e2e-agent-redis:10"
     assert shards["agent"]["blocking_gates"].split()[-1] == "e2e-ui-full:20"
-    assert shards["auth"]["blocking_gates"].split()[-1] == "e2e-agent-local:24"
-    # 막지 않는 게이트는 처음 통과를 기다리는 e2e-llm-gateway(P38)와 아직 한 번도 돌지 않은
-    # e2e-sandbox(P40), e2e-provisioning(P44), e2e-oidc-platform(P53b), e2e-exchange(P57),
-    # e2e-evaluation(P45)이다
+    assert shards["auth"]["blocking_gates"].split()[-1] == "e2e-oidc-platform:28"
+    # 고른 게이트는 모두 k3d 에서 통과한 적이 있어 막는다
     soft = {e.split(":")[0] for m in shards.values() for e in m["soft_gates"].split()}
-    assert soft == set(NOT_BLOCKING_YET)
-    assert soft == {
-        "e2e-llm-gateway",
-        "e2e-sandbox",
-        "e2e-provisioning",
-        "e2e-oidc-platform",
-        "e2e-exchange",
-        "e2e-evaluation",
-    }
-    assert shards["core"]["soft_gates"] == "e2e-llm-gateway:36"
-    assert shards["provisioning"]["soft_gates"] == "e2e-provisioning:60 e2e-evaluation:30"
-    assert shards["auth"]["soft_gates"] == "e2e-oidc-platform:35"
-    assert shards["sandbox"]["blocking_gates"] == shards["provisioning"]["blocking_gates"] == ""
+    assert soft == set(NOT_BLOCKING_YET) == set()
+    assert shards["provisioning"]["blocking_gates"] == "e2e-provisioning:30 e2e-evaluation:8"
+    assert shards["sandbox"]["blocking_gates"] == "e2e-sandbox:10"
+    assert shards["exchange"]["blocking_gates"] == "e2e-exchange:26"
     assert install(picked) == list(INSTALL)
 
 
@@ -105,10 +94,10 @@ def test_names_pick_their_shards_and_install_gates_in_run_order() -> None:
     assert describe(picked).splitlines()[-1] == "install e2e-install-extra: e2e-web-tools e2e-oauth"
 
 
-def test_the_llm_gateway_gate_runs_in_core_without_blocking() -> None:
+def test_the_llm_gateway_gate_runs_in_core_and_blocks() -> None:
     core = _shards(chosen("e2e: e2e-llm-gateway"))["core"]
-    assert core["blocking_gates"] == ""
-    assert core["soft_gates"] == "e2e-llm-gateway:36"
+    assert core["blocking_gates"] == "e2e-llm-gateway:28"
+    assert core["soft_gates"] == ""
 
 
 def _steps() -> list[dict]:
@@ -213,7 +202,7 @@ def test_sandbox_runs_on_its_own_k3d_shard_and_on_the_install() -> None:
     assert set(shards) == {"core", "agent", "sandbox"}
     sandbox = shards["sandbox"]
     assert sandbox["sandbox_image"] and not sandbox["mock_oidc"]
-    assert sandbox["soft_gates"] == "e2e-sandbox:30" and sandbox["kill_grace"] == 6
+    assert sandbox["blocking_gates"] == "e2e-sandbox:10" and sandbox["kill_grace"] == 6
     assert not any(m["sandbox_image"] for name, m in shards.items() if name != "sandbox")
     assert install(chosen("e2e: e2e-sandbox e2e-runs")) == ["e2e-runs", "e2e-sandbox"]
 
@@ -224,26 +213,25 @@ def test_provisioning_runs_alone_on_its_own_k3d_shard() -> None:
     shards = _shards(chosen("e2e: e2e-provisioning"))
     assert set(shards) == {"core", "agent", "provisioning"}
     alone = shards["provisioning"]
-    assert alone["soft_gates"] == "e2e-provisioning:60" and alone["blocking_gates"] == ""
+    assert alone["blocking_gates"] == "e2e-provisioning:30" and alone["soft_gates"] == ""
     assert not (alone["mock_oidc"] or alone["ui"] or alone["sandbox_image"])
     assert alone["kill_grace"] == 6
     assert install(chosen("e2e: e2e-provisioning")) == []
     assert [g for g, _ in OPTIONAL["provisioning"]] == ["e2e-provisioning", "e2e-evaluation"]
 
 
-def test_evaluation_runs_in_the_provisioning_shard_without_blocking() -> None:
+def test_evaluation_runs_in_the_provisioning_shard() -> None:
     # e2e-evaluation(P45)은 평가 미리 보기를 띄우므로 미리 보기를 띄우는 e2e-provisioning 과
-    # 한 조각에서 돈다. 고르지 않은 e2e-provisioning 은 돌지 않고, 처음 통과할 때까지 막지
-    # 않는다(P45 19절). 설치본 게이트가 아니다
+    # 한 조각에서 돈다. 고르지 않은 e2e-provisioning 은 돌지 않는다(P45 19절). 설치본 게이트가
+    # 아니다
     shards = _shards(chosen("e2e: e2e-evaluation"))
     assert set(shards) == {"core", "agent", "provisioning"}
     alone = shards["provisioning"]
-    assert alone["soft_gates"] == "e2e-evaluation:30" and alone["blocking_gates"] == ""
+    assert alone["blocking_gates"] == "e2e-evaluation:8" and alone["soft_gates"] == ""
     assert not (alone["mock_oidc"] or alone["ui"] or alone["sandbox_image"])
-    assert "e2e-evaluation" in NOT_BLOCKING_YET
     assert install(chosen("e2e: e2e-evaluation")) == []
     both = _shards(chosen("e2e: e2e-provisioning e2e-evaluation"))["provisioning"]
-    assert both["soft_gates"] == "e2e-provisioning:60 e2e-evaluation:30"
+    assert both["blocking_gates"] == "e2e-provisioning:30 e2e-evaluation:8"
 
 
 def test_exchange_runs_alone_on_its_own_k3d_shard() -> None:
@@ -252,7 +240,7 @@ def test_exchange_runs_alone_on_its_own_k3d_shard() -> None:
     shards = _shards(chosen("e2e: e2e-exchange"))
     assert set(shards) == {"core", "agent", "exchange"}
     alone = shards["exchange"]
-    assert alone["soft_gates"] == "e2e-exchange:40" and alone["blocking_gates"] == ""
+    assert alone["blocking_gates"] == "e2e-exchange:26" and alone["soft_gates"] == ""
     assert not (alone["mock_oidc"] or alone["ui"] or alone["sandbox_image"])
     assert alone["kill_grace"] == 6
     assert install(chosen("e2e: e2e-exchange")) == []

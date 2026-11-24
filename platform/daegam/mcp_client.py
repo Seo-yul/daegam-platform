@@ -10,12 +10,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
 import httpx2
-from mcp import ClientSession, types
+from mcp import ClientSession, MCPError, types
 from mcp.client.streamable_http import streamable_http_client
 
 # 공개된 이름이 없다. mcp 의 클라이언트들(`mcp.client.sse`, `session_group`)도 같은 곳에서 가져와
@@ -23,6 +23,13 @@ from mcp.client.streamable_http import streamable_http_client
 from mcp.shared._httpx_utils import create_mcp_http_client
 
 DEFAULT_TIMEOUT = 20.0
+
+# 세션이 있는 요청에 서버가 본문 없는 404 로 답했을 때 mcp 클라이언트가 올리는 `MCPError` 의
+# 메시지다. 서버가 그 세션을 모른다는 뜻이고, 그 요청은 처리되지 않았다. 에이전트 런타임의
+# `runtime/mcp.py` 가 같은 메시지로 가른다
+SESSION_GONE_MESSAGE = "Session terminated"
+# 다시 보내기 전에 쉬는 시간. 막 교체된 vMCP 는 다음 헬스 체크(30초 간격)까지 백엔드가 없다
+SESSION_RETRY_PAUSE_SECONDS = 2.0
 
 
 @dataclass
@@ -89,6 +96,40 @@ def refusals(client: httpx2.AsyncClient) -> list[int]:
     hooks = client.event_hooks
     client.event_hooks = {**hooks, "response": [*hooks.get("response", []), hook]}
     return seen
+
+
+def session_gone(error: BaseException) -> bool:
+    """서버가 방금 연 세션을 모른다고 답한 실패인가. mcp 클라이언트의 태스크 그룹이 오류를
+    `ExceptionGroup` 으로 쌀 수 있어 잎을 본다. 잎이 모두 그 오류일 때만 참이다."""
+    if isinstance(error, BaseExceptionGroup):
+        return bool(error.exceptions) and all(session_gone(e) for e in error.exceptions)
+    return isinstance(error, MCPError) and error.message == SESSION_GONE_MESSAGE
+
+
+async def _within[T](run: Callable[[], Awaitable[T]], timeout: float) -> T:
+    """run 을 timeout 안에서 돌린다. 서버가 세션을 모른다고 답하면 새 세션으로 다시 돌린다 (T85).
+
+    백엔드에 붙기 전의 vMCP 는 `initialize` 를 받고 그 세션을 곧바로 끝낸 뒤 다음 요청에 404 로
+    답한다. 그 요청은 백엔드에 닿지 않았으므로 다시 보내도 Tool 이 두 번 실행되지 않는다. 시간이
+    다할 때까지 같은 답이면 시간 초과가 아니라 그 답으로 실패한다."""
+    last: Exception | None = None
+    limit = asyncio.timeout(timeout)
+    try:
+        async with limit:
+            while True:
+                try:
+                    return await run()
+                except Exception as e:
+                    if not session_gone(e):
+                        raise
+                    last = e
+                await asyncio.sleep(SESSION_RETRY_PAUSE_SECONDS)
+    except Exception:
+        # 시간이 다해 취소된 시도는 TimeoutError 가 아니라 mcp 클라이언트가 닫히며 낸 오류로 올 수
+        # 있다
+        if last is not None and limit.expired():
+            raise last from None
+        raise
 
 
 def _attr(obj: Any, *names: str, default: Any = None) -> Any:
@@ -164,8 +205,8 @@ async def list_tools(
     try:
         if own:
             async with client:
-                return await asyncio.wait_for(_run(), timeout)
-        return await asyncio.wait_for(_run(), timeout)
+                return await _within(_run, timeout)
+        return await _within(_run, timeout)
     except Exception as e:
         if refused:
             raise AuthRefused(refused[0]) from e
@@ -210,4 +251,4 @@ async def call_tool(
                     structured=_attr(res, "structured_content", "structuredContent"),
                 )
 
-    return await asyncio.wait_for(_run(), timeout)
+    return await _within(_run, timeout)

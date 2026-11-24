@@ -21,8 +21,8 @@
 #          재적용이 사슬을 따라오기를 기다리므로 다른 게이트와 클러스터를 나누지 않는다(P57)
 # 늘 도는 게이트가 아닌 것은 후보 태그 메시지의 `e2e:` 줄이 이름이나 all 로 고를 때만 돈다. plan 잡이 그 줄을
 # scripts/lib/e2e_select.py 로 matrix 로 바꾸고, 게이트마다의 시간 상한도 거기 있다. 고른 게이트는 실패하면 조각을
-# 막는다. 새로 더해 k3d 에서 아직 통과하지 못한 게이트(soft_gates, 지금은 e2e-llm-gateway, e2e-sandbox, e2e-provisioning,
-# e2e-oidc-platform, e2e-exchange, e2e-evaluation 이고 목록은 e2e_select.py 의 NOT_BLOCKING_YET 이다)만 실패해도 막지
+# 막는다. 새로 더해 k3d 에서 아직 통과하지 못한 게이트(soft_gates, 목록은 e2e_select.py 의 NOT_BLOCKING_YET 이고 지금은
+# 비어 있다)만 실패해도 막지
 # 않고, 그 실패는 경고와 잡 요약에 남는다(docs/guide/e2e.md 20절).
 # release-images 가 릴리스 후보 태그에서 테스트 워크플로 일곱과 나란히 부르고, 조각 하나라도 실패하면 candidate 가
 # 돌지 않는다(docs/guide/e2e.md 20절). 로컬 OrbStack 흐름과 같은 make 대상을 부르고 KUBE_CONTEXT 만 k3d 의 컨텍스트로
