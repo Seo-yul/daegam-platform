@@ -74,6 +74,47 @@ def run_record(
     return replace(session_record(sid, user, age=age, status=status), run_id=run_id, **fields)
 
 
+async def assert_a_task_session_holds_several_runs(index: SessionIndex) -> None:
+    """작업 세션은 실행 id 를 여럿 쥔다(runs.py). 다음 실행은 턴의 리스를 쥔 쓰기가 run_id 를
+    바꾸고, 앞 실행의 id 로도 그 세션을 찾는다. 어느 세션이든 이미 쥔 id 는 아무것도 쓰지 않고
+    RunTaken 이며, 리스를 잃은 쓰기는 거절된다. 색인 행을 지우면 쥔 id 가 모두 풀린다. task 는
+    내부값이다. 세 색인이 같은 규칙이다."""
+    first, second, other = (uuid.uuid4().hex for _ in range(3))
+    await index.create(run_record("t1", "alice", first, task=True))
+    await index.create(run_record("r1", "alice", other))
+    made = await index.get("t1")
+    assert made is not None and (made.task, made.run_id) == (True, first)
+    assert "task" not in made.to_dict()
+    assert (await index.get("r1")).task is False
+    # 리스 없이, 또는 다른 토큰으로는 쓰지 않는다
+    with pytest.raises(TurnFenced):
+        await index.take_run("t1", new_turn_token(), second)
+    assert await index.find_run(second) is None
+    token = new_turn_token()
+    assert await index.claim_turn("t1", lease_seconds=30, token=token) is True
+    # 다른 세션이 쥔 id 와 이 세션이 이미 쥔 id 는 쥔 세션을 알리고 아무것도 쓰지 않는다
+    for taken, holder in ((other, "r1"), (first, "t1")):
+        with pytest.raises(RunTaken) as info:
+            await index.take_run("t1", token, taken)
+        assert info.value.session_id == holder
+    assert (await index.get("t1")).run_id == first
+    moved = await index.take_run("t1", token, second)
+    assert (moved.run_id, moved.task, moved.running) == (second, True, True)
+    await index.release_turn("t1", token)
+    for run_id in (first, second):
+        held = await index.find_run(run_id)
+        assert held is not None and (held.session_id, held.run_id) == ("t1", second)
+    with pytest.raises(RunTaken) as info:
+        await index.create(run_record("t2", "alice", second, task=True))
+    assert info.value.session_id == "t1" and await index.get("t2") is None
+    listed = await index.list(runs=RUNS_ONLY)
+    assert {row.session_id for row in listed} == {"t1", "r1"}
+    await index.delete("t1")
+    assert await index.find_run(first) is None and await index.find_run(second) is None
+    await index.create(run_record("t3", "alice", first, task=True))
+    assert (await index.find_run(first)).session_id == "t3"
+
+
 async def assert_holds_one_session_per_run(index: SessionIndex) -> None:
     """실행 id 하나에는 세션 하나뿐이다(P41 9절). 둘째 만들기는 아무것도 쓰지 않고 쥔 세션을
     알리며, 같은 실행 id 로 동시에 만들어도 하나만 이긴다. 닫힌 세션도 실행 id 를 쥐고 찾히며, 색인

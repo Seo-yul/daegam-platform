@@ -56,8 +56,11 @@ MESSAGE_MAX_CHARS = 200_000
 # 읽은 도구 목록으로 아직 그래프를 컴파일하지 못했다(T18). 준비 검사와 턴 입구가 같은 코드로
 # 거절한다. 다시 읽기는 배경 루프가 하므로 클라이언트에는 잠시 뒤 다시 보내라고 한다
 TOOLS_UNAVAILABLE = "tools_unavailable"
-# 백그라운드 실행의 세션에 새 말이나 다시 생성을 보냈다(P41 9절, runs.py)
+# 백그라운드 실행의 세션에 새 말이나 다시 생성을 보냈다(P41 9절, runs.py). 작업의 다음 실행을
+# 작업 세션이 아닌 세션에 보낸 것도 같은 코드다
 RUN_SESSION = "run_session"
+RUN_SESSION_MESSAGE = "백그라운드 실행의 세션은 새 말도 다시 생성도 받지 않는다"
+NOT_TASK_SESSION_MESSAGE = "작업 세션이 아니라 작업의 다음 실행을 받지 않는다"
 TOOLS_UNAVAILABLE_MESSAGE = "Tool 을 아직 준비하지 못했다"
 # 곧 받을 수 있는데 지금은 거절한 요청에 다는 Retry-After 다. 준비되지 않은 런타임(T18·T22, 배경
 # 다시 시도가 따로 돈다)과 drain 표시가 선 인스턴스(P44 7절, 플랫폼이 깨운다)가 같이 쓴다
@@ -187,12 +190,16 @@ def checked_file_key(key: str) -> str:
     return f"/{key}"
 
 
-def check_open_session(caller: Caller, record: SessionRecord) -> None:
+def check_open_session(caller: Caller, record: SessionRecord, *, next_run: bool = False) -> None:
     """새 턴을 받을 세션인지 본다. 소유자가 아니면 403(`check_owner`), 실행 세션이면 409
-    `run_session`(P41 9절. 실행은 결정으로만 이어 간다), 닫혔으면 410, 승인 대기면 409 다."""
+    `run_session`(P41 9절. 실행은 결정으로만 이어 간다), 닫혔으면 410, 승인 대기면 409 다.
+    next_run 은 작업의 다음 실행이다(runs.py). 작업 세션만 받고 다른 세션이면 409 `run_session`
+    이다."""
     check_owner(caller, record)
-    if record.run_id is not None:
-        raise error(409, RUN_SESSION, "백그라운드 실행의 세션은 새 말도 다시 생성도 받지 않는다")
+    if next_run and not record.task:
+        raise error(409, RUN_SESSION, NOT_TASK_SESSION_MESSAGE)
+    if record.run_id is not None and not next_run:
+        raise error(409, RUN_SESSION, RUN_SESSION_MESSAGE)
     if record.status == STATUS_CLOSED:
         raise session_closed()
     if record.status == STATUS_PENDING:

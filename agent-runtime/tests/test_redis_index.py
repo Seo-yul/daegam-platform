@@ -19,6 +19,7 @@ from runtime.session_index_redis import EXPIRE_LUA
 from runtime.sessions import SessionIndex, SessionRecord, utcnow
 from tests.conftest import needs_redis
 from tests.store_fixtures import (
+    assert_a_task_session_holds_several_runs,
     assert_cancel_mark_follows_the_lease_token,
     assert_expire_skips_a_leased_session,
     assert_filters_updates_and_counts,
@@ -192,10 +193,19 @@ async def test_real_index_round_trip(redis_store) -> None:
         assert_purges_only_closed_rows,
         assert_title_search,
         assert_holds_one_session_per_run,
+        assert_a_task_session_holds_several_runs,
         assert_lists_run_sessions_on_request,
         assert_expire_skips_a_leased_session,
     ],
-    ids=["filters", "purge", "titles", "one-session-per-run", "runs-filter", "expire-skips-leased"],
+    ids=[
+        "filters",
+        "purge",
+        "titles",
+        "one-session-per-run",
+        "task-runs",
+        "runs-filter",
+        "expire-skips-leased",
+    ],
 )
 async def test_real_index_keeps_the_shared_contract(
     redis_store, contract: Callable[[SessionIndex], Awaitable[None]]

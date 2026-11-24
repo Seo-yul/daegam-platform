@@ -25,6 +25,13 @@ Postgres 는 부분 유일 인덱스, Redis 는 실행 키의 SET NX, 메모리 
 세션을 기본으로 빼고(`runs`) TTL sweep 은 리스가 살아 있는 세션을 닫지 않는다. 마감 가까이 재개된
 턴이 체크포인트를 잃지 않게 하려는 것이고 채팅 세션에도 같다.
 
+작업 세션(`task`, runs.py)은 실행 세션 가운데 실행 id 를 여럿 쥐는 것이다. 만들 때 `task` 를 받고,
+다음 실행은 턴의 리스를 쥔 쓰기 하나(`take_run`)가 `run_id` 를 그 실행의 id 로 바꾸며 앞 실행의
+id 도 계속 쥔다. 그래서 `find_run` 은 앞 실행의 id 로도 그 세션을 찾고, 그 id 를 이미 어느 세션이
+쥐었으면 아무것도 쓰지 않고 `RunTaken` 이다. Postgres 는 표 `daegam_task_runs` 에 세션이 쥔 실행
+id 를 모두 두고(그 행이 있는 세션이 작업 세션이다), Redis 는 해시 칸 `task` 와 앞 실행 id 의 목록
+`past_runs`, 실행 id 마다의 실행 키에 둔다.
+
 턴이 리스를 풀지 못하고 끝난 세션(P79 3절)은 열린 표시가 남는다. Postgres 는 `turn_token` 이 그
 표시이고(풀기가 지운다), Redis 는 해시 칸 `turn_open` 과 집합 `turns:open` 이다. 리스가 살아 있지
 않은데 표시가 남은 세션 한 줄은 그 토큰을 `orphan` 으로 들고, 잡기는 표시가 없을 때만 된다. 시도
@@ -130,6 +137,7 @@ INTERNAL_FIELDS = (
     "cite_seq",
     "outside_at",
     "untrusted",
+    "task",
     "orphan",
 )
 # 읽을 때 정하는 칸이다. 어느 저장소에도 쓰지 않는다
@@ -143,8 +151,11 @@ RUNS_EXCLUDE, RUNS_INCLUDE, RUNS_ONLY = RUNS_FILTERS
 # 실행 id 의 꼴이다. `/chat` 과 결정의 요청 모델이 같이 쓴다. 응답 머리(`X-Daegam-Run-Id`)와 Redis
 # 키 이름에 들어가므로 글자를 좁힌다. 플랫폼의 실행 id 는 UUID 다
 RUN_ID_PATTERN = r"^[A-Za-z0-9_-]{1,64}$"
-# 실행 id 를 지키는 Postgres 부분 유일 인덱스다. create 는 이 인덱스의 위반만 RunTaken 으로 읽는다
+# 실행 id 를 지키는 Postgres 부분 유일 인덱스와 작업 세션이 쥔 실행 id 의 기본 키다. create 와
+# take_run 은 이 둘의 위반만 RunTaken 으로 읽는다
 RUN_INDEX = "daegam_sessions_run"
+TASK_RUN_KEY = "daegam_task_runs_run"
+RUN_CONSTRAINTS = (RUN_INDEX, TASK_RUN_KEY)
 
 # 닫힌 실행 세션의 기록이 보존 기간과 상관없이 남는 최소 시간이다(P41 9절). 기록을 지우면 run_id 가
 # 풀려, 플랫폼의 시작 워커가 다시 한 시작(10분 안)이 둘째 턴을 열 수 있기 때문이다
@@ -280,6 +291,17 @@ CREATE TABLE IF NOT EXISTS daegam_drains (
 표(P44 7절)다. 인덱스는 행 모양을 바꾸지 않는다. 만드는 동안 표에 쓰기를 막지만 지금 크기에서는
 짧고, CONCURRENTLY 는 문장마다 다시 부르는 setup 에 맞지 않는다."""
 
+TASK_RUNS_DDL = f"""
+CREATE TABLE IF NOT EXISTS daegam_task_runs (
+    run_id     text CONSTRAINT {TASK_RUN_KEY} PRIMARY KEY,
+    session_id text NOT NULL
+);
+CREATE INDEX IF NOT EXISTS daegam_task_runs_session ON daegam_task_runs (session_id);
+"""
+"""작업 세션이 쥔 실행 id 의 표다. 첫 실행의 id 는 세션을 만드는 문장이, 다음 실행의 id 는
+`take_run` 이 적고 색인 행을 지우는 문장이 함께 지운다. 색인 표의 열을 늘리지 않으려고 제 표에
+둔다."""
+
 
 # 샌드박스를 닫는 까닭이다(플랫폼 `services/sandboxes.py` RuntimeCloseReason)
 CLOSE_SESSION = "session_closed"
@@ -385,6 +407,9 @@ class SessionRecord:
     # 줄에 실리고 untrusted 는 내부값이다
     run_id: str | None = None
     untrusted: bool = False
+    # 실행 id 를 여럿 쥐는 작업 세션인가(runs.py). 만들 때만 정하고 내부값이다. 작업 세션의 run_id
+    # 는 가장 최근 실행의 것이고 `take_run` 만 바꾼다
+    task: bool = False
     # 살아 있는 리스가 세션을 잡고 있는가(P78 2절). 색인이 읽을 때 정하고 저장하지 않는다. 리스는
     # 마지막 전사를 저장한 뒤에 풀리므로 이것이 거짓이 된 뒤에 읽은 전사에는 마지막 항목이 있다
     running: bool = False
@@ -413,8 +438,13 @@ class SessionIndex(Protocol):
 
     async def get(self, session_id: str) -> SessionRecord | None: ...
 
-    # 그 실행 id 를 쥔 세션이다. 닫힌 세션도 준다(P41 9절)
+    # 그 실행 id 를 쥔 세션이다. 닫힌 세션도 준다(P41 9절). 작업 세션은 앞 실행의 id 로도 찾는다
     async def find_run(self, run_id: str) -> SessionRecord | None: ...
+
+    # 작업 세션의 다음 실행이다(runs.py). 턴 자신의 쓰기라 그 토큰이 살아 있는 리스를 쥐고 있을 때만
+    # 쓰고 아니면 `fence.refused()` 다. 세션의 run_id 를 그 id 로 바꾸고 앞 실행의 id 도 계속 쥔다.
+    # 그 id 를 이미 어느 세션이 쥐었으면(이 세션이어도) 아무것도 쓰지 않고 RunTaken 이다
+    async def take_run(self, session_id: str, token: str, run_id: str) -> SessionRecord: ...
 
     async def list(
         self,
@@ -532,7 +562,7 @@ class MemorySessionIndex:
         # 중지 표시다. 세션 id 와 표시가 가리키는 턴 토큰이다
         self._cancels: dict[str, str] = {}
         # 실행 id 와 그것을 쥔 세션 id 다(P41 9절). 확인과 적기 사이에 await 가 없어 같은 이벤트
-        # 루프의 두 만들기 가운데 하나만 이긴다
+        # 루프의 두 만들기 가운데 하나만 이긴다. 작업 세션은 여러 id 가 같은 세션을 가리킨다
         self._runs: dict[str, str] = {}
         # drain 표시의 id 와 그것이 풀리는 `time.monotonic()` 값이다(P44 7절). 표시와 잡기 사이에
         # await 가 없어 잡기는 세기 앞이거나 표시 뒤다
@@ -554,6 +584,17 @@ class MemorySessionIndex:
     async def find_run(self, run_id: str) -> SessionRecord | None:
         holder = self._runs.get(run_id)
         return await self.get(holder) if holder is not None else None
+
+    async def take_run(self, session_id: str, token: str, run_id: str) -> SessionRecord:
+        if self._leases.get(session_id) != token:
+            raise refused()
+        holder = self._runs.get(run_id)
+        if holder is not None:
+            raise RunTaken(holder)
+        self._runs[run_id] = session_id
+        row = replace(self._rows[session_id], run_id=run_id)
+        self._rows[session_id] = row
+        return self._with_running(row)
 
     def _with_running(self, row: SessionRecord) -> SessionRecord:
         return replace(row, running=True) if row.session_id in self._leases else row
@@ -710,11 +751,10 @@ class MemorySessionIndex:
         ]
 
     async def delete(self, session_id: str) -> None:
-        row = self._rows.pop(session_id, None)
+        self._rows.pop(session_id, None)
         self._leases.pop(session_id, None)
         self._cancels.pop(session_id, None)
-        if row is not None and row.run_id is not None and self._runs.get(row.run_id) == session_id:
-            del self._runs[row.run_id]
+        self._runs = {run_id: sid for run_id, sid in self._runs.items() if sid != session_id}
 
     async def counts(self) -> dict[str, int]:
         out = dict.fromkeys(STATUSES, 0)
@@ -774,62 +814,87 @@ class PostgresSessionIndex:
             + ddl_statements(COUNTERS_DDL)
             + ddl_statements(TRANSCRIPTS_DDL)
             + ddl_statements(UPLOADS_DDL)
+            + ddl_statements(TASK_RUNS_DDL)
         )
         async with self._pool.connection() as conn:
             for statement in statements:
                 await conn.execute(statement, prepare=False)
 
     async def create(self, record: SessionRecord) -> None:
-        """INSERT 한 문장이다. 실행 id 를 이미 다른 세션이 쥐었으면 부분 유일 인덱스가 막고,
-        그 세션을 읽어 RunTaken 을 던진다(P41 9절). 쥔 세션이 이 인스턴스의 것이 아니면(같은
-        Database 를 나눠 쓰는 다른 인스턴스) 위반을 그대로 올린다. 실행 id 는 플랫폼의 UUID 라 겹칠
-        일이 없다."""
+        """INSERT 한 문장이다. 실행 id 를 이미 다른 세션이 쥐었으면 유일 제약이 막고, 그 세션을
+        읽어 RunTaken 을 던진다(P41 9절). 쥔 세션이 이 인스턴스의 것이 아니면(같은 Database 를 나눠
+        쓰는 다른 인스턴스) 위반을 그대로 올린다. 실행 id 는 플랫폼의 UUID 라 겹칠 일이 없다. 작업
+        세션이면 같은 문장이 그 실행 id 를 `daegam_task_runs` 에도 적는다."""
+        sql = """
+            INSERT INTO daegam_sessions
+              (session_id, instance_id, tenant, user_sub, created_at, last_turn_at, turns,
+               usage_input, usage_output, status, pending_since, title, turn_id, last_turn,
+               upload_bytes, cite_seq, outside_at, run_id, untrusted)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """
+        params: list[Any] = [
+            record.session_id,
+            record.instance_id if record.instance_id is not None else self._instance_id,
+            record.tenant,
+            record.user_sub,
+            record.created_at,
+            record.last_turn_at,
+            record.turns,
+            record.usage_input,
+            record.usage_output,
+            record.status,
+            record.pending_since,
+            record.title,
+            record.turn_id,
+            record.last_turn,
+            record.upload_bytes,
+            record.cite_seq,
+            record.outside_at,
+            record.run_id,
+            record.untrusted,
+        ]
+        if record.task:
+            sql = f"WITH u AS ({sql} RETURNING session_id) {TASK_RUN_SQL}"
+            params.append(record.run_id)
         try:
             async with self._pool.connection() as conn:
-                await conn.execute(
-                    """
-                    INSERT INTO daegam_sessions
-                      (session_id, instance_id, tenant, user_sub, created_at, last_turn_at, turns,
-                       usage_input, usage_output, status, pending_since, title, turn_id, last_turn,
-                       upload_bytes, cite_seq, outside_at, run_id, untrusted)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                            %s)
-                    """,
-                    (
-                        record.session_id,
-                        record.instance_id if record.instance_id is not None else self._instance_id,
-                        record.tenant,
-                        record.user_sub,
-                        record.created_at,
-                        record.last_turn_at,
-                        record.turns,
-                        record.usage_input,
-                        record.usage_output,
-                        record.status,
-                        record.pending_since,
-                        record.title,
-                        record.turn_id,
-                        record.last_turn,
-                        record.upload_bytes,
-                        record.cite_seq,
-                        record.outside_at,
-                        record.run_id,
-                        record.untrusted,
-                    ),
-                )
+                await conn.execute(sql, params)
         except pg_errors.UniqueViolation as e:
-            if record.run_id is None or e.diag.constraint_name != RUN_INDEX:
-                raise
-            holder = await self.find_run(record.run_id)
-            if holder is None:
-                raise
-            raise RunTaken(holder.session_id) from e
+            raise await self._run_taken(record.run_id, e) from e
+
+    async def _run_taken(self, run_id: str | None, e: pg_errors.UniqueViolation) -> RunTaken:
+        """실행 id 의 유일 위반을 그 id 를 쥔 세션의 RunTaken 으로 옮긴다. 다른 제약의 위반이거나
+        쥔 세션을 이 인스턴스에서 찾지 못하면 위반을 그대로 올린다."""
+        if run_id is None or e.diag.constraint_name not in RUN_CONSTRAINTS:
+            raise e
+        holder = await self.find_run(run_id)
+        if holder is None:
+            raise e
+        return RunTaken(holder.session_id)
 
     async def get(self, session_id: str) -> SessionRecord | None:
         return await self._get_one(("session_id = %s", session_id))
 
     async def find_run(self, run_id: str) -> SessionRecord | None:
-        return await self._get_one(("run_id = %s", run_id))
+        """세션의 run_id 로 먼저 찾고, 없으면 작업 세션이 쥔 앞 실행의 id 에서 찾는다."""
+        held = await self._get_one(("run_id = %s", run_id))
+        return held or await self._get_one((TASK_RUN_HOLDER, run_id))
+
+    async def take_run(self, session_id: str, token: str, run_id: str) -> SessionRecord:
+        """리스의 토큰을 건 UPDATE 하나가 run_id 를 바꾸고, 그 UPDATE 를 CTE 로 둔 같은 문장이 그
+        id 를 `daegam_task_runs` 에 적는다. 어느 쪽의 유일 위반이든 문장 전체가 물러난다."""
+        try:
+            row = await self._update(
+                session_id,
+                {"run_id": run_id},
+                held=(HELD_LEASE_SQL, token),
+                tail=(TASK_RUN_SQL, [run_id]),
+            )
+        except pg_errors.UniqueViolation as e:
+            raise await self._run_taken(run_id, e) from e
+        if row is None:
+            raise refused()
+        return row
 
     async def _get_one(self, cond: tuple[str, Any]) -> SessionRecord | None:
         where, params = self._where(cond)
@@ -906,8 +971,8 @@ class PostgresSessionIndex:
         held: tuple[str, Any] | None = None,
         tail: tuple[str, list[Any]] | None = None,
     ) -> SessionRecord | None:
-        """색인 한 줄의 UPDATE 다. tail 은 그 UPDATE 를 CTE `u` 로 읽는 실행 표식의 쓰기와 그
-        자리표 값이다."""
+        """색인 한 줄의 UPDATE 다. tail 은 그 UPDATE 를 CTE `u` 로 읽는 쓰기(실행 표식, 작업 세션의
+        실행 id)와 그 자리표 값이다."""
         assignments = ", ".join(f"{key} = %s" for key in fields) or NO_CHANGE
         conds: list[tuple[str, Any]] = [("session_id = %s", session_id)]
         if held is not None:
@@ -1187,12 +1252,13 @@ class PostgresSessionIndex:
         return [row["session_id"] for row in rows]
 
     async def delete(self, session_id: str) -> None:
-        """색인 행과 그 실행 표식을 한 문장으로 지운다. 표식 쪽이 지운 행을 읽으므로 이 인스턴스의
-        행만 지운다."""
+        """색인 행과 그 실행 표식, 작업 세션이 쥔 실행 id 를 한 문장으로 지운다. 둘 다 지운 행을
+        읽으므로 이 인스턴스의 행만 지운다."""
         where, params = self._where(("session_id = %s", session_id))
         async with self._pool.connection() as conn:
             await conn.execute(
-                f"WITH s AS (DELETE FROM daegam_sessions {where} RETURNING session_id) "
+                f"WITH s AS (DELETE FROM daegam_sessions {where} RETURNING session_id), "
+                "t AS (DELETE FROM daegam_task_runs t USING s WHERE t.session_id = s.session_id) "
                 "DELETE FROM daegam_turn_runs r USING s WHERE r.session_id = s.session_id",
                 params,
             )
@@ -1242,12 +1308,22 @@ CLAIM_SET = (
 CLEAR_MARKS = "turn_token = NULL, turn_lease = NULL, cancel_token = NULL"
 # 되살리기 트랜잭션의 잠금 기다림 상한이다(P79 3절). 넘기면 오류로 실패하고 다음 읽기가 다시 한다
 REPAIR_LOCK_TIMEOUT = "3s"
+# 작업 세션인가다. 그 세션이 쥔 실행 id 의 행이 있으면 참이다
+TASK_SESSION = (
+    "EXISTS (SELECT 1 FROM daegam_task_runs t WHERE t.session_id = daegam_sessions.session_id)"
+)
+# 작업 세션이 쥔 실행 id 로 그 세션을 찾는 조건이다. 자리표는 실행 id 다
+TASK_RUN_HOLDER = "session_id = (SELECT session_id FROM daegam_task_runs WHERE run_id = %s)"
+# 세션을 만들거나 run_id 를 바꾼 문장(CTE `u`)의 행에 그 실행 id 를 적는다. 자리표는 실행 id 다
+TASK_RUN_SQL = (
+    "INSERT INTO daegam_task_runs (run_id, session_id) SELECT %s::text, u.session_id FROM u"
+)
 # 색인 한 줄로 읽는 열이다. 열 이름으로 적어 뒤에 열이 늘어도 준비해 둔 문장의 결과 형이 그대로다
 # (P79 3절). running 과 orphan 은 저장하지 않고 리스와 열린 표시에서 정한다
 SELECT_ROW = (
     "session_id, instance_id, tenant, user_sub, created_at, last_turn_at, turns, usage_input, "
     "usage_output, status, pending_since, title, turn_id, last_turn, upload_bytes, cite_seq, "
-    f"outside_at, run_id, untrusted, ({LIVE_LEASE}) AS running, "
+    f"outside_at, run_id, untrusted, {TASK_SESSION} AS task, ({LIVE_LEASE}) AS running, "
     f"CASE WHEN turn_token IS NOT NULL AND {LAPSED_LEASE} THEN turn_token END AS orphan"
 )
 
@@ -1311,6 +1387,7 @@ def _row_to_record(row: dict[str, Any]) -> SessionRecord:
         outside_at=row.get("outside_at"),
         run_id=row.get("run_id"),
         untrusted=bool(row.get("untrusted")),
+        task=bool(row.get("task")),
         **turn_record_fields(row),
     )
 

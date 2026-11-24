@@ -1,7 +1,7 @@
 """HTTP 표면이다(D26, D27). create_app 이 이 라우터를 앱에 건다.
 
   POST /chat            {session_id?, message, user_sub?, ephemeral?, attachments?, run_id?,
-                         untrusted?}
+                         untrusted?, task?}
                         -> SSE(token|tool_call|tool_result|interrupt|guardrail|model_fallback
                                |tool_limit|done|error)
                         입구 검사 순서: 도구 소스를 아직 못 읽었으면 503 tools_unavailable(+
@@ -10,7 +10,9 @@
                         (429 daily_budget_exceeded + Retry-After), 첨부(attachments.py), 세션
                         상태, 세션 예산(429). 첨부는 리스를 잡은 뒤 세션에 저장한다. 백그라운드
                         실행(run_id, 플랫폼 경로만)은 본문의 꼴을 본 뒤 무엇보다 먼저 같은 실행의
-                        세션을 찾아 409 run_exists 로 답하고 분당 한도를 건너뛴다(runs.py, P41 9절)
+                        세션을 찾아 409 run_exists 로 답하고 분당 한도를 건너뛴다(runs.py, P41 9절).
+                        작업의 실행(task)은 턴이 끝나도 세션을 닫지 않고, 다음 실행은 그
+                        session_id 와 새 run_id 로 온다(runs.py)
   GET  /sessions        색인 목록. user_sub·status 로 거르고 q 는 제목 검색어다(외부 경로는 자기
                         sub 로 고정). 줄마다 running 이 있고 진행 중이면 그 시도의 turn_id 가 있다.
                         실행 세션은 빼고 runs=include 면 함께, runs=only 면 실행 세션만이다
@@ -223,6 +225,9 @@ class ChatRequest(BaseModel):
     # 세션이 둘을 지킨다(runs.py)
     run_id: str | None = Field(default=None, pattern=RUN_ID_PATTERN)
     untrusted: bool = False
+    # 다른 Agent 가 맡긴 작업의 실행이라는 표시다(runs.py). 프록시 경로만 받고 run_id 와 함께만
+    # 싣는다. 세션이 지키고, 작업의 다음 실행은 그 세션의 session_id 를 함께 싣는다
+    task: bool = False
 
 
 @router.get(HEALTHZ_PATH)
@@ -294,19 +299,21 @@ def _starting_reason(waiting: ConfigError) -> dict[str, str]:
 @router.post("/chat")
 async def chat(body: ChatRequest, caller: CallerDep, state: Runtime) -> StreamingResponse:
     """새 말이다. 백그라운드 실행(run_id)은 본문의 꼴을 본 뒤 다른 어떤 검사보다 먼저 같은 실행의
-    세션을 찾아 있으면 409 `run_exists` 이고, 분당 한도를 건너뛴다(P41 9절, runs.py)."""
+    세션을 찾아 있으면 409 `run_exists` 이고, 분당 한도를 건너뛴다(P41 9절, runs.py). 작업의
+    실행(task)이 session_id 를 실으면 그 작업 세션의 다음 실행이다."""
     refuse_external_fields(
         caller,
         turn_grant=body.turn_grant,
         approval_choices=body.approval_choices,
         run_id=body.run_id,
         untrusted=body.untrusted or None,
+        task=body.task or None,
     )
-    check_run_fields(body.run_id, body.untrusted, body.session_id)
+    check_run_fields(body.run_id, body.untrusted, body.session_id, body.task)
     if body.run_id is not None:
         held = await state.store.index.find_run(body.run_id)
         if held is not None:
-            raise run_exists(held.session_id, held)
+            raise run_exists(body.run_id, held.session_id, held)
     flagged = await check_request(
         state, caller, body.session_id, body.message, per_minute=body.run_id is None
     )
@@ -314,7 +321,13 @@ async def chat(body: ChatRequest, caller: CallerDep, state: Runtime) -> Streamin
         state, caller, body.attachments, body.session_id
     )
     record = await resolve_session(
-        state, caller, body.session_id, body.message, run_id=body.run_id, untrusted=body.untrusted
+        state,
+        caller,
+        body.session_id,
+        body.message,
+        run_id=body.run_id,
+        untrusted=body.untrusted,
+        task=body.task,
     )
     async with unstarted_session_forgotten(state, record, created=not body.session_id):
         grant = check_grant(caller, body.turn_grant, owner=record.user_sub)
@@ -334,6 +347,7 @@ async def chat(body: ChatRequest, caller: CallerDep, state: Runtime) -> Streamin
             attachments=attachments,
             grant=grant,
             choices=body.approval_choices,
+            next_run=body.run_id if body.session_id else None,
         )
 
 

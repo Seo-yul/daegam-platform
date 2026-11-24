@@ -20,6 +20,22 @@ grant_gate.py 의 `refuse_external_fields`). 새 세션의 색인 한 줄이 둘
 - **목록.** `GET /sessions` 는 실행 세션을 빼고 `runs=include` 면 함께, `runs=only` 면 그것만 준다.
 - **응답 머리.** 실행 세션의 턴은 `X-Daegam-Run-Id` 로 run_id 를 되돌린다. 시작 워커는 이 머리가
   없는 답을 실행을 모르는 옛 파드의 것으로 본다.
+
+작업 세션은 다른 Agent 가 맡긴 작업 하나의 실행 세션이고 실행을 여럿 받는다. 기능 이름은
+`agent_tasks` 다. 플랫폼은 작업의 실행마다 `run_id` 와 `task` 를 함께 싣는다.
+
+- **첫 실행.** 세션 없이 열고 세션이 `task` 를 지킨다. 그 밖에는 위의 실행 세션과 같다.
+- **다음 실행.** 그 `session_id` 와 새 `run_id` 를 싣는다. 새 턴으로 돌고, 턴의 리스를 쥔 쓰기
+  하나(`take_next_run`)가 턴 태스크를 띄우기 직전에 세션의 run_id 를 그 실행의 것으로 바꾼다. 그
+  뒤의 응답 머리, 턴 이벤트, 결정의 run_id 는 그 실행의 것이다. 작업 세션이 아닌 세션에 보내면 409
+  `run_session`, 닫혔으면 410, 승인 대기면 409 `session_pending`, 턴이 돌고 있으면 409
+  `turn_in_progress` 다. 도는 턴을 멈추고 다음 실행을 여는 것은 플랫폼이 정한다.
+- **한 실행에 한 턴.** 세션은 앞 실행의 id 도 계속 쥔다. 어느 실행의 둘째 시작이든 409
+  `run_exists` 이고, 턴 id 는 그 실행이 세션의 가장 최근 실행일 때만 싣는다. 앞 실행의 턴은 색인에
+  남지 않아 null 이다.
+- **턴 사이.** 턴이 어떻게 끝나든(끝, 오류, 중지) 세션을 닫지 않는다. 세션 TTL 이 닫고, 플랫폼
+  경로의 세션 지우기가 지운다. `run_id` 없는 새 말과 다시 생성은 실행 세션처럼 409 `run_session`
+  이다.
 """
 
 from __future__ import annotations
@@ -27,7 +43,7 @@ from __future__ import annotations
 from fastapi import HTTPException
 
 from runtime.auth import Caller
-from runtime.sessions import SessionRecord
+from runtime.sessions import RunTaken, SessionIndex, SessionRecord
 from runtime.turn_gate import error
 from runtime.validation import body_field_error, validation_error
 
@@ -39,11 +55,14 @@ RUN_CLOSED = "run_closed"
 RUN_FIELDS = "run_fields"
 
 
-def check_run_fields(run_id: str | None, untrusted: bool, session_id: str | None) -> None:
-    """`/chat` 의 실행 칸이 맞는 꼴인가. 실행은 새 세션으로만 열고, `untrusted` 는 실행의
-    표시다. 어긋나면 422 다. 외부 경로는 이보다 먼저 `refuse_external_fields` 가 막았다."""
+def check_run_fields(
+    run_id: str | None, untrusted: bool, session_id: str | None, task: bool = False
+) -> None:
+    """`/chat` 의 실행 칸이 맞는 꼴인가. 실행은 새 세션으로만 열고, 작업의 실행(`task`)만 그 작업의
+    세션을 함께 싣는다. `untrusted` 와 `task` 는 실행의 표시다. 어긋나면 422 다. 외부 경로는 이보다
+    먼저 `refuse_external_fields` 가 막았다."""
     errors = []
-    if run_id is not None and session_id is not None:
+    if run_id is not None and session_id is not None and not task:
         errors.append(
             body_field_error("run_id", "a run starts a new session: send no session_id", RUN_FIELDS)
         )
@@ -51,17 +70,41 @@ def check_run_fields(run_id: str | None, untrusted: bool, session_id: str | None
         errors.append(
             body_field_error("untrusted", "untrusted marks a run: send it with run_id", RUN_FIELDS)
         )
+    if task and run_id is None:
+        errors.append(body_field_error("task", "task marks a run: send it with run_id", RUN_FIELDS))
     if errors:
         raise validation_error(errors)
 
 
-def run_exists(session_id: str, held: SessionRecord | None) -> HTTPException:
+def run_exists(run_id: str | None, session_id: str, held: SessionRecord | None) -> HTTPException:
     """같은 run_id 의 세션이 있다. 시작 워커가 그 세션과 턴으로 잇는다(P41 5절). 턴 id 는 그
-    세션(held)이 적은 마지막 시도의 것이고, 아직 적지 않았거나 그 줄을 읽지 못했으면 null 이다."""
-    turn_id = held.turn_id if held is not None else None
+    세션(held)이 적은 마지막 시도의 것이고, 아직 적지 않았거나 그 줄을 읽지 못했으면 null 이다.
+    작업 세션의 앞 실행이면 마지막 시도가 그 실행의 것이 아니라 null 이다."""
+    current = held is not None and held.run_id == run_id
     return error(
-        409, RUN_EXISTS, "이 실행의 세션이 이미 있다", session_id=session_id, turn_id=turn_id
+        409,
+        RUN_EXISTS,
+        "이 실행의 세션이 이미 있다",
+        session_id=session_id,
+        turn_id=held.turn_id if current else None,
     )
+
+
+async def take_next_run(
+    index: SessionIndex, record: SessionRecord, run_id: str, *, token: str
+) -> SessionRecord:
+    """작업 세션이 다음 실행을 쥔다. 턴의 리스(token)를 쥔 쓰기이고 세션의 run_id 가 그 실행의
+    것이 된 한 줄을 돌려준다. 그 실행 id 를 이미 어느 세션이 쥐었으면 409 `run_exists` 다."""
+    try:
+        return await index.take_run(record.session_id, token, run_id)
+    except RunTaken as e:
+        raise run_exists(run_id, e.session_id, await index.get(e.session_id)) from e
+
+
+def runs_once(record: SessionRecord) -> bool:
+    """실행 하나로 끝나는 실행 세션인가. 승인 대기 없이 끝난 턴이 그런 세션을 닫는다(turn.py). 작업
+    세션은 다음 실행을 받으므로 아니다."""
+    return record.run_id is not None and not record.task
 
 
 def refuse_external_run(caller: Caller, record: SessionRecord) -> None:

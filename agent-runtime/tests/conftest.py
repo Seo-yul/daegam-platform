@@ -368,6 +368,7 @@ async def chat(
     approval_choices: list[dict[str, str]] | None = None,
     run_id: str | None = None,
     untrusted: bool = False,
+    task: bool = False,
 ) -> tuple[httpx.Response, list[tuple[str, dict[str, Any]]]]:
     body: dict[str, Any] = {"message": message, "user_sub": user_sub}
     if session_id:
@@ -382,6 +383,8 @@ async def chat(
         body["run_id"] = run_id
     if untrusted:
         body["untrusted"] = True
+    if task:
+        body["task"] = True
     return with_sse(await running.client.post("/chat", json=body, headers=headers or {}))
 
 
