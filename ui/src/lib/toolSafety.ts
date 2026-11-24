@@ -22,6 +22,8 @@ export const ORIGIN_INTERNAL: ToolOrigin = "internal";
 export const THIRD_PARTY_ORIGINS: ReadonlySet<ToolOrigin> = new Set<ToolOrigin>(["image", "remote", "entry"]);
 /** code mode Gateway 의 execute_tool_script 다 (P56 6.5절). 결과는 늘 바깥 내용이고 캔버스의 어느 표시도 효과가 없다. */
 export const ORIGIN_SCRIPT: ToolOrigin = "script";
+/** 게시한 Agent 를 부르는 ask_* 다 (P46 6.6절). 늘 쓰기이고 결과는 늘 바깥 내용이며 캔버스의 어느 표시도 효과가 없다. */
+export const ORIGIN_AGENT: ToolOrigin = "agent";
 
 /**
  * 캔버스의 읽기 전용 표시가 효과를 내는 Tool 인가. 서버가 읽기 전용 여부를 알려 주지 않는 Tool 가운데 서버나 허브 항목의 표시가 서지 않는
@@ -31,9 +33,9 @@ export function canvasMarkApplies(origin: ToolOrigin | undefined, marked = false
   return origin !== undefined && THIRD_PARTY_ORIGINS.has(origin) && !marked;
 }
 
-/** 바깥 표시를 바꿀 수 없는 Tool 인가. 웹 Tool, 백엔드 종류를 모르는 이름과 code mode 스크립트는 늘 바깥이다. */
+/** 바깥 표시를 바꿀 수 없는 Tool 인가. 웹 Tool, 백엔드 종류를 모르는 이름, code mode 스크립트와 게시한 Agent 를 부르는 Tool 은 늘 바깥이다. */
 export function outsideFixed(origin: ToolOrigin | undefined, effect: ToolEffect | undefined): boolean {
-  return origin === undefined || origin === ORIGIN_SCRIPT || effect === "web";
+  return origin === undefined || origin === ORIGIN_SCRIPT || origin === ORIGIN_AGENT || effect === "web";
 }
 
 /** 그 Tool 의 결과가 바깥 내용인가. overrides 는 tools 노드의 `outside` 다. */

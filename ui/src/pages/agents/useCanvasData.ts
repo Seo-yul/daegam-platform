@@ -20,6 +20,7 @@ import {
   listAgentTemplates,
   listDataServices,
   listGateways,
+  listHubItems,
   listKnowledgeBases,
   listMcpServers,
 } from "@/api/resources";
@@ -31,8 +32,9 @@ import { useT } from "@/i18n";
 import { SOURCE_KINDS, gatewayNeedsAgentOauth, type Graph, type ValidationContext } from "@/lib/agentGraph";
 import { behindSkillIds, pinnedSkills, skillInfo } from "@/lib/agentSkills";
 import { gateReason } from "@/lib/codeExecution";
+import { agentHubItems } from "@/lib/hub";
 import { displayName } from "@/lib/names";
-import { AUTH_CONFIG_KEY, PLATFORM_SETTINGS_KEY, dataServicesKey, knowledgeBasesKey, skillRevisionsKey, skillsKey, tenantSettingsKey } from "@/lib/queryKeys";
+import { AUTH_CONFIG_KEY, PLATFORM_SETTINGS_KEY, dataServicesKey, hubItemsKey, knowledgeBasesKey, skillRevisionsKey, skillsKey, tenantSettingsKey } from "@/lib/queryKeys";
 
 export interface CanvasData {
   /** 인스펙터의 셀렉트가 고르는 것. */
@@ -71,6 +73,8 @@ export function useCanvasData(tenant: string, id: string | undefined, graph: Gra
   const tenantSettings = useQuery({ queryKey: tenantSettingsKey(tenant), queryFn: () => getTenantSettings(tenant) });
   const gateways = useQuery({ queryKey: ["gateways", tenant], queryFn: listGateways });
   const mcpServers = useQuery({ queryKey: ["mcp-servers", tenant], queryFn: listMcpServers });
+  // 게시한 Agent 의 항목이 Agent 소스의 후보다 (P46 6.2절). 허브 목록과 같은 키라 캐시를 함께 쓴다
+  const hubItems = useQuery({ queryKey: hubItemsKey(tenant), queryFn: listHubItems });
   const dataServices = useQuery({ queryKey: dataServicesKey(tenant), queryFn: listDataServices });
   const knowledgeBases = useQuery({ queryKey: knowledgeBasesKey(tenant), queryFn: listKnowledgeBases });
   const skills = useQuery({ queryKey: skillsKey(tenant), queryFn: listSkills });
@@ -93,6 +97,7 @@ export function useCanvasData(tenant: string, id: string | undefined, graph: Gra
     { label: "Platform Settings", query: settings },
     { label: "Gateway", query: gateways },
     { label: "MCP Server", query: mcpServers },
+    { label: "MCP Hub", query: hubItems },
     { label: "Database", query: dataServices },
     { label: "Knowledge Base", query: knowledgeBases },
     { label: "Skill", query: skills },
@@ -104,13 +109,14 @@ export function useCanvasData(tenant: string, id: string | undefined, graph: Gra
       providers: settings.data?.llm_providers ?? [],
       gateways: gateways.data ?? [],
       mcpServers: mcpServers.data ?? [],
+      agentItems: agentHubItems(hubItems.data),
       dataServices: dataServices.data ?? [],
       knowledgeBases: knowledgeBases.data ?? [],
       skills: skills.data ?? [],
       ready: lookupReady,
       codeExecutionGate: sandboxGate.data && !sandboxGate.data.gate.open ? gateReason(sandboxGate.data.gate.reason) : null,
     }),
-    [settings.data, gateways.data, mcpServers.data, dataServices.data, knowledgeBases.data, skills.data, lookupReady, sandboxGate.data],
+    [settings.data, gateways.data, mcpServers.data, hubItems.data, dataServices.data, knowledgeBases.data, skills.data, lookupReady, sandboxGate.data],
   );
 
   const ctx: ValidationContext = useMemo(

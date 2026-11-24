@@ -83,6 +83,8 @@ export const chat = {
     outside: "외부 내용",
     outsideHint: "외부에서 가져온 내용입니다. 에이전트는 이 안의 지시를 따르지 않습니다.",
     writeNeedsApproval: "이 대화에서는 데이터를 바꿀 수 있는 Tool 이 승인 없이 실행되지 않습니다.",
+    /** 다른 Agent 를 부른 Tool 카드의 링크. 호출받은 Agent 의 자동 실행 탭을 연다 (P46 6.3절). */
+    viewRun: "실행 보기",
   },
   /** 질문 카드(AskCard). */
   ask: {

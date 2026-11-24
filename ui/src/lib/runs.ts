@@ -121,6 +121,8 @@ function reasonTable(t: Messages, days: number): Record<string, string> {
     runtime_unreachable: r.unavailable,
     turn_aborted: r.aborted,
     turn_access_lost: r.accessLost,
+    caller_ended: r.callerEnded,
+    caller_timeout: r.callerTimeout,
     turn_timeout: t.agents.metrics.turnResult.turn_timeout,
     budget_exceeded: t.agents.metrics.turnResult.budget_exceeded,
     agent_undeployed: t.runs.pausedReason.agentUndeployed,
@@ -144,6 +146,11 @@ export function runReasonText(t: Messages, reason: string | null | undefined, co
 /** 실행 기록의 출처. 일정은 일정 카드의 제목과 같은 말이다. 사전에 없는 출처(뒤 판이 더한 것)는 코드 그대로다 (P46 A0). */
 export function runSourceText(t: Messages, source: RunSourceKind): string {
   return source === "schedule" ? t.runs.schedules.title : (ownValue(t.runs.source, source) ?? source);
+}
+
+/** 다른 Agent 가 Tool 로 부른 실행의 부른 쪽 줄 (P46 6.5절). name 은 부른 Agent 의 화면 이름이다. 부른 쪽이 없는 실행은 null 이다. */
+export function calledByText(t: Messages, run: Pick<AgentRun, "caller">, name: (agentId: string) => string): string | null {
+  return run.caller ? t.runs.calledBy(name(run.caller.agent_id)) : null;
 }
 
 /** 누구의 이름으로 도는지. 사람이면 이름(없으면 sub), 아니면 Agent 다. */

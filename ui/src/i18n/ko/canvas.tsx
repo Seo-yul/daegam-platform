@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 import type { ToolEffect } from "@/api/types";
 
 import { clashNames } from "@/lib/clashNames";
-import type { AgentData, EdgeKind, GuardrailData, IssueAt, NodeType, ProviderRole, RedisCheckpointerState, SourceKind } from "@/lib/agentGraph";
+import type { AgentData, EdgeKind, GuardrailData, IssueAt, McpSourceKind, NodeType, ProviderRole, RedisCheckpointerState } from "@/lib/agentGraph";
 import { MAX_SKILLS_DISTINCT_BYTES, MAX_SKILLS_EXPANDED_BYTES, MAX_SKILLS_PER_AGENT, MAX_SKILLS_PER_GRAPH } from "@/lib/agentSkills";
 import { SANDBOX_COMMAND_MAX_SECONDS } from "@/lib/codeExecution";
 import { particle } from "@/lib/particle";
@@ -290,7 +290,7 @@ export const canvas = {
     sourceHint: {
       gateway_instance: "Gateway 를 부릅니다. 배포된 것만 선택할 수 있습니다.",
       mcp_instance: "MCP Server 의 프록시를 부릅니다. 배포된 것만 선택할 수 있습니다.",
-    } satisfies Record<SourceKind, string>,
+    } satisfies Record<McpSourceKind, string>,
     // Gateway 가 아직 IdP 토큰만 받는 oidc 모드의 Gateway 소스 안내다(P53b 6.1절). 그동안 Agent 는 agent_oauth 로 부른다
     sourceHintIdpGateway: "Gateway 를 부릅니다. oidc 모드면 Tenant Settings 의 agent_oauth 가 필요합니다. 배포된 것만 선택할 수 있습니다.",
     allow: "허용 Tool",
@@ -334,6 +334,16 @@ export const canvas = {
     timeoutsHelp: "Tool 호출마다 기다릴 최대 초입니다. 비우면 런타임 기본값입니다.",
     timeoutLabel: (tool: string): string => `${tool} 타임아웃(초)`,
     timeoutDefault: "기본",
+    /** 게시한 Agent 를 Tool 로 부르는 소스 (P46 6.2절). group 은 소스 종류의 선택지, subtitle 은 노드 카드의 둘째 줄이다. */
+    sources: { agent: { group: "Agent", subtitle: "Agent 호출" } },
+    /** Agent 소스의 Tool 은 효과와 외부 내용 표시를 바꿀 수 없다 (P46 6.6절). */
+    agentMarks:
+      "이 Tool 은 항상 쓰기 Tool 로 다루고 결과는 외부 내용으로 표시합니다. 호출받은 Agent 가 자기 Tool 로 데이터를 바꿀 수 있고 그 답에 외부 내용이 들어 있을 수 있기 때문입니다.",
+    /** 부르는 대화의 글이 가는 곳. provider 는 호출받은 Agent 의 메인 모델 provider, recording 은 그 Agent 의 본문 기록이 켜졌는지다. */
+    agentDataFlow: (provider: string, recording: string): string =>
+      `이 대화의 내용은 호출받은 Agent 의 LLM provider(${provider})로 보내고, 그 Agent 의 본문 기록 설정(${recording})을 따릅니다.`,
+    /** Agent 소스의 타임아웃 탭. */
+    agentTimeout: "기다리는 시간을 넘기면 호출을 멈추고 호출받은 Agent 의 실행도 취소합니다.",
     /** Agent 가 이 Tool 을 Gateway 보다 먼저 끊는다 (P50 7절). agent·gateway 는 초다. */
     timeoutShorter: (tool: string, agent: number, gateway: number): string =>
       `${tool} 의 타임아웃(${agent}초)이 Gateway 가 이 Tool 을 기다리는 시간(${gateway}초)보다 짧습니다. 느린 호출은 Agent 가 먼저 끊습니다.`,

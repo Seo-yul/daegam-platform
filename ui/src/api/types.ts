@@ -288,6 +288,8 @@ export type WebSearchProvider = Schemas["WebSearchSettings"]["provider"];
 export type WebSearchCheck = Schemas["WebSearchCheckOut"];
 /** tools 노드의 Tool 효과 (P39b 14절 4부). `POST /agents/validate` 의 `tool_effects` 다. */
 export type ToolEffect = Schemas["AgentValidateResponse"]["tool_effects"][string][string];
+/** tools 노드가 Tool 로 쓰는 게시한 Agent (P46 6.2절). `POST /agents/validate` 의 `agent_calls` 다. */
+export type AgentCall = Schemas["AgentCallOut"];
 export type TenantSettings = Schemas["TenantSettingsOut"];
 export type TenantSettingsPatch = Schemas["TenantSettingsPatch"];
 
@@ -544,6 +546,8 @@ export type AgentRun = Schemas["AgentRunOut"];
 export type AgentRunStatus = AgentRun["status"];
 /** 실행의 출처. `schedule`·`webhook`·`manual` 과 P46 의 `agent` 가 사전에 있고, 뒤 판이 더한 출처도 글자 그대로 온다. */
 export type RunSourceKind = AgentRun["source"];
+/** 다른 Agent 가 Tool 로 부른 실행의 부른 쪽 (P46 6.5절). 출처가 `agent` 인 실행에만 있다. */
+export type RunCaller = NonNullable<AgentRun["caller"]>;
 export type RunSchedule = Schemas["ScheduleOut"];
 export type RunScheduleBody = Schemas["ScheduleIn"];
 export type RunSchedulePatch = Schemas["SchedulePatch"];

@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# 자동 실행(P41)을 넣고 그 기록을 기다리는 한 벌 (e2e_runs·e2e_install STEP 8r). `. "$HERE/lib/e2e_runs.sh"` 로 읽는다.
+# 자동 실행(P41)을 넣고 그 기록을 기다리는 한 벌 (e2e_runs·e2e_install STEP 8r·e2e_agent_calls·e2e_oidc_platform). `. "$HERE/lib/e2e_runs.sh"` 로 읽는다.
 # 부르는 쪽이 e2e_json.sh(json_of)·e2e_api.sh(api·jq_)·e2e_sse.sh(msg)·e2e_report.sh(die)를 먼저 읽는다. 호출은 api 가
 # 싣는 AUTH 의 사람으로 간다. 다른 사람으로 부를 때는 그 함수 안에서 `local AUTH=(...)` 로 바꾼다(bash 의 local 은 부른
 # 함수에도 보인다). run_schedule_due·run_documents 를 부르는 쪽은 e2e_turn_tokens.sh(platform_mongo)도 읽는다.
@@ -21,6 +21,9 @@
 # source_run STEP AGENT_ID SOURCE_ID [SECONDS]
 #   그 스케줄이나 트리거의 기록(건너뛴 울림의 skipped 행은 빼고)이 생길 때까지 RUN_POLL 초마다 실행 기록을 본다(기본
 #   RUN_WAIT 초). 가장 먼저 만든 것의 id 를 RUN_ID 에 남긴다. 넘기면 die STEP
+# call_run STEP AGENT_ID CALLER_SESSION [SECONDS]
+#   그 세션의 턴이 AGENT_ID 를 Tool 로 부른 실행(출처 agent, P46) 가운데 가장 늦게 만든 것의 id 를 RUN_ID 에 남긴다. 생길
+#   때까지 RUN_POLL 초마다 실행 기록을 본다(기본 RUN_WAIT 초). 넘기면 die STEP
 # run_sessions AGENT_ID
 #   그 Agent 의 실행 기록에 있는 세션 id 를 RUN_SIDS 배열에 남긴다. Agent 를 지우기 전에 부른다(지운 뒤에는 목록이 404 다).
 #   읽지 못하면 RUN_SIDS 가 비고 1 이다
@@ -91,6 +94,20 @@ source_run() { # STEP AGENT_ID SOURCE_ID [SECONDS]
     sleep "$RUN_POLL"
   done
   die "$step" "no run of source $3 within ${4:-$RUN_WAIT}s (GET /agents/$2/runs -> $code)"
+}
+
+call_run() { # STEP AGENT_ID CALLER_SESSION [SECONDS]
+  local step="$1" code i
+  RUN_ID=""
+  for ((i = 0; i < ${4:-$RUN_WAIT} / RUN_POLL; i++)); do
+    code="$(api GET "/agents/$2/runs?limit=500")"
+    if [ "$code" = 200 ]; then
+      RUN_ID="$(jq_ "next((r['id'] for r in sorted(d['runs'], key=lambda r: r['created_at'], reverse=True) if (r.get('caller') or {}).get('session_id') == '$3'), '')")"
+      [ -z "$RUN_ID" ] || return 0
+    fi
+    sleep "$RUN_POLL"
+  done
+  die "$step" "no run of $2 called from session $3 within ${4:-$RUN_WAIT}s (GET /agents/$2/runs -> $code)"
 }
 
 RUN_SIDS=()

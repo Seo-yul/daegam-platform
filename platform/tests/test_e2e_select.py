@@ -247,6 +247,26 @@ def test_exchange_runs_alone_on_its_own_k3d_shard() -> None:
     assert [g for g, _ in OPTIONAL["exchange"]] == ["e2e-exchange"]
 
 
+def test_agent_calls_runs_in_the_agent_shard_and_on_the_install() -> None:
+    # e2e-agent-calls(P46)는 header 모드 그대로 도는 k3d 의 agent 조각과 설치본 둘에서 돈다. 모드를
+    # 바꾸지 않으므로 auth 조각이 뜨지 않고 mock-oidc·UI·샌드박스 이미지도 필요 없다. k3d 에서
+    # 통과했으므로 막는다. 설치본에서는 e2e-runs 뒤, e2e-sandbox 앞이다
+    picked = chosen("e2e: e2e-agent-calls")
+    shards = _shards(picked)
+    assert set(shards) == {"core", "agent"}
+    agent = shards["agent"]
+    assert agent["blocking_gates"] == "e2e-agent-calls:10" and agent["soft_gates"] == ""
+    assert not (agent["mock_oidc"] or agent["ui"] or agent["sandbox_image"])
+    assert "e2e-agent-calls" not in NOT_BLOCKING_YET
+    assert install(picked) == ["e2e-agent-calls"]
+    assert install(chosen("e2e: e2e-sandbox e2e-agent-calls e2e-runs")) == [
+        "e2e-runs",
+        "e2e-agent-calls",
+        "e2e-sandbox",
+    ]
+    assert "k3d agent: e2e-chat e2e-agent e2e-agent-calls" in describe(picked)
+
+
 def test_runs_is_an_install_gate_only() -> None:
     # e2e-runs 는 설치본에서만 돈다. 고르면 e2e-install-extra 가 맨 끝에 돌고
     # k3d 조각에는 들지 않는다

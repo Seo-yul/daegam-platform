@@ -1,5 +1,6 @@
 # shellcheck shell=bash
-# 플랫폼 경로로 채팅 SSE 를 보내고 읽는 한 벌 (e2e_agent·e2e_assistant·e2e_chat·e2e_install·e2e_knowledge·e2e_telemetry).
+# 플랫폼 경로로 채팅 SSE 를 보내고 읽는 한 벌 (e2e_agent·e2e_agent_calls·e2e_assistant·e2e_chat·e2e_install·e2e_knowledge·
+# e2e_telemetry).
 # `. "$HERE/lib/e2e_sse.sh"` 로 읽는다. 부르는 쪽이 API·WORK·TENANT 와 AUTH(관리자 Bearer 헤더 배열. 빈 배열은 header 모드다)를 둔다.
 #
 # chat PATH JSON [CURL_ARG...]
@@ -21,6 +22,9 @@
 # task_call SUBAGENT DESCRIPTION
 #   서브에이전트 SUBAGENT 에게 DESCRIPTION 을 맡기는 task 도구 조각을 찍는다. 서브에이전트의 스텁은 DESCRIPTION 을 사람의
 #   말로 받으므로, 그 안에 stub_call 조각을 두면 서브에이전트가 그 도구를 부른다
+# ask_call TOOL MESSAGE
+#   게시한 Agent 를 부르는 Tool TOOL(ask_*)을 그 message 로 부를 조각을 찍는다. 호출받은 Agent 의 스텁은 MESSAGE 를 사람의
+#   말로 받으므로, 그 안에 stub_call 이나 ask_call 조각을 두면 그 Agent 가 이어 부른다
 # asked TOOL REASON [FILE]
 #   FILE(기본 $WORK/sse)의 스트림이 TOOL 을 REASON(P43 의 이유 rule·outside)으로 묻는 interrupt 로 끝났으면 0 이다
 #
@@ -85,6 +89,11 @@ stub_call() { # TOOL ARGS_JSON
 task_call() { # SUBAGENT DESCRIPTION
   python3 -c 'import json,sys
 print(json.dumps({"tool": "task", "args": {"description": sys.argv[2], "subagent_type": sys.argv[1]}}, ensure_ascii=False))' "$1" "$2"
+}
+
+ask_call() { # TOOL MESSAGE
+  python3 -c 'import json,sys
+print(json.dumps({"tool": sys.argv[1], "args": {"message": sys.argv[2]}}, ensure_ascii=False))' "$1" "$2"
 }
 
 asked() { # TOOL REASON [FILE]

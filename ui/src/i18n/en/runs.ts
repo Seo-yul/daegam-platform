@@ -42,6 +42,7 @@ export const runs: Messages["runs"] = {
     },
   },
   source: { webhook: "Webhook", manual: "Run now", agent: "Agent call" },
+  calledBy: (name: string): string => `Called by: ${name}`,
   status: {
     starting: "Starting",
     refused: "Refused at the deadline",
@@ -63,6 +64,8 @@ export const runs: Messages["runs"] = {
     unavailable: "The Agent did not answer or was not deployed.",
     aborted: "The run could not finish because its pod stopped.",
     accessLost: "The user it runs as lost access during the run.",
+    callerEnded: "The calling Agent's turn ended, so the run was cancelled.",
+    callerTimeout: "The calling Agent's wait ran out, so the run was cancelled.",
   },
   pausedReason: {
     actsAsLostAccess: "Stopped because the user it runs as can no longer use this Agent. Resuming runs it as whoever resumes it.",

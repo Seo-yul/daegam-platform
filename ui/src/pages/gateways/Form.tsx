@@ -22,7 +22,7 @@ import { useTenant } from "@/lib/tenant";
 import { useDirty, useUnsavedGuard } from "@/lib/unsavedGuard";
 import { cn } from "@/lib/utils";
 
-import { CODE_MODE_TOOL, hubKindVariant, isPlatformHubItem, isProxyPublished, selectableTools } from "@/lib/hub";
+import { CODE_MODE_TOOL, hubKindVariant, isAgentHubItem, isPlatformHubItem, isProxyPublished, selectableTools } from "@/lib/hub";
 import { describeCode } from "@/lib/errorText";
 import { hubItemsKey } from "@/lib/queryKeys";
 
@@ -127,7 +127,7 @@ export function GatewayFormPage() {
   const { names, backends, conflict, failureMode, authz, replicas, resources, surface, codeMode } = form;
   const codeModeHintId = useId();
   // 플랫폼 웹 Tool 을 맨 앞에 둔다 (P39b 15절). 캔버스의 안내가 `?backend=<이름>` 으로 미리 골라 보낸다
-  const pickerItems = useMemo(() => [...(hub.data ?? [])].sort((a, b) => Number(isPlatformHubItem(b.kind)) - Number(isPlatformHubItem(a.kind))), [hub.data]);
+  const pickerItems = useMemo(() => (hub.data ?? []).filter((item) => !isAgentHubItem(item.kind)).sort((a, b) => Number(isPlatformHubItem(b.kind)) - Number(isPlatformHubItem(a.kind))), [hub.data]);
   const [params] = useSearchParams();
   const [preselected, setPreselected] = useState(false);
   useEffect(() => {

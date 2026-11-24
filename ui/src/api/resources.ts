@@ -1251,6 +1251,22 @@ export async function validateAgentGraph(body: AgentGraphBody, agentId?: string)
   return unwrap(await api.POST("/agents/validate", { body: body, params }));
 }
 
+export type AgentPublishBody = Schemas["AgentPublishBody"];
+
+/**
+ * Agent 를 허브에 게시한다 (P46 6.1절). kind agent 항목이 생기고 이미 게시돼 있으면 200 으로 그 항목이다. 턴을 받지 않으면 409
+ * `not_deployed`, memory 노드나 세션 예산이 없으면 409 `agent_source_runs_unmet`, Agent 호출이 꺼졌으면 409 `agent_calls_disabled`,
+ * 이름 충돌은 409 `name_conflict` 다.
+ */
+export async function publishAgent(id: string, body: AgentPublishBody): Promise<HubItem> {
+  return unwrap(await api.POST("/agents/{agent_id}/publish", { params: { path: { agent_id: id } }, body }));
+}
+
+/** 게시 해제. DELETE /hub/{item} 과 같고 이 항목을 Tool 로 쓰는 Agent 가 있어도 해제된다. manage 가 없으면 403 이다. */
+export async function unpublishAgent(id: string): Promise<void> {
+  unwrap(await api.DELETE("/agents/{agent_id}/publish", { params: { path: { agent_id: id } } }));
+}
+
 export async function listAgents(): Promise<Agent[]> {
   return unwrap(await api.GET("/agents"));
 }

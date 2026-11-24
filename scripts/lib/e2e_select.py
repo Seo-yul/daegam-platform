@@ -47,6 +47,8 @@ OPTIONAL = {
         ("e2e-chat-redis", 5),
         ("e2e-knowledge", 6),
         ("e2e-assistant", 6),
+        # k3d 에서 3분이 걸렸다(실행 45321228424)
+        ("e2e-agent-calls", 10),
         ("e2e-ui-full", 20),
     ),
     "auth": (
@@ -100,7 +102,8 @@ NOT_BLOCKING_YET: tuple[str, ...] = ()
 NEEDS_MOCK_OIDC = ("e2e-mcp-auth", "e2e-agent-oidc", "e2e-assistant-oidc", "e2e-oidc-platform")
 # 설치본의 배포와 e2e-install 뒤에 이 차례로 돈다. 앞의 셋은 메아리 네임스페이스와
 # Platform Settings 를 함께 쓰므로 겹치면 안 된다. e2e-runs 는 설치본에만 있는 게이트다.
-# e2e-runs 와 e2e-sandbox 는 플랫폼 ConfigMap 을 게이트 동안 고치고 플랫폼을 굴린다
+# e2e-runs, e2e-agent-calls, e2e-sandbox 는 플랫폼 ConfigMap 을 게이트 동안 고치고 플랫폼을 굴린다. e2e-agent-calls 는
+# k3d 의 agent 조각에서도 돈다(header 모드)
 INSTALL = (
     "e2e-web-tools",
     "e2e-skills",
@@ -109,6 +112,7 @@ INSTALL = (
     "e2e-pat",
     "e2e-oauth",
     "e2e-runs",
+    "e2e-agent-calls",
     "e2e-sandbox",
 )
 

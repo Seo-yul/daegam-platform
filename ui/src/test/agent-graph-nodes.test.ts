@@ -294,7 +294,7 @@ describe("checkNodeData messages are the server's, word for word", () => {
     // tools: 필드 검사가 model_validator 보다 먼저다
     ["tools", {}, "source: Field required"],
     ["tools", { source: 5 }, "source: Input should be a valid dictionary or instance of ToolsSource"],
-    ["tools", { source: { kind: "nope", id: "x" } }, "source.kind: Input should be 'gateway_instance' or 'mcp_instance'"],
+    ["tools", { source: { kind: "nope", id: "x" } }, "source.kind: Input should be 'gateway_instance', 'mcp_instance' or 'agent'"],
     ["tools", { source: { kind: "mcp_instance", id: "x" }, allow_tools: "no" }, "allow_tools: Input should be a valid list"],
     ["tools", { source: { kind: "mcp_instance", id: "x" }, allow_tools: [5] }, "allow_tools.0: Input should be a valid string"],
     ["tools", { source: { kind: "mcp_instance", id: "x" }, allow_tools: ["a", ""] }, "data: Value error, allow_tools entries must not be empty"],

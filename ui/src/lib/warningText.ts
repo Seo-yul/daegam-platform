@@ -55,11 +55,21 @@ const DETAIL_OF: Record<string, (raw: string) => string | null> = {
   published_names_unknown: trailingNames,
   // `tools_source_newer: … (tools-billing: agent)` 의 노드와 종류다(platform/daegam/services/agent_status.py newer_source_warning)
   tools_source_newer: trailingNames,
+  // 게시한 Agent 를 Tool 로 쓰는 tools 노드다(platform/daegam/services/agent_calls.py status_warnings)
+  agent_source_unpublished: trailingNames,
+  agent_source_not_serving: trailingNames,
+  agent_call_timeout_short: trailingNames,
   // `code_mode_closed: … (cause: tools; tools: a, b)` 의 Tool 이름이나 `(cause: unknown_names; backends: x)` 의 허브 항목 이름이다
   // (platform/daegam/services/gateway_code_mode.py closed_warning)
   code_mode_closed: (raw) => /(?:tools|backends): ([^)]+)\)/.exec(raw)?.[1] ?? null,
   code_mode_tools_hidden: trailingNames,
 };
+
+/**
+ * 경고 표가 아니라 오류 표(errors.codes)에 문장이 있는 상태 경고다. 게시를 거둔 Agent 소스와 꺼진 Agent 호출은 저장할 때는 오류나
+ * 경고이고 배포 뒤에는 상태 경고로 선다(platform/daegam/services/agent_calls.py status_warnings).
+ */
+const ERROR_TEXT_WARNINGS: ReadonlySet<string> = new Set(["agent_source_unpublished", "agent_calls_disabled"]);
 
 /** 서버 문장의 `<key>: <값>` 가운데 values 에 있는 것. 모르는 값이면 null 이다. */
 /**
@@ -220,6 +230,9 @@ export function describeWarning(t: Messages, raw: string, resource?: "hub"): Des
   if (head && byCode && byCodeText !== null) {
     return { code: head, label: byCode.label, text: byCodeText, known: true, detail: ownValue(DETAIL_OF, head)?.(raw) ?? null };
   }
+  // 저장을 막는 오류와 같은 일이 배포 뒤에 경고로 서는 코드는 오류 표의 문장을 쓴다. 짧은 이름은 없어 코드가 선다
+  const asError = head && ERROR_TEXT_WARNINGS.has(head) ? ownValue(t.errors.codes, head) : undefined;
+  if (head && asError) return { code: head, label: head, text: asError, known: true, detail: ownValue(DETAIL_OF, head)?.(raw) ?? null };
   // 문장으로 알아본 것은 코드로 안 것이 아니므로 code 를 비운다. 앞머리가 코드 꼴이어도 그것은 이름이다
   const prose = PROSE_WARNINGS.find((p) => raw.includes(p.match));
   if (prose) return { code: null, label: t.warnings.prose[prose.key].label, text: proseText(t, prose, raw), known: true, detail: null };

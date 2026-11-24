@@ -276,6 +276,23 @@ export const warnings = {
       label: "기능 일부 제외됨",
       text: "런타임 이미지가 지원하지 않는 기능이 있어 그 기능을 빼고 배포했습니다. 그 기능을 사용하려면 클러스터의 에이전트 이미지를 새 판으로 올린 뒤에 다시 배포해 주세요.",
     },
+    // 게시한 Agent 를 Tool 로 부르는 호출의 경고 (P46 6.1·6.2·6.8절). 걸린 tools 노드는 끝의 괄호에서 읽는다
+    agent_call_cycle: {
+      label: "Agent 호출 순환",
+      text: "이 Agent 가 부르는 Agent 가 다시 이 Agent 를 부릅니다. 그 호출은 실행할 때 거절됩니다. 순환을 끊으려면 두 Agent 가운데 한쪽의 Agent Tool 을 빼 주세요.",
+    },
+    agent_source_not_serving: {
+      label: "호출할 Agent 멈춤",
+      text: "Tool 로 연결한 Agent 가 지금 대화를 받지 않아 호출이 거절됩니다.",
+    },
+    agent_call_timeout_short: {
+      label: "기다리는 시간 부족",
+      text: "이 Agent 의 턴 시간이 호출받은 Agent 의 턴 시간보다 충분히 길지 않아 답을 받기 전에 호출이 멈출 수 있습니다.",
+    },
+    agent_calls_broken_by_deploy: {
+      label: "Agent 호출 불가",
+      text: "이 배포로 memory 노드나 세션 토큰 예산이 빠져 이 Agent 를 Tool 로 부르는 Agent 의 호출이 거절됩니다.",
+    },
     // 턴 위임 토큰(P53 7절). 런타임 이미지가 turn_tokens 를 알리지 않아 모든 Tool 을 Agent 의 이름으로 부른다
     // 뒤 판이 더한 종류의 소스를 가리키는 tools 노드를 컴파일이 뺐다 (P46 A0). 노드 이름은 끝의 괄호에서 읽는다
     tools_source_newer: {

@@ -8,6 +8,8 @@ const subject = (names: string): string => `${names}${particle(names, "이/가")
 
 /** MCP Hub 목록·상세·등록과 접근 정책(lib/hubAccess), Tool 스키마 목록(components/hub). */
 export const hub = {
+  /** 종류 배지의 이름. 게시한 Agent 의 항목만 이름이 있고 나머지는 종류 그대로다 (lib/hub.ts hubKindLabel, P46 6.1절). */
+  kinds: { agent: "Agent" },
   /** consume 이 없는 항목. 목록의 행과 카드가 흐린 까닭을 말한다. */
   notConsumable: { title: "백엔드로 선택할 수 없음", badge: "consume 권한 없음" },
   /** 접근 정책의 문장 (docs/guide/hub-gateway.md 7절). Skill 은 동작의 뜻과 테넌트를 부르는 말을 따로 넘긴다. */

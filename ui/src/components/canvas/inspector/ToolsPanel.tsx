@@ -1,6 +1,7 @@
 /**
  * MCP 노드 패널. 소스(Gateway·MCP Server)와 그 소스의 도구 목록에서 허용 도구 체크, 도구별 승인 결정 종류,
- * 타임아웃이다.
+ * 타임아웃이다. 소스가 게시한 Agent 면(P46 6.2절) Tool 은 그 항목의 ask_* 하나라 허용 목록과 표시 절 대신 그 Tool 과 호출의
+ * 안내를 보인다(./AgentCallNotes.tsx).
  *
  * 검사 뒤에는 바깥 내용 뒤의 승인 규칙(P43)의 표시를 보인다. 바깥 표시(외부 내용을 가져오는 Tool), 승인 기억 켜기, 읽기 전용
  * 표시, 외부 내용 뒤의 승인·거절 배지다(lib/toolSafety.ts, 절과 배지는 ./toolMarks.tsx).
@@ -16,17 +17,22 @@ import { Button } from "@/components/ui/button";
 import { Alert } from "@/components/ui/card";
 import { Field, Input, Label, Select } from "@/components/ui/input";
 import { useT } from "@/i18n";
-import { DECISIONS, SOURCE_KINDS, type Decision, type ToolsData } from "@/lib/agentGraph";
+import { AGENT_SOURCE, DECISIONS, SOURCE_KINDS, type Decision, type ToolsData } from "@/lib/agentGraph";
 import { idpDataPlane, useAuthState } from "@/lib/auth";
 import { gatewayToolTimeout } from "@/lib/gateway";
 import { CODE_MODE_TOOL } from "@/lib/hub";
-import { displayName } from "@/lib/names";
 import { AGENT_TOOL_TIMEOUT_SECONDS } from "@/lib/timeouts";
 import { ORIGIN_SCRIPT, canvasMarkApplies } from "@/lib/toolSafety";
 
+import { AgentCallNotes } from "./AgentCallNotes";
 import { ResourceLink, Tabs } from "./fields";
 import { ApprovalBadge, OutsideSection, ReadOnlySection, without } from "./toolMarks";
-import { toolNamesOfSource, type InspectorOptions } from "./types";
+import { sourceChoices, sourcePath, toolNamesOfSource, type InspectorOptions } from "./types";
+
+/** 소스 종류를 바꾸면 비우는 칸. 앞 소스의 Tool 이름을 대는 규칙이라 새 소스에는 맞지 않는다. */
+const SOURCE_RULES_RESET: Partial<ToolsData> = { allow_tools: [], approval: {}, timeouts: {} };
+/** Agent 소스로 바꾸면 더 비우는 칸. 그 소스는 읽기 전용 표시와 바깥 표시를 받지 않는다(서버 `invalid_node_data`). */
+const AGENT_SOURCE_RESET: Partial<ToolsData> = { ...SOURCE_RULES_RESET, read_only: [], outside: {}, rememberable: [] };
 
 /** 쉼표로 적은 도메인 목록. 공백과 빈 칸은 뺀다. 공개 접미사 같은 규칙은 서버 검사가 본다. */
 function domainList(value: string): string[] {
@@ -73,7 +79,8 @@ export function ToolsPanel({
   const text = t.canvas.tools;
   // Gateway 가 아직 IdP 토큰만 받는 동안은 Agent 가 agent_oauth 로 부른다는 안내다 (P53b 6.1절)
   const idp = idpDataPlane(useAuthState());
-  const sourceHint = data.source.kind === "gateway_instance" && idp ? text.sourceHintIdpGateway : text.sourceHint[data.source.kind];
+  const isAgent = data.source.kind === AGENT_SOURCE;
+  const sourceHint = data.source.kind === AGENT_SOURCE ? undefined : data.source.kind === "gateway_instance" && idp ? text.sourceHintIdpGateway : text.sourceHint[data.source.kind];
   const [tab, setTab] = useState<"tools" | "approval" | "timeouts">("tools");
   const [extra, setExtra] = useState("");
   // Tool 효과(P39b 14절 4부). 마지막 검사의 값이고 검사 전에는 없다
@@ -110,8 +117,14 @@ export function ToolsPanel({
       return gateway !== null && agent < gateway ? [{ tool, agent, gateway }] : [];
     });
   }, [data.source.kind, data.source.id, data.timeouts, names, allow, options.gateways]);
-  const kind = SOURCE_KINDS[data.source.kind];
-  const sources = options[kind.listKey].map((x) => ({ id: x.id, label: `${displayName(x)} (${x.state === "deployed" ? (x.status?.phase ?? "?") : x.state})` }));
+  const sources = sourceChoices(data.source.kind, options);
+  const sourceLink = sourcePath(data.source, options);
+  // 호출 하나가 기다리는 시간의 기본값이다. 검사가 호출받는 Agent 의 턴 시간에서 계산해 준다
+  const agentWait = options.agentCalls?.[nodeId]?.timeout_seconds;
+
+  function changeKind(kind: ToolsData["source"]["kind"]) {
+    update({ source: { kind, id: "" }, ...(kind === AGENT_SOURCE ? AGENT_SOURCE_RESET : SOURCE_RULES_RESET) }, true);
+  }
 
   function toggleAllow(tool: string, on: boolean) {
     update({ allow_tools: on ? [...allow, tool] : without(allow, tool) }, true);
@@ -161,9 +174,10 @@ export function ToolsPanel({
           <div className="grid grid-cols-[9rem_1fr] gap-3">
             <Field label={text.sourceKind} htmlFor="tools-source-kind">
               {/* 값은 저장되는 그래프의 것이라 그대로 두고 화면 글자만 새 이름이다 */}
-              <Select id="tools-source-kind" data-testid="tools-source-kind" value={data.source.kind} onChange={(e) => update({ source: { kind: e.target.value as ToolsData["source"]["kind"], id: "" }, allow_tools: [], approval: {}, timeouts: {} }, true)}>
+              <Select id="tools-source-kind" data-testid="tools-source-kind" value={data.source.kind} onChange={(e) => changeKind(e.target.value as ToolsData["source"]["kind"])}>
                 <option value="gateway_instance">{t.resources.kind.gateway}</option>
                 <option value="mcp_instance">{t.resources.kind["mcp-server"]}</option>
+                <option value={AGENT_SOURCE}>{text.sources.agent.group}</option>
               </Select>
             </Field>
             <Field label={text.source} htmlFor="tools-source" hint={sourceHint}>
@@ -175,81 +189,87 @@ export function ToolsPanel({
                   </option>
                 ))}
               </Select>
-              {data.source.id ? (
+              {sourceLink ? (
                 <div className="mt-1">
-                  <ResourceLink to={`/${kind.route}/${data.source.id}`} label={t.canvas.openResource(kind.label)} testId="tools-source-link" />
+                  <ResourceLink to={sourceLink} label={t.canvas.openResource(SOURCE_KINDS[data.source.kind].label)} testId="tools-source-link" />
                 </div>
               ) : null}
             </Field>
           </div>
-          <div className="flex flex-col gap-1">
-            <Label>{text.allow}</Label>
-            <p className="text-xs text-muted">{allow.length ? text.allowCount(allow.length) : text.allowAll}</p>
-            {names.length ? (
-              <ul className="flex flex-col gap-1" data-testid="tools-allow-list">
-                {names.map((tool) => (
-                  <li key={tool} className="flex items-center gap-2 text-sm">
-                    <input id={`tool-allow-${tool}`} data-testid={`tool-allow-${tool}`} type="checkbox" checked={allow.includes(tool)} onChange={(e) => toggleAllow(tool, e.target.checked)} />
-                    <label htmlFor={`tool-allow-${tool}`} className="font-mono text-xs text-fg">
-                      {tool}
-                    </label>
-                    {known && !known.includes(tool) ? <Badge variant="warn">{text.notInSource}</Badge> : null}
-                    {effects?.[tool] ? (
-                      <Badge variant={effects[tool] === "web" ? "info" : effects[tool] === "write" ? "warn" : "muted"} data-testid={`tool-effect-${tool}`}>
-                        {text.effect[effects[tool]]}
-                      </Badge>
-                    ) : null}
-                    <ApprovalBadge tool={tool} unruled={effects?.[tool] === "write" && !data.approval?.[tool]?.length} hasMemory={hasMemory} />
-                  </li>
-                ))}
-              </ul>
-            ) : (
-              <p className="text-xs text-muted" data-testid="tools-no-list">
-                {data.source.id ? text.listUnknown : text.pickSource}
-              </p>
-            )}
-            <div className="flex gap-2">
-              <Input data-testid="tool-allow-extra" className="h-8 font-mono text-xs" placeholder={text.extraPlaceholder} value={extra} onChange={(e) => setExtra(e.target.value)} />
-              <Button
-                size="sm"
-                variant="outline"
-                data-testid="tool-allow-add"
-                disabled={!extra.trim() || allow.includes(extra.trim())}
-                onClick={() => {
-                  toggleAllow(extra.trim(), true);
-                  setExtra("");
-                }}
-              >
-                {t.shared.add}
-              </Button>
-            </div>
-          </div>
-          {offersScript ? (
-            <p className="text-xs text-muted" data-testid="tools-code-mode-hint">
-              {text.codeModeHint}
-            </p>
-          ) : null}
-          {effects ? null : (
-            <p className="text-xs text-muted" data-testid="tools-effects-unknown">
-              {text.effectsUnknown}
-            </p>
+          {isAgent ? (
+            <AgentCallNotes tool={known?.[0]} call={options.agentCalls?.[nodeId]} />
+          ) : (
+            <>
+              <div className="flex flex-col gap-1">
+                <Label>{text.allow}</Label>
+                <p className="text-xs text-muted">{allow.length ? text.allowCount(allow.length) : text.allowAll}</p>
+                {names.length ? (
+                  <ul className="flex flex-col gap-1" data-testid="tools-allow-list">
+                    {names.map((tool) => (
+                      <li key={tool} className="flex items-center gap-2 text-sm">
+                        <input id={`tool-allow-${tool}`} data-testid={`tool-allow-${tool}`} type="checkbox" checked={allow.includes(tool)} onChange={(e) => toggleAllow(tool, e.target.checked)} />
+                        <label htmlFor={`tool-allow-${tool}`} className="font-mono text-xs text-fg">
+                          {tool}
+                        </label>
+                        {known && !known.includes(tool) ? <Badge variant="warn">{text.notInSource}</Badge> : null}
+                        {effects?.[tool] ? (
+                          <Badge variant={effects[tool] === "web" ? "info" : effects[tool] === "write" ? "warn" : "muted"} data-testid={`tool-effect-${tool}`}>
+                            {text.effect[effects[tool]]}
+                          </Badge>
+                        ) : null}
+                        <ApprovalBadge tool={tool} unruled={effects?.[tool] === "write" && !data.approval?.[tool]?.length} hasMemory={hasMemory} />
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="text-xs text-muted" data-testid="tools-no-list">
+                    {data.source.id ? text.listUnknown : text.pickSource}
+                  </p>
+                )}
+                <div className="flex gap-2">
+                  <Input data-testid="tool-allow-extra" className="h-8 font-mono text-xs" placeholder={text.extraPlaceholder} value={extra} onChange={(e) => setExtra(e.target.value)} />
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    data-testid="tool-allow-add"
+                    disabled={!extra.trim() || allow.includes(extra.trim())}
+                    onClick={() => {
+                      toggleAllow(extra.trim(), true);
+                      setExtra("");
+                    }}
+                  >
+                    {t.shared.add}
+                  </Button>
+                </div>
+              </div>
+              {offersScript ? (
+                <p className="text-xs text-muted" data-testid="tools-code-mode-hint">
+                  {text.codeModeHint}
+                </p>
+              ) : null}
+              {effects ? null : (
+                <p className="text-xs text-muted" data-testid="tools-effects-unknown">
+                  {text.effectsUnknown}
+                </p>
+              )}
+              {effects && origins ? <OutsideSection effects={effects} origins={origins} outside={data.outside} onChange={(outside) => update({ outside }, true)} /> : null}
+              {showReadOnly ? <ReadOnlySection readOnly={readOnly} markable={markable} origins={origins} marked={marked} onChange={(read_only) => update({ read_only }, true)} /> : null}
+              {nodeHasWeb || data.allow_domains?.length || data.block_domains?.length ? (
+                <div className="flex flex-col gap-2" data-testid="tools-domains">
+                  <DomainField id="tools-allow-domains" label={text.allowDomains} hint={text.allowDomainsHint} value={data.allow_domains ?? []} onChange={(allow_domains) => update({ allow_domains })} />
+                  <DomainField id="tools-block-domains" label={text.blockDomains} hint={text.blockDomainsHint} value={data.block_domains ?? []} onChange={(block_domains) => update({ block_domains })} />
+                </div>
+              ) : null}
+              {options.toolEffects && !graphHasWeb ? (
+                <p className="text-xs text-muted" data-testid="tools-web-hint">
+                  {text.webHint}{" "}
+                  <Link className="underline underline-offset-2" to="/gateways/new?backend=web-search&backend=web-fetch" data-testid="tools-web-hint-link">
+                    {text.webHintLink}
+                  </Link>
+                </p>
+              ) : null}
+            </>
           )}
-          {effects && origins ? <OutsideSection effects={effects} origins={origins} outside={data.outside} onChange={(outside) => update({ outside }, true)} /> : null}
-          {showReadOnly ? <ReadOnlySection readOnly={readOnly} markable={markable} origins={origins} marked={marked} onChange={(read_only) => update({ read_only }, true)} /> : null}
-          {nodeHasWeb || data.allow_domains?.length || data.block_domains?.length ? (
-            <div className="flex flex-col gap-2" data-testid="tools-domains">
-              <DomainField id="tools-allow-domains" label={text.allowDomains} hint={text.allowDomainsHint} value={data.allow_domains ?? []} onChange={(allow_domains) => update({ allow_domains })} />
-              <DomainField id="tools-block-domains" label={text.blockDomains} hint={text.blockDomainsHint} value={data.block_domains ?? []} onChange={(block_domains) => update({ block_domains })} />
-            </div>
-          ) : null}
-          {options.toolEffects && !graphHasWeb ? (
-            <p className="text-xs text-muted" data-testid="tools-web-hint">
-              {text.webHint}{" "}
-              <Link className="underline underline-offset-2" to="/gateways/new?backend=web-search&backend=web-fetch" data-testid="tools-web-hint-link">
-                {text.webHintLink}
-              </Link>
-            </p>
-          ) : null}
         </>
       ) : null}
       {tab === "approval" ? (
@@ -290,12 +310,14 @@ export function ToolsPanel({
       ) : null}
       {tab === "timeouts" ? (
         <div className="flex flex-col gap-2">
-          <p className="text-xs text-muted">{text.timeoutsHelp}</p>
+          <p className="text-xs text-muted" data-testid="tools-timeouts-help">
+            {isAgent ? text.agentTimeout : text.timeoutsHelp}
+          </p>
           {names.length ? (
             names.map((tool) => (
               <div key={tool} className="grid grid-cols-[1fr_7rem] items-center gap-2">
                 <span className="font-mono text-xs text-fg">{tool}</span>
-                <Input aria-label={text.timeoutLabel(tool)} data-testid={`timeout-${tool}`} type="number" min={1} className="h-8 text-xs" placeholder={text.timeoutDefault} value={data.timeouts?.[tool] ?? ""} onChange={(e) => setTimeout_(tool, e.target.value === "" ? null : Number(e.target.value))} />
+                <Input aria-label={text.timeoutLabel(tool)} data-testid={`timeout-${tool}`} type="number" min={1} className="h-8 text-xs" placeholder={isAgent && agentWait ? String(agentWait) : text.timeoutDefault} value={data.timeouts?.[tool] ?? ""} onChange={(e) => setTimeout_(tool, e.target.value === "" ? null : Number(e.target.value))} />
               </div>
             ))
           ) : (

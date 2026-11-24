@@ -7,6 +7,7 @@ const tools = (count: number): string => plural(count, "Tool", "Tools");
 
 /** MCP Hub 목록·상세·등록과 접근 정책, Tool 스키마 목록. 정책 문장 가운데 들어가는 owner 는 소문자 명사다. */
 export const hub: Messages["hub"] = {
+  kinds: { agent: "Agent" },
   notConsumable: { title: "Cannot be selected as a backend", badge: "No consume permission" },
   access: {
     owner: "publishing tenant",

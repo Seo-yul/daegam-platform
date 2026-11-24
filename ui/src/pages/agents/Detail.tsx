@@ -22,6 +22,7 @@ import {
   undeployAgent,
 } from "@/api/resources";
 import type { Agent, AgentExposureInput, AgentRedeployBody } from "@/api/types";
+import { PublishAgentDialog, UnpublishAgentDialog, useAgentHubItem } from "@/components/agents/AgentPublish";
 import { OverviewSleep, ScaleToZeroField } from "@/components/agents/AgentSleep";
 import { EventsTab } from "@/components/agents/EventsTab";
 import { LlmRouteSummary } from "@/components/agents/LlmRouteSummary";
@@ -48,6 +49,7 @@ import { ReadinessCard } from "@/components/overview/ReadinessCard";
 import { RecentCard, recentEvents } from "@/components/overview/RecentCard";
 import { Tile } from "@/components/overview/Tile";
 import { PageWidth } from "@/components/PageWidth";
+import { HubItemBadge } from "@/components/PublishSection";
 import { queryGate } from "@/components/QueryGate";
 import { ReferencesCard, ReferencesNotice, useReferences } from "@/components/ReferencesCard";
 import { ResourceDeleteDialog } from "@/components/ResourceDeleteDialog";
@@ -145,6 +147,11 @@ export function AgentDetailPage() {
   const [confirmingUndeploy, setConfirmingUndeploy] = useState(false);
   const [cloning, setCloning] = useState(false);
   const [deletingOpen, setDeletingOpen] = useState(false);
+  // 허브 게시 (P46 6.1절). 게시와 해제는 agent:write 와 hub:write 이고, 해제는 항목의 manage 도 있어야 한다
+  const [publishing, setPublishing] = useState(false);
+  const [unpublishing, setUnpublishing] = useState(false);
+  const hubItem = useAgentHubItem(id);
+  const canPublish = canWrite && hasScope(me, tenant, "hub:write");
   // 배포 해제가 409 로 막히면 그 응답의 id 를 이 목록에서 이름으로 바꿔 보인다 (D43)
   const undeployNames = referenceNames(useReferences("agent", id, confirmingUndeploy).data ?? []);
 
@@ -212,7 +219,12 @@ export function AgentDetailPage() {
             title={displayName(a)}
             name={secondaryName(a)}
             testId="page-title"
-            badges={<StateBadge state={a.state} />}
+            badges={
+              <>
+                <StateBadge state={a.state} />
+                <HubItemBadge item={hubItem} />
+              </>
+            }
             primary={
               canDeploy ? (
                 a.state === "draft" ? (
@@ -227,14 +239,28 @@ export function AgentDetailPage() {
               ) : null
             }
             secondary={
-              /* Agent 의 편집은 캔버스라 따로 화면이 없다. 정의 탭이 그 자리이므로 같은 곳으로 보내는
-                 버튼을 따로 두지 않는다 (D42) */
-              <DetailActions
-                busy={busy}
-                onUndeploy={live && canDeploy ? () => setConfirmingUndeploy(true) : undefined}
-                onClone={() => setCloning(true)}
-                onDelete={() => setDeletingOpen(true)}
-              />
+              <>
+                {/* 게시는 턴을 받는 Agent 에만 된다. 게시한 항목은 Agent 가 내려가 있어도 해제할 수 있다 */}
+                {hubItem ? (
+                  canPublish && hubItem.permissions.manage ? (
+                    <Button variant="secondary" data-testid="unpublish-button" disabled={busy} onClick={() => setUnpublishing(true)}>
+                      {t.detail.publishSection.unpublish}
+                    </Button>
+                  ) : null
+                ) : a.state === "deployed" && canPublish ? (
+                  <Button variant="secondary" data-testid="publish-button" disabled={busy} onClick={() => setPublishing(true)}>
+                    {text.publish.action}
+                  </Button>
+                ) : null}
+                {/* Agent 의 편집은 캔버스라 따로 화면이 없다. 정의 탭이 그 자리이므로 같은 곳으로 보내는
+                    버튼을 따로 두지 않는다 (D42) */}
+                <DetailActions
+                  busy={busy}
+                  onUndeploy={live && canDeploy ? () => setConfirmingUndeploy(true) : undefined}
+                  onClone={() => setCloning(true)}
+                  onDelete={() => setDeletingOpen(true)}
+                />
+              </>
             }
           />
           {deployWarnings.map((w) => {
@@ -369,6 +395,8 @@ export function AgentDetailPage() {
         clone={(body) => cloneAgent(a.id, body)}
       />
       <ResourceDeleteDialog resource="agent" target={deletingOpen ? { id: a.id, name: a.name } : null} onClose={() => setDeletingOpen(false)} onDeleted={() => navigate("/agents")} />
+      <PublishAgentDialog agent={a} open={publishing} onClose={() => setPublishing(false)} />
+      <UnpublishAgentDialog agentId={a.id} item={hubItem} open={unpublishing} onClose={() => setUnpublishing(false)} />
     </PageWidth>
   );
 }

@@ -24,7 +24,7 @@ import { Button, buttonVariants } from "@/components/ui/button";
 import { Alert, Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { queryGate } from "@/components/QueryGate";
 import { type Messages, useT } from "@/i18n";
-import { derivedHubSource, hubKindLabel, hubPollInterval, isDerivedHubItem, isPlatformHubItem } from "@/lib/hub";
+import { derivedHubSource, hubKindLabel, hubPollInterval, hubToolNames, isAgentHubItem, isDerivedHubItem, isPlatformHubItem } from "@/lib/hub";
 import { TabBar } from "@/components/ui/tabs";
 import { useTabParam } from "@/lib/tabs";
 import { useAuthState } from "@/lib/auth";
@@ -69,7 +69,8 @@ export function HubDetailPage() {
   const tools = useQuery({
     queryKey: [...hubItemKey(tenant, id), "tools"],
     queryFn: () => getHubTools(id),
-    enabled: tab === "tools" && Boolean(q.data?.permissions.consume),
+    // 게시한 Agent 의 항목은 MCP 를 말하지 않아 물어볼 서버가 없다 (P46 6.2절)
+    enabled: tab === "tools" && Boolean(q.data?.permissions.consume) && !(q.data && isAgentHubItem(q.data.kind)),
     staleTime: 60_000,
     refetchOnWindowFocus: false,
   });
@@ -94,11 +95,13 @@ export function HubDetailPage() {
   // 같은 갈래를 두 곳에서 따로 적으면 종류가 하나 늘 때 한쪽만 고치게 된다 (서버는 store/hub.DERIVED_KINDS)
   const derived = isDerivedHubItem(item.kind);
   const platform = isPlatformHubItem(item.kind);
-  const canRefresh = manage && !derived && !platform && (item.kind !== "entry" || Boolean(item.source.url));
+  // 게시한 Agent 의 항목은 MCP 를 말하지 않아 받아 올 Tool 목록이 없다 (P46 6.2절, 서버 422 derived_tools)
+  const agent = isAgentHubItem(item.kind);
+  const canRefresh = manage && !derived && !platform && !agent && (item.kind !== "entry" || Boolean(item.source.url));
   const published = item.kind === "published";
   const internal = item.kind === "internal";
-  // internal·published 는 원본 인스턴스의 게시 항목이라 지우는 것이 곧 게시 해제다 (docs/guide/hub-gateway.md 6절)
-  const unpublishLabel = published || internal ? t.detail.publishSection.unpublish : undefined;
+  // internal·published·agent 는 원본의 게시 항목이라 지우는 것이 곧 게시 해제다 (docs/guide/hub-gateway.md 6절)
+  const unpublishLabel = published || internal || agent ? t.detail.publishSection.unpublish : undefined;
   const phaseNote = hubStatusNote(t, item.status?.phase);
   // Secret env 가 있는 항목은 다른 테넌트에 열 수 없고(422 secret_not_shareable), 이미지가 거부된 항목은 더 열 수 없다(422
   // refused_image_not_shareable). 앞의 것은 테넌트 칸을 잠그고, 뒤의 것은 좁히기만 되게 넓히기를 막는다 (P55 5·6절)
@@ -113,7 +116,7 @@ export function HubDetailPage() {
         testId="page-title"
         actions={
           <>
-            {derived || platform ? null : (
+            {derived || platform || agent ? null : (
               <Button variant="secondary" data-testid="refresh-tools-button" disabled={!canRefresh || refresh.isPending} title={manage ? undefined : text.manageRequired} onClick={() => refresh.mutate()}>
                 {refresh.isPending ? text.refreshing : text.refresh}
               </Button>
@@ -121,6 +124,11 @@ export function HubDetailPage() {
             {internal ? (
               <Link to={`/mcp-servers/${item.source.instance_id ?? ""}`} className={buttonVariants({ variant: "secondary" })} data-testid="goto-instance-button">
                 {text.gotoInstance}
+              </Link>
+            ) : null}
+            {agent && item.source.agent_id ? (
+              <Link to={`/agents/${item.source.agent_id}`} className={buttonVariants({ variant: "secondary" })} data-testid="goto-agent-button">
+                {t.canvas.openResource(t.resources.kind.agent)}
               </Link>
             ) : null}
             {manage && !platform ? (
@@ -137,7 +145,8 @@ export function HubDetailPage() {
         onClose={() => setDeleting(false)}
         onDeleted={() => navigate("/hub")}
         confirmLabel={unpublishLabel}
-        description={published ? t.detail.publishSection.unpublishPublished : internal ? t.detail.publishSection.unpublishInternal : undefined}
+        // agent 항목은 그것을 Tool 로 쓰는 Agent 가 있어도 해제된다. 그 Agent 들은 아래의 참조 안내가 보인다
+        description={published ? t.detail.publishSection.unpublishPublished : internal ? t.detail.publishSection.unpublishInternal : agent ? "" : undefined}
       />
       <ErrorMessage error={refresh.error} testId="refresh-error" />
       <LastErrorAlert lastError={item.last_error} testId="hub-last-error" />
@@ -161,7 +170,7 @@ export function HubDetailPage() {
         label={(key) =>
           key === "tools" ? (
             <>
-              {tabLabel(t, key)} <span className="text-muted">{liveTools?.length ?? item.tool_names.length}</span>
+              {tabLabel(t, key)} <span className="text-muted">{liveTools?.length ?? hubToolNames(item).length}</span>
             </>
           ) : (
             tabLabel(t, key)
@@ -320,7 +329,8 @@ export function HubDetailPage() {
         </>
       ) : null}
 
-      {tab === "tools" ? (
+      {tab === "tools" && agent ? <AgentToolCard item={item} /> : null}
+      {tab === "tools" && !agent ? (
         <>
           <ToolsCard item={item} q={tools} />
           <ItemToolRules item={item} />
@@ -336,8 +346,8 @@ export function HubDetailPage() {
             queryClient.setQueryData(hubItemKey(tenant, item.id), updated);
             await queryClient.invalidateQueries({ queryKey: hubItemsKey(tenant) });
           }}
-          // internal·published 는 다른 테넌트에 열 수 없다 (docs/guide/hub-gateway.md 8절, 422 cross_tenant_unsupported)
-          editor={{ canShare: canShare(me, tenant, "hub:share") && !refusedImage, crossTenant: !isDerivedHubItem(item.kind) && !secretEnvItem }}
+          // internal·published·agent 는 다른 테넌트에 열 수 없다 (docs/guide/hub-gateway.md 8절, 422 cross_tenant_unsupported)
+          editor={{ canShare: canShare(me, tenant, "hub:share") && !refusedImage, crossTenant: !isDerivedHubItem(item.kind) && !agent && !secretEnvItem }}
           notice={
             item.auth?.kind === "header"
               ? (draft) => <HeaderCopyNotice saved={item.access} draft={draft} owner={item.tenant} />
@@ -418,6 +428,31 @@ function missingNames(t: Messages, live: HubTool[], stored: string[]): string {
   if (onlyStored && onlyLive) return text.both(onlyStored, onlyLive);
   if (onlyStored) return text.storedOnly(onlyStored);
   return onlyLive ? text.liveOnly(onlyLive) : "";
+}
+
+/**
+ * 게시한 Agent 의 항목의 도구 탭 (P46 6.2절). Tool 은 항목 이름에서 나온 하나이고 설명은 게시할 때 적은 Tool 설명이다. 부르는
+ * Agent 의 모델이 그 설명을 읽는다.
+ */
+function AgentToolCard({ item }: { item: HubItem }) {
+  const text = useT().hub.tools;
+  const names = hubToolNames(item);
+  return (
+    <Card data-testid="hub-tools-card">
+      <CardHeader>
+        <CardTitle>{text.title}</CardTitle>
+        <span className="text-xs text-muted">{text.count(names.length)}</span>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-3">
+        <ToolList names={names} />
+        {item.description ? (
+          <p className="text-sm whitespace-pre-wrap text-fg-soft" data-testid="hub-agent-description">
+            {item.description}
+          </p>
+        ) : null}
+      </CardContent>
+    </Card>
+  );
 }
 
 /**
