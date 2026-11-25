@@ -244,6 +244,33 @@ def test_a_remote_item_that_keeps_its_proxy_deploys_through_it(client, fake_clus
         assert fake.get(GV, "MCPRemoteProxy", proxy["metadata"]["name"], ns) == proxy
 
 
+def test_a_remote_item_that_keeps_its_proxy_gets_no_new_clone(client, fake_clusters, mongo):
+    """프록시를 떼지 못하는 remote 항목을 복제본이 없는 다른 테넌트의 Gateway 가 배포하면 그 항목을
+    붙잡은 까닭으로 거절된다. 플랫폼이 remote 복제본을 만들지 않아 Entry 가 가리킬 프록시가 없기
+    때문이다. 아무것도 적용하지 않고 기록도 만들지 않는다."""
+    cid, _items, shared, fake = shared_env(client, fake_clusters)
+    item = {"_id": shared["id"]}
+
+    def refused(name: str) -> dict:
+        _profile, r = other_tenant_gateway(client, shared, name=name)
+        assert r.status_code == 422, r.text
+        assert fake.find("MCPRemoteProxy", OTHER_NS) == []
+        assert fake.find("MCPServerEntry", OTHER_NS) == []
+        assert mongo["shared_clones"].count_documents({}) == 0
+        assert mongo["gateways"].count_documents({"state": {"$ne": "draft"}}) == 0
+        return r.json()["detail"]
+
+    mongo["hub_items"].update_one(item, {"$set": {"source.transport": "sse"}})
+    detail = refused("gw-s")
+    assert (detail["code"], detail["hub_item_id"]) == ("outside_sse_unsupported", shared["id"])
+
+    mongo["hub_items"].update_one(item, {"$set": {"source.transport": "streamable-http"}})
+    downgrade_toolhive(mongo, cid)
+    detail = refused("gw-a")
+    assert (detail["code"], detail["feature"]) == ("toolhive_too_old", "audit")
+    assert detail["hub_item_id"] == shared["id"]
+
+
 # -- 원본 변경과 스윕 (P50 1절) ------------------------------------------------------------
 
 

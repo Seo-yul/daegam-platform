@@ -28,7 +28,7 @@ from starlette.concurrency import run_in_threadpool
 from daegam.auth.hub_access import tenant_in_boundary
 from daegam.errors import ServiceError
 from daegam.k8s.client import KubeClient
-from daegam.k8s.gates import Feature, passing_features
+from daegam.k8s.gates import Feature, cluster_gate, gate_error, passing_features
 from daegam.k8s.labels import LABEL_PLATFORM_ID, LABEL_RESOURCE, LABEL_SOURCE_ID
 from daegam.k8s.templates.common import RESOURCE_HUB_ITEM, TOOLHIVE_API, proxy_service_name
 from daegam.k8s.templates.svc_token import TOKEN_BACKEND_KINDS
@@ -51,12 +51,15 @@ from daegam.services.gateway_plan import point_at_clone
 from daegam.services.hub import (
     CLONE_SOURCE_FIELDS,
     CR_KIND,
+    OUTSIDE_SSE_UNSUPPORTED,
+    PROXY_KEPT_AUDIT,
     HubService,
     clone_source,
     clone_source_hash,
     image_side_objects,
     item_from_clone_source,
     newer_item_error,
+    proxy_kept,
     refuse_newer,
     shared_clone_name,
 )
@@ -248,6 +251,30 @@ class SharedClones:
                 # 를 싣는다 (P50 9절)
                 b.server_id = record.id
         return [r.name for r in records.values()]
+
+    async def require_kept_clone(
+        self, item: HubItem, *, namespace: str, error_cls: type[ServiceError]
+    ) -> None:
+        """프록시를 떼지 못하는 remote 항목을 다른 테넌트의 Gateway 가 배포하기 전의 검사. 그
+        네임스페이스에 전에 만든 복제본의 기록이 있어야 한다. 플랫폼은 remote 복제본을 새로 만들지
+        않으므로, 기록이 없으면 Entry 가 가리킬 프록시가 없다. 그때는 항목을 붙잡은 까닭으로
+        거절한다. 감사 게이트 아래의 클러스터면 그 게이트의 422 이고, SSE 만 말하는 서버면 422
+        `outside_sse_unsupported` 다. 둘 다 `hub_item_id` 를 싣는다. 항목이 entry 항목으로 옮겨 가면
+        복제본 없이 배포된다."""
+        if await self.store.at(item.id, item.cluster_id, namespace) is not None:
+            return
+        cluster = await self.tenancy.clusters.get(item.cluster_id)
+        if cluster is not None and proxy_kept(item, cluster) == PROXY_KEPT_AUDIT:
+            raise error_cls(
+                422, **gate_error(cluster_gate(cluster, Feature.AUDIT)), hub_item_id=item.id
+            )
+        raise error_cls(
+            422,
+            OUTSIDE_SSE_UNSUPPORTED,
+            f"hub item {item.name} speaks only SSE and keeps its remote proxy; a Gateway of "
+            "another tenant cannot use it until it is registered with a streamable-http address",
+            hub_item_id=item.id,
+        )
 
     async def delete_source(self, item_id: str) -> list[str]:
         """한 원본의 복제본을 모두 지운다. 꺼진 플랫폼 fetch 의 정리다(P39b 13절). 지운 것을

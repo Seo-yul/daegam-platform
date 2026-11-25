@@ -182,7 +182,7 @@ from daegam.store.gateways import (
     MongoGatewayStore,
     PublishedRender,
 )
-from daegam.store.hub import PUBLISHED_KIND, HubItem, replicated
+from daegam.store.hub import KEPT_CLONE_KINDS, PUBLISHED_KIND, HubItem, replicated
 from daegam.store.mcp_servers import MCPServer, MongoMCPServerStore
 from daegam.store.tool_rules import AnyRule, has_caller_rule, holds_rules
 from daegam.ttl_cache import TTLCache
@@ -939,7 +939,8 @@ class GatewayService(ExposureValidationMixin, BaseInstanceService[Gateway]):
         고정하고 원본 id·복제본 이름을 스냅샷에 남긴다. entry 는 CR 이 없어 원본 URL 그대로이고,
         remote 항목의 행도 프록시를 떼지 못하는 것만 빼고 entry 행이다(`HubService.deploy_form`).
         프록시를 떼지 못하는 remote 항목의 행은 전에 적용한 프록시나 복제본을 그대로 가리킨다.
-        플랫폼은 그 둘을 렌더하지 않는다.
+        플랫폼은 그 둘을 렌더하지 않는다. 그래서 다른 테넌트의 그런 항목은 이 네임스페이스에 전에
+        만든 복제본이 있을 때만 쓰고, 없으면 422 다(`SharedClones.require_kept_clone`).
         consume 판정은 validate_spec 이 먼저 했다."""
         snapshots: list[GatewayBackendSnapshot] = []
         report: list[dict[str, Any]] = []
@@ -980,6 +981,10 @@ class GatewayService(ExposureValidationMixin, BaseInstanceService[Gateway]):
             )
             shared_foreign = replicated(item, tenant)
             clone_name = clone_kind = None
+            if shared_foreign and item.kind in KEPT_CLONE_KINDS:
+                await self.shared_clones.require_kept_clone(
+                    item, namespace=namespace, error_cls=GatewayError
+                )
             if shared_foreign:
                 clone_name = shared_clone_name(item)
                 clone_kind = item.k8s.kind
