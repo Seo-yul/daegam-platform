@@ -1265,6 +1265,9 @@ class GatewayService(ExposureValidationMixin, BaseInstanceService[Gateway]):
         )
         cluster = await self.tenancy.resolve_cluster(doc.tenant, cluster_id)
         effective = await self._effective(doc.tenant, cluster, rev)
+        if doc.k8s is not None and doc.cluster_id == cluster.id:
+            # 배포된 Gateway 는 재배포가 쓰는 네임스페이스로 본다. 복제본 검사가 재배포와 같아진다
+            effective.namespace.name = doc.k8s.namespace
         name = gateway_k8s_name(doc.name)
         sample = Gateway(
             id=f"preview-{doc.id}",

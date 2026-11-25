@@ -7,8 +7,11 @@ from __future__ import annotations
 
 from typing import get_args
 
+import pytest
+
 from daegam.auth.cedar import tenant_fence_policies
 from daegam.auth.hub_access import Access
+from daegam.errors import ServiceError
 from daegam.k8s.labels import LABEL_SOURCE_HASH, LABEL_SOURCE_ID
 from daegam.services.hub import shared_clone_name
 from daegam.store.hub import PLATFORM_KIND, HubItem, HubK8s, HubKind, HubSource
@@ -258,6 +261,10 @@ def test_a_remote_item_that_keeps_its_proxy_gets_no_new_clone(client, fake_clust
         assert fake.find("MCPServerEntry", OTHER_NS) == []
         assert mongo["shared_clones"].count_documents({}) == 0
         assert mongo["gateways"].count_documents({"state": {"$ne": "draft"}}) == 0
+        # 미리 보기도 같은 까닭으로 거절한다
+        preview = client.get(f"{GW}/{_profile['id']}/revisions/1/preview", headers=T2)
+        assert preview.status_code == 422, preview.text
+        assert preview.json()["detail"]["code"] == r.json()["detail"]["code"]
         return r.json()["detail"]
 
     mongo["hub_items"].update_one(item, {"$set": {"source.transport": "sse"}})
@@ -269,6 +276,24 @@ def test_a_remote_item_that_keeps_its_proxy_gets_no_new_clone(client, fake_clust
     detail = refused("gw-a")
     assert (detail["code"], detail["feature"]) == ("toolhive_too_old", "audit")
     assert detail["hub_item_id"] == shared["id"]
+
+
+def test_a_stored_row_is_not_provisioned_without_its_clone(client, fake_clusters, mongo):
+    """스냅샷을 만든 뒤에 복제본의 기록이 없어진 Gateway 를 다시 provision 하면, 프록시를 유지하는
+    항목의 행은 가리킬 프록시가 없으므로 422 로 거절된다. 없는 프록시를 가리키는 채로
+    deployed 가 되지 않는다."""
+    _cid, _items, shared, _fake = shared_env(client, fake_clusters)
+    other = gateway_on_remote_clone(client, shared, name="gw-o")
+    mongo["hub_items"].update_one({"_id": shared["id"]}, {"$set": {"source.transport": "sse"}})
+    assert client.get(f"{GW}/{other['id']}/revisions/1/preview", headers=T2).status_code == 200
+    mongo["shared_clones"].delete_many({})
+    mongo["gateways"].update_one({"_id": other["id"]}, {"$set": {"state": "deploying"}})
+    portal, state = client.portal, client.app.state
+    with pytest.raises(ServiceError) as refused:
+        portal.call(state.gateway_service.provision, portal.call(state.gateways.get, other["id"]))
+    assert (refused.value.status, refused.value.code) == (422, "outside_sse_unsupported")
+    assert client.get(f"{GW}/{other['id']}", headers=T2).json()["state"] != "deployed"
+    assert mongo["shared_clones"].count_documents({}) == 0
 
 
 # -- 원본 변경과 스윕 (P50 1절) ------------------------------------------------------------

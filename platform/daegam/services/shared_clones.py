@@ -209,7 +209,8 @@ class SharedClones:
         백엔드를 기록의 이름과 주소로 맞춘다. 복제본은 Gateway 사이에 공유되므로 ownerReference 없이
         둔다. 쓰는 Gateway 가 없어진 복제본은 리컨실의 스윕이 지운다. consume 판정은 배포·재배포의
         validate_spec 이 먼저 했다. remote 행의 복제본은 렌더하지 않는다. 전에 만든 기록이 있으면
-        그 이름으로 백엔드를 맞추기만 하고, 없으면 그 행을 그대로 둔다.
+        그 이름으로 백엔드를 맞추기만 하고, 없는데 항목이 아직 프록시를 유지하면
+        `require_kept_clone` 의 422 로 거절한다.
 
         k8s(Gateway 의 이름 묶음)와 error_cls(Gateway 의 오류 클래스)를 부를 때마다 받는다. 이
         모듈이 Gateway 서비스를 들지 않게 하려는 것이다. 들면 서로를 잇는 뒷줄이 되살아나고(P72
@@ -222,6 +223,14 @@ class SharedClones:
                 kept = await self.store.at(b.shared_source_id, doc.cluster_id or "", k8s.namespace)
                 if kept is not None:
                     point_at_clone(b, kept.name, k8s.namespace)
+                    continue
+                # 스냅샷을 만든 뒤에 기록이 없어졌거나(스윕), 첫 복제본을 만들기 전에 멈춘 배포다.
+                # 가리킬 프록시가 없는 Entry 를 적용하지 않는다
+                held = await self.hub.store.get_unscoped(b.shared_source_id)
+                if held is not None and held.kind in KEPT_CLONE_KINDS:
+                    await self.require_kept_clone(
+                        held, namespace=k8s.namespace, error_cls=error_cls
+                    )
                 continue
             if b.shared_source_id not in records:
                 item = await self.hub.store.get_unscoped(b.shared_source_id)
