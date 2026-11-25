@@ -1,11 +1,12 @@
 """원격 프록시의 역할 없는 ServiceAccount (P50 10절, G10).
 
-MCPRemoteProxy(허브 remote 항목과 그 공유 복제본, proxy 모드 게시, MCP Server 노출 앞단)는 테넌트
-네임스페이스의 ServiceAccount `daegam-remote-proxy`(`services/tenancy.py`)로 돈다. 그 계정에는
-Role 이 없어 오퍼레이터가 프록시마다 만들던, 네임스페이스의 Secret 을 읽는 Role 이 필요 없다(F0
-실측). 게이트(`Feature.ROLELESS_SA`)를 지나지 못한 클러스터에서 이미 도는 프록시는 오늘의
-꼴(serviceAccount 없음)로 렌더하고, 새로 만드는 프록시는 422 로 거절한다. 오늘의 꼴로 만들면 그
-Role 이 생기기 때문이다.
+플랫폼이 렌더하는 MCPRemoteProxy(MCP Server 의 옛 노출 앞단)는 테넌트 네임스페이스의 ServiceAccount
+`daegam-remote-proxy`(`services/tenancy.py`)로 돈다. 그 계정에는 Role 이 없어 오퍼레이터가
+프록시마다 만들던, 네임스페이스의 Secret 을 읽는 Role 이 필요 없다(F0 실측).
+게이트(`Feature.ROLELESS_SA`)를 지나지 못한 클러스터의 프록시는 오늘의 꼴(serviceAccount 없음)로
+렌더한다. 전에 만든 허브 remote 항목과 그 복제본, proxy 모드 게시의 프록시는 렌더하지 않으므로
+적용돼 있는 꼴 그대로 돌고, 옮기기 단계가 그 프록시와 RoleBinding 을 지운다
+(`services/entry_conversion.py`).
 
 오퍼레이터는 spec.serviceAccount 를 받은 프록시의 옛 `<프록시>-remote-proxy-runner`
 ServiceAccount 와 Role 을 지우지 않는다. 플랫폼은 그 RoleBinding 만 지운다(지금 권한으로 되는
@@ -19,9 +20,8 @@ from typing import Any
 
 from starlette.concurrency import run_in_threadpool
 
-from daegam.errors import ServiceError
 from daegam.k8s.client import RBAC_API, KubeClient
-from daegam.k8s.gates import Feature, cluster_gate, gate_error, passing_features
+from daegam.k8s.gates import Feature, passing_features
 from daegam.k8s.labels import LABEL_TENANT
 from daegam.k8s.templates.common import owned_by
 from daegam.k8s.templates.remote_proxy import runner_binding_name
@@ -40,13 +40,6 @@ def proxy_service_account(cluster: Cluster | None) -> str | None:
     if cluster is None or Feature.ROLELESS_SA not in passing_features(cluster):
         return None
     return REMOTE_PROXY_SERVICE_ACCOUNT
-
-
-def require_proxy_account(cluster: Cluster, error_cls: type[ServiceError]) -> None:
-    """새 원격 프록시를 만들기 전의 검사. 게이트를 지나지 못하면 그 이유를 담은 422 다."""
-    gate = cluster_gate(cluster, Feature.ROLELESS_SA)
-    if not gate.ok:
-        raise error_cls(422, **gate_error(gate))
 
 
 async def apply_proxy_doc(client: KubeClient, doc: dict[str, Any]) -> dict[str, Any]:

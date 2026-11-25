@@ -1,7 +1,9 @@
 """MCP Hub: 항목 생성(CR 렌더·apply), 상태, 삭제, 툴 목록 갱신, MCP Server 의 수동 게시(D23).
 
 자기 CR 을 둔 항목(`owns_crs`)은 재적용 단계가 렌더 번호로 제자리에서 다시 렌더한다
-(`rerender`, P50 1절, `services/hub_reapply.py`)."""
+(`rerender`, P50 1절, `services/hub_reapply.py`). 렌더하는 CR 은 image 항목의 것뿐이다. 전에 만든
+remote 항목과 proxy 모드로 게시한 항목의 MCPRemoteProxy 는 렌더하지 않고, 옮기기 단계가 지울 때까지
+적용된 그대로 둔다(`services/entry_conversion.py`)."""
 
 from __future__ import annotations
 
@@ -54,7 +56,6 @@ from daegam.k8s.templates import (
     proxy_mcp_url,
     proxy_service_url,
     render_image_server,
-    render_remote_proxy,
     render_tool_config,
     vmcp_cluster_url,
 )
@@ -91,7 +92,6 @@ from daegam.services.hub_images import (
     refused_items,
 )
 from daegam.services.hub_secret_env import SecretEnvSecrets
-from daegam.services.proxy_accounts import proxy_service_account
 from daegam.services.references import HUB_ITEM_DELETE, ReferenceService
 from daegam.services.rule_compile import RuleScopes, closed_policies, item_policies
 from daegam.services.svc_tokens import SvcTokens
@@ -236,7 +236,8 @@ def _creator_or_admin(
     return principal.is_tenant_admin(tenant)
 
 
-# 항목이 가리키는 CR. entry 는 CR 없이 URL 만 보관한다 (사용 시 Gateway 그룹에 Entry 래퍼)
+# 항목이 가리키는 CR. entry 는 CR 없이 URL 만 보관한다 (사용 시 Gateway 그룹에 Entry 래퍼).
+# remote 의 MCPRemoteProxy 는 전에 만든 항목과 그 복제본을 읽고 지울 때만 쓴다
 CR_KIND: dict[str, str | None] = {
     "internal": "MCPServer",
     "remote": "MCPRemoteProxy",
@@ -266,8 +267,9 @@ def hub_k8s_name(name: str) -> str:
 
 
 def proxied(item: HubItem) -> bool:
-    """MCPRemoteProxy 로 감싼 항목인가. remote 는 늘 그렇고 published 는 proxy 모드로 게시했을
-    때다. 소비는 프록시를 거친다(정책·audit 계층)."""
+    """MCPRemoteProxy 로 감싼 항목인가. 전에 만든 remote 항목과 proxy 모드로 게시한 항목이다.
+    플랫폼은 그 프록시를 렌더하지 않는다. 옮기기 단계가 항목을 옮기고 프록시를 지울 때까지
+    (`services/entry_conversion.py`) 그 항목의 소비는 적용돼 있는 프록시를 거친다."""
     return item.kind == "remote" or (item.kind == "published" and item.k8s.kind == "MCPRemoteProxy")
 
 
@@ -297,14 +299,15 @@ def hub_item_rev(item: HubItem) -> str | None:
 
 
 def owns_crs(item: HubItem) -> bool:
-    """항목이 자기 CR 을 렌더하는가. 프록시(remote·proxy 모드 게시)와 image 다. internal 의 CR 은
-    MCP Server 의 것이고, entry 와 entry 모드 게시는 CR 이 없다(게시의 vMCP 는 Gateway 의 것)."""
+    """항목이 자기 CR 을 두는가. image 와 프록시(remote·proxy 모드 게시)다. 렌더하는 것은 image
+    뿐이고 프록시는 전에 적용한 CR 이 남아 있는 것이다. internal 의 CR 은 MCP Server 의 것이고,
+    entry 와 entry 모드 게시는 CR 이 없다(게시의 vMCP 는 Gateway 의 것)."""
     return proxied(item) or item.kind == "image"
 
 
 # 복제본 이름에 붙이는 원본 항목 id 의 16진 자릿수. 두 원본의 복제본 이름이 한 네임스페이스에서
-# 겹치지 않게 한다. 항목 이름 32자에 붙여도 ToolHive 가 만드는 가장 긴 이름
-# `mcp-shared-<n>-remote-proxy` 가 63자에 든다 (docs/guide/names.md 2절)
+# 겹치지 않게 한다. 항목 이름 32자에 붙여도 ToolHive 가 만드는 Service 이름
+# `mcp-shared-<n>-proxy` 가 63자에 든다 (docs/guide/names.md 2절)
 CLONE_ID_DIGITS = 6
 # 복제본 기록이 드는 원본 정의의 칸. 복제본의 렌더가 읽는 것만 든다
 CLONE_SOURCE_FIELDS = (
@@ -836,10 +839,10 @@ class HubService:
     ) -> list[dict[str, Any]]:
         """항목이 띄우는 CR. 원본(`render`)과 공유 복제본(`shared_clone_docs`)이 테넌트·이름·
         네임스페이스·audience 만 달리해 같은 문서를 얻는다. 한쪽에만 인자를 더하면 복제본이 원본과
-        다른 CR 로 조용히 뜨기 때문이다. 프록시는 MCPRemoteProxy 하나, image 는 [ToolConfig?,
-        MCPAuthzConfig?, MCPServer] 이고 그 밖은 빈 목록이다. server_id 는 image 의 MCPServer 가
-        자기 audience 로 검증하는 서버(항목이나 복제본 기록)의 id 이고, None 이면 테넌트
-        audience 다.
+        다른 CR 로 조용히 뜨기 때문이다. image 는 [ToolConfig?, MCPAuthzConfig?, MCPServer] 이고
+        그 밖은 빈 목록이다. 프록시를 둔 항목(`proxied`)도 빈 목록이라, 그 MCPRemoteProxy 와
+        복제본은 적용돼 있는 그대로 남는다. server_id 는 image 의 MCPServer 가 자기 audience 로
+        검증하는 서버(항목이나 복제본 기록)의 id 이고, None 이면 테넌트 audience 다.
         MCPAuthzConfig 는 그 테넌트(복제본이면 쓰는 테넌트)의 울타리이고, 울타리와 G8 게이트를 모두
         지난 클러스터에만 있다 (P50 11절). 적용은 그것을 서버보다 먼저 하고 받아들여지기를
         기다린다(`apply_in_order`)."""
@@ -849,23 +852,6 @@ class HubService:
             cluster = await self.tenancy.clusters.get(item.cluster_id)
         if item.kind == PLATFORM_KIND:
             return await self._web_tools_docs(item, tenant, name, namespace, group, cluster)
-        if proxied(item):
-            # 원격 MCP 를 프록시로 감싸는 까닭 하나가 감사다(docs/guide/hub-gateway.md 5절의 remote
-            # 행). 끄면 원격 도구 호출이 MCP 감사에 남지 않는다. proxy 모드 게시도 같은 까닭이다(D5)
-            return [
-                render_remote_proxy(
-                    tenant=tenant,
-                    item_id=item.id,
-                    name=name,
-                    namespace=namespace,
-                    url=src.url or "",
-                    transport=transport,
-                    audit=True,
-                    # 역할 없는 ServiceAccount (P50 10절). 게이트를 지나지 못한 클러스터는 오늘의
-                    # 꼴이다
-                    service_account=proxy_service_account(cluster),
-                )
-            ]
         if item.kind != "image":
             return []
         effective = None
@@ -1382,7 +1368,8 @@ class HubService:
         """shared 항목을 참조 테넌트의 네임스페이스에 복제할 CR 들. 이름은 복제본 기록의 것이다.
         cluster 는 복제본이 사는 Gateway 의 클러스터다. 그 클러스터의 이미지 설정과 배치가 복제본에
         간다(플랫폼 fetch 는 원본 클러스터가 없다, P39b 13절).
-        entry 는 CR 이 없어 빈 목록이다. 복제본에는 원본 id 와 spec 해시, 이 설치의 라벨
+        복제본을 두는 것은 image 와 플랫폼 fetch 뿐이고 그 밖은 빈 목록이다. 복제본에는 원본 id 와
+        spec 해시, 이 설치의 라벨
         `daegam.devops.ai.kr/platform-id` 가 붙는다. 스윕은 다른 설치의 복제본을 건드리지 않는다
         (P50 1절). server_id 는 자기 audience 로 옮겨 간 image 복제본 기록의 id 다 (9절)."""
         docs = await self._cr_docs(

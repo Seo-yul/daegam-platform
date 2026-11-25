@@ -240,8 +240,9 @@ FALLBACK_KINDS: dict[Feature, frozenset[str]] = {
 
 
 def _remote_proxy(kind: str, doc: Any) -> bool:
-    """원격 프록시를 띄우는 문서인가. 노출한 MCP Server 의 앞단, remote·proxy 모드 게시 허브 항목,
-    remote 원본의 복제본이다."""
+    """원격 프록시를 둔 문서인가. 노출한 MCP Server 의 앞단, remote·proxy 모드 게시 허브 항목,
+    remote 원본의 복제본이다. 허브 항목과 복제본의 프록시는 렌더하지 않고 전에 적용한 것이 남아
+    있는 것이라, 게이트 아래에서 만든 것은 옮겨 갈 때까지 역할 없는 ServiceAccount 없이 돈다."""
     if kind == KIND_MCP_SERVER:
         return exposure_enabled(doc)
     if kind == KIND_HUB_ITEM:

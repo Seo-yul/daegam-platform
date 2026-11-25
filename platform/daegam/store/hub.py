@@ -271,15 +271,20 @@ def other_cluster(items: Iterable[HubItemBase], cluster_id: str | None) -> HubIt
 
 
 # 다른 테넌트의 Gateway 가 자기 네임스페이스에 복제본을 두는 종류 (P50 1절)
-CLONED_KINDS: tuple[str, ...] = ("remote", "image")
+CLONED_KINDS: tuple[str, ...] = ("image",)
+# 전에 복제본을 두던 종류. 새 복제본은 만들지도 다시 렌더하지도 않는다. 남아 있는 복제본은 그 항목이
+# entry 항목으로 옮겨 갈 때까지 그대로 쓰이고 스윕이 지운다 (`services/shared_clones.py`)
+KEPT_CLONE_KINDS: tuple[str, ...] = ("remote",)
 
 
 def replicated(item: HubItemBase, tenant: str) -> bool:
-    """tenant 의 Gateway 가 그 네임스페이스에 복제본을 두는 항목인가. 다른 테넌트의 remote·image 와
-    플랫폼 fetch(CR 이 있는 플랫폼 항목)다."""
+    """tenant 의 Gateway 가 그 네임스페이스의 복제본을 부르는 항목인가. 다른 테넌트의 image 와
+    플랫폼 fetch(CR 이 있는 플랫폼 항목), 그리고 다른 테넌트의 remote 항목이다. Gateway 배포는
+    프록시를 떼지 못하는 remote 항목만 remote 인 채로 넘기므로(`services/hub.py`
+    `HubService.deploy_form`), 그 행은 전에 만든 복제본을 계속 부른다."""
     if item.kind == PLATFORM_KIND:
         return item.k8s.kind is not None
-    return item.tenant != tenant and item.kind in CLONED_KINDS
+    return item.tenant != tenant and item.kind in (*CLONED_KINDS, *KEPT_CLONE_KINDS)
 
 
 def as_entry[T: HubItemBase](item: T) -> T:
@@ -543,7 +548,7 @@ class MongoHubStore(EditClaimStore):
         Server 것이고 entry 는 CR 이 없다. published 는 proxy 모드(MCPRemoteProxy)뿐 아니라 entry
         모드도 든다. entry 모드의 `k8s` 는 그 Gateway 의 VirtualMCPServer 를 가리킨다. 감사
         수집기가 프록시 파드를 테넌트에 잇는 데 쓰고(Gateway 의 이름이 먼저 들어가 entry 모드 항목은
-        그 이름을 바꾸지 않는다), 재적용은 자기 CR 을 렌더하는 항목만 거른다(`services/hub.py`
+        그 이름을 바꾸지 않는다), 재적용은 자기 CR 을 둔 항목만 거른다(`services/hub.py`
         `owns_crs`)."""
         cursor = self.coll.find(
             {

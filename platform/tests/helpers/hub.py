@@ -5,9 +5,10 @@ fake 클러스터에서 셋을 Ready 로 둔다. Gateway·노출·shared 복제�
 `shared_env` 는 여기에 모든 테넌트에 열린 remote 항목을 하나 더하고, `shared_image_env` 는 image
 항목을 하나 더한다.
 
-허브 API 는 remote 항목과 proxy 모드 게시를 만들지 않고, 배포는 remote 항목의 복제본을 만들지
-않는다. 전에 만든 것을 읽고 렌더하는 테스트는 `stored_remote`, `stored_proxy_publish`,
-`gateway_on_remote_proxy`, `gateway_on_remote_clone` 으로 저장소에 둔다.
+허브 API 는 remote 항목과 proxy 모드 게시를 만들지 않고, 플랫폼은 그 프록시와 remote 항목의
+복제본을 렌더하지 않는다. 전에 만든 것을 읽고 옮기는 테스트는 `stored_remote`,
+`stored_proxy_publish`, `gateway_on_remote_proxy`, `gateway_on_remote_clone` 으로 문서를 저장소에,
+전에 적용한 MCPRemoteProxy 를 클러스터에 둔다(`_seed_proxy`).
 """
 
 from __future__ import annotations
@@ -15,10 +16,14 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from daegam.auth.hub_access import Access
+from daegam.k8s.labels import LABEL_PLATFORM_ID, LABEL_SOURCE_ID
+from daegam.k8s.templates import render_remote_proxy
 from daegam.k8s.templates.common import proxy_service_url
-from daegam.services.hub import CR_KIND, hub_k8s_name, shared_clone_name
+from daegam.services.hub import CR_KIND, clone_source, hub_k8s_name, shared_clone_name
+from daegam.services.proxy_accounts import apply_proxy_doc, proxy_service_account
 from daegam.store.base import fields_of
 from daegam.store.hub import DEFAULT_TRANSPORT, HubItem, HubK8s, HubSource
+from daegam.store.shared_clones import SharedClone
 from tests.helpers.backend_apis import uploaded_backend
 from tests.helpers.consts import DEFAULT_NS, EXT_URL, GV, GW, HUB, MS, T2
 from tests.helpers.fake_cluster import FakeClusterClient
@@ -42,8 +47,34 @@ def _stored(client, item_id: str) -> dict:
     return client.get(f"{HUB}/{item_id}").json()
 
 
+async def _seed_proxy(
+    hub,
+    item: HubItem,
+    *,
+    tenant: str,
+    name: str,
+    namespace: str,
+    labels: dict[str, str] | None = None,
+) -> None:
+    """전에 적용한 MCPRemoteProxy 를 항목의 클러스터에 둔다. 플랫폼이 렌더하지 않는 CR 이라 앞 판이
+    적용하던 꼴(감사, 게이트를 지난 클러스터의 역할 없는 ServiceAccount)로 직접 적용한다."""
+    cluster = await hub.tenancy.clusters.get(item.cluster_id)
+    doc = render_remote_proxy(
+        tenant=tenant,
+        item_id=item.id,
+        name=name,
+        namespace=namespace,
+        url=item.source.url or "",
+        transport=item.source.transport or DEFAULT_TRANSPORT,
+        audit=True,
+        service_account=proxy_service_account(cluster),
+    )
+    doc["metadata"]["labels"].update(labels or {})
+    await apply_proxy_doc(hub.cluster_service.client_for(cluster), doc)
+
+
 def stored_remote(client, name: str, url: str, *, access: dict | None = None) -> dict:
-    """전에 만든 remote 항목. 기본 테넌트의 문서를 저장소에 두고 그 MCPRemoteProxy 를 적용한 뒤
+    """전에 만든 remote 항목. 기본 테넌트의 문서를 저장소에, 그 MCPRemoteProxy 를 클러스터에 둔 뒤
     항목 응답을 돌려준다."""
     hub = client.app.state.hub_service
 
@@ -62,6 +93,7 @@ def stored_remote(client, name: str, url: str, *, access: dict | None = None) ->
             state="creating",
         )
         await hub.store.create(item)
+        await _seed_proxy(hub, item, tenant=OWNER, name=item.k8s.name, namespace=namespace)
         await hub.apply(item)
         return item.id
 
@@ -70,7 +102,7 @@ def stored_remote(client, name: str, url: str, *, access: dict | None = None) ->
 
 def stored_proxy_publish(client, item: dict) -> dict:
     """전에 proxy 모드로 게시한 항목. entry 모드로 게시한 항목(응답 dict)의 문서가 MCPRemoteProxy
-    를 가리키게 바꾸고 그 CR 을 적용한 뒤 항목 응답을 돌려준다."""
+    를 가리키게 바꾸고 그 CR 을 클러스터에 둔 뒤 항목 응답을 돌려준다."""
     hub = client.app.state.hub_service
 
     async def seed() -> None:
@@ -80,6 +112,9 @@ def stored_proxy_publish(client, item: dict) -> dict:
         )
         doc.state = "creating"
         await hub.store.set_fields(doc.id, fields_of(doc, {"k8s", "state"}))
+        await _seed_proxy(
+            hub, doc, tenant=doc.tenant, name=doc.k8s.name, namespace=doc.k8s.namespace
+        )
         await hub.apply(doc)
 
     client.portal.call(seed)
@@ -198,10 +233,11 @@ def other_tenant_gateway(client, shared, name="gw-x", tools=None):
     return profile, deploy_gateway(client, profile["id"], headers=T2)
 
 
-def _deployed_before(client, deploy, row: dict) -> str:
+def _deployed_before(client, deploy, row: dict, seed=None) -> str:
     """deploy 로 배포한 Gateway 의 스냅샷 첫 행에 row 를 덮고 다시 provision 해, 전에 배포한 꼴의
     Entry 를 적용한다. Gateway id 를 돌려준다. 배포의 도달 확인이 항목의 주소로 나가지 않게 그동안
-    Tool 목록을 빈 답으로 둔다."""
+    Tool 목록을 빈 답으로 둔다. seed(Gateway 문서)는 provision 앞에 그 Gateway 가 전에 두던 것을
+    마저 두는 코루틴 함수다."""
     portal, state = client.portal, client.app.state
     hub = state.hub_service
 
@@ -219,6 +255,8 @@ def _deployed_before(client, deploy, row: dict) -> str:
     portal.call(
         state.gateways.coll.update_one, {"_id": gateway_id}, {"$set": {**fields, "state": "failed"}}
     )
+    if seed is not None:
+        portal.call(seed, portal.call(state.gateways.get, gateway_id))
     portal.call(state.gateway_service.provision, portal.call(state.gateways.get, gateway_id))
     return gateway_id
 
@@ -241,11 +279,39 @@ def gateway_on_remote_proxy(client, remote, name="gw-p") -> dict:
 
 def gateway_on_remote_clone(client, shared, name="gw-x") -> dict:
     """전에 배포해 shared remote 항목의 복제본을 쓰는 다른 테넌트의 Gateway. 배포한 뒤 스냅샷의 그
-    행을 복제본을 쓰던 꼴로 바꾸고 다시 provision 해 복제본과 그 기록을 만든다. Gateway 응답을
-    돌려준다."""
+    행을 복제본을 쓰던 꼴로 바꾸고, 그 네임스페이스에 복제본과 그 기록을 둔 뒤 다시 provision 한다.
+    Gateway 응답을 돌려준다."""
+    state = client.app.state
+    hub = state.hub_service
+
+    async def seed(gateway) -> None:
+        item = await hub.store.get_unscoped(shared["id"])
+        place = {"cluster_id": gateway.cluster_id, "namespace": gateway.k8s.namespace}
+        record = SharedClone(
+            source_item_id=item.id,
+            tenant=gateway.tenant,
+            name=shared_clone_name(item),
+            source=clone_source(item),
+            **place,
+        )
+        record = await state.shared_clones.store.upsert(record, ())
+        labels = {
+            LABEL_SOURCE_ID: item.id,
+            LABEL_PLATFORM_ID: await hub.tenancy.platform_settings.install_id(),
+        }
+        await _seed_proxy(
+            hub,
+            item,
+            tenant=gateway.tenant,
+            name=record.name,
+            namespace=record.namespace,
+            labels=labels,
+        )
+        await state.shared_clones.rerender(record)
+
     row = {"kind": "remote", "shared_source_id": shared["id"], "clone_kind": CR_KIND["remote"]}
     gateway_id = _deployed_before(
-        client, lambda: other_tenant_gateway(client, shared, name=name)[1], row
+        client, lambda: other_tenant_gateway(client, shared, name=name)[1], row, seed
     )
     return client.get(f"{GW}/{gateway_id}", headers=T2).json()
 

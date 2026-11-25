@@ -938,6 +938,8 @@ class GatewayService(ExposureValidationMixin, BaseInstanceService[Gateway]):
         (P6 F3b, NetworkPolicy 가 타 네임스페이스 프록시 접근을 막는다) URL 을 복제본 프록시로
         고정하고 원본 id·복제본 이름을 스냅샷에 남긴다. entry 는 CR 이 없어 원본 URL 그대로이고,
         remote 항목의 행도 프록시를 떼지 못하는 것만 빼고 entry 행이다(`HubService.deploy_form`).
+        프록시를 떼지 못하는 remote 항목의 행은 전에 적용한 프록시나 복제본을 그대로 가리킨다.
+        플랫폼은 그 둘을 렌더하지 않는다.
         consume 판정은 validate_spec 이 먼저 했다."""
         snapshots: list[GatewayBackendSnapshot] = []
         report: list[dict[str, Any]] = []
@@ -1375,9 +1377,7 @@ class GatewayService(ExposureValidationMixin, BaseInstanceService[Gateway]):
         await self.entries.claim(doc)
         await self.entries.require_own(doc, client)
         # 다른 테넌트 shared 항목의 복제본을 먼저 만든다 (Entry 가 그 프록시를 가리킨다)
-        await self.shared_clones.apply_for(
-            doc, client, k8s=self._k8s(doc), cluster_of=self._cluster_of, error_cls=GatewayError
-        )
+        await self.shared_clones.apply_for(doc, client, k8s=self._k8s(doc), error_cls=GatewayError)
         # 내부 백엔드에 낼 서비스 토큰 (D41). Entry 마다 그 서버의 audience 를 싣고(P50 9절),
         # 있으면 그대로, 없거나 audience 가 다르면 새로 낸다. 지금 렌더가 쓰지 않게 된 토큰 객체는
         # 옛 vMCP 파드가 아직 싣고 있을 수 있어 여기서 지우지 않는다 (`settle_token_objects`)

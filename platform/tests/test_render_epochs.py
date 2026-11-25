@@ -35,27 +35,21 @@ from tests.helpers.agent_runtime import deployed_agent
 from tests.helpers.clusters import default_cluster
 from tests.helpers.consts import BP, GW, HUB, MS
 from tests.helpers.exposure import front_and_gateway
-from tests.helpers.hub import (
-    SPIKE_URL,
-    gateway_on_remote_clone,
-    other_tenant_gateway,
-    shared_env,
-    shared_image_item,
-    stored_remote,
-)
+from tests.helpers.hub import other_tenant_gateway, shared_image_env
 from tests.helpers.mcp_servers import two_backend_server
 
 # 종류마다의 (렌더 번호, 지문). 렌더를 바꾼 커밋이 번호와 지문을 함께 고친다. agent 의 지문은 P78
 # 에서 번호 없이 바뀌었다. 고정 문서는 이 테스트가 배포해 provision 이 남긴 턴 drain 결정을 갖지만,
 # 살아 있는 문서는 다음 provision 전까지 결정이 없어 렌더가 그대로이기 때문이다 (P78 5절).
 # 다섯 지문 모두 제품 이름을 바꿀 때(P80) 번호 없이 바뀌었다. 옛 설치의 문서는 새 설치로 넘어오지
-# 않는다 (P80 2·3절)
+# 않는다 (P80 2·3절). 허브 항목과 복제본의 지문은 고정 문서가 image 만 남을 때(P54b 9절) 번호 없이
+# 바뀌었다. remote 항목과 그 복제본은 렌더하는 것이 없어졌고 image 의 렌더는 그대로다
 GOLDEN: dict[str, tuple[int, str]] = {
     KIND_MCP_SERVER: (7, "21af2cda7ace476f"),
     KIND_GATEWAY: (3, "433f0bb4c6397530"),
     KIND_AGENT: (5, "d88bdfb68dceff83"),
-    KIND_HUB_ITEM: (3, "e2e9ebe0740774b3"),
-    KIND_CLONE: (3, "81dc8cfebb3f71dd"),
+    KIND_HUB_ITEM: (3, "be9e492572bb0ff7"),
+    KIND_CLONE: (3, "58cadeab86e345b6"),
 }
 
 _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
@@ -135,41 +129,32 @@ def _agent(client, fake_clusters, mongo) -> list[dict[str, Any]]:
 
 
 def _hub_item(client, _fake_clusters, _mongo) -> list[dict[str, Any]]:
-    """CR 을 가진 허브 항목 둘(image·remote)의 CR."""
+    """CR 을 렌더하는 허브 항목(image)의 CR."""
     portal, state = client.portal, client.app.state
     default_cluster(client)
     image = {"name": "fetch", "kind": "image", "image": "ghcr.io/x/fetch:1", "port": 8000}
     r = client.post(HUB, json=image)
     assert r.status_code == 201, r.text
-    ids = (r.json()["id"], stored_remote(client, "calc-remote", SPIKE_URL)["id"])
-    docs: list[dict[str, Any]] = []
-    for item_id in ids:
-        item = _before_switch(portal.call(state.hub_service.store.get_unscoped, item_id))
-        docs += portal.call(state.hub_service.render, item)
-    return docs
+    item = _before_switch(portal.call(state.hub_service.store.get_unscoped, r.json()["id"]))
+    return portal.call(state.hub_service.render, item)
 
 
 def _clone(client, fake_clusters, mongo) -> list[dict[str, Any]]:
-    """다른 테넌트가 쓰는 shared remote 항목과 image 항목의 복제본 CR. 이름에는 원본 id 의 앞자리가
-    들어가 렌더마다 달라지므로 고정한 이름으로 렌더한다."""
+    """다른 테넌트가 쓰는 shared image 항목의 복제본 CR. 이름에는 원본 id 의 앞자리가 들어가
+    렌더마다 달라지므로 고정한 이름으로 렌더한다."""
     portal, state = client.portal, client.app.state
-    _cid, _items, remote, fake = shared_env(client, fake_clusters)
-    image = shared_image_item(client, fake)
-    docs: list[dict[str, Any]] = []
-    gateway_on_remote_clone(client, remote, name="gw-0")
+    image, _fake = shared_image_env(client, fake_clusters)
     _profile, r = other_tenant_gateway(client, image, name="gw-1")
     assert r.status_code == 201, r.text
-    for i, shared in enumerate((remote, image)):
-        record = mongo["shared_clones"].find_one({"source_item_id": shared["id"]})
-        docs += portal.call(
-            lambda record=record, i=i: state.hub_service.shared_clone_docs(
-                item_from_clone_source(record["source"]),
-                tenant=record["tenant"],
-                namespace=record["namespace"],
-                name=f"shared-golden-{i}",
-            )
+    record = mongo["shared_clones"].find_one({"source_item_id": image["id"]})
+    return portal.call(
+        lambda: state.hub_service.shared_clone_docs(
+            item_from_clone_source(record["source"]),
+            tenant=record["tenant"],
+            namespace=record["namespace"],
+            name="shared-golden-1",
         )
-    return docs
+    )
 
 
 # 종류마다 고정 문서를 배포한 뒤 재적용이 다시 렌더하는 문서 묶음을 내는 함수

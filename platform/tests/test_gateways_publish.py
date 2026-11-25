@@ -76,16 +76,15 @@ def test_publish_refuses_proxy_mode(client, fake_clusters):
 
 
 def test_a_stored_proxy_mode_item_keeps_its_proxy(client, fake_clusters):
-    """전에 proxy 모드로 게시한 항목은 MCPRemoteProxy 로 렌더되고 그 주소로 답한다."""
+    """전에 proxy 모드로 게시한 항목은 적용돼 있는 MCPRemoteProxy 의 주소로 답한다. 플랫폼은 그
+    프록시를 렌더하지 않는다."""
     cid, items, calc, orders, remote, fake = hub_env(client, fake_clusters)
     ia = gateway_up(client, items, name="a")
     r = client.post(f"{GW}/{ia['id']}/publish", json={"name": "a-pub"})
     assert r.status_code == 201, r.text
     pub = stored_proxy_publish(client, r.json())
     assert pub["k8s"]["kind"] == "MCPRemoteProxy" and pub["k8s"]["name"] == "hub-a-pub"
-    cr = fake.get(GV, "MCPRemoteProxy", "hub-a-pub", DEFAULT_NS)
-    assert cr["spec"]["remoteUrl"] == "http://vmcp-gw-a.daegam-default.svc.cluster.local:4483/mcp"
-    assert cr["spec"]["allowPrivateEndpoint"] is True and "groupRef" not in cr["spec"]
+    assert client.get(f"{HUB}/{pub['id']}/manifest").json()["documents"] == []
     fake.set_status(
         GV,
         "MCPRemoteProxy",

@@ -36,7 +36,7 @@ def test_is_private_endpoint_and_url_paths():
 
 def test_sse_outside_servers_are_refused_and_existing_ones_warn(client, fake_clusters, mongo):
     """SSE 로만 말하는 외부 서버는 만들지 못한다. 그 전에 만든 SSE 항목은 그대로 두고 상태가
-    경고한다. 다시 적용해도 프록시는 sse 로 렌더된다."""
+    경고한다. 그 항목의 주소는 남아 있는 프록시의 SSE 경로다."""
     _bootstrap(client)
     url = "https://mcp.example.com/sse"
     r = client.post(HUB, json={"name": "sse", "kind": "entry", "url": url, "transport": "sse"})
@@ -48,14 +48,10 @@ def test_sse_outside_servers_are_refused_and_existing_ones_warn(client, fake_clu
         return [w for w in st["warnings"] if w.startswith("outside_sse_unsupported:")]
 
     assert sse_warnings() == []
-    # 이 판 전에 SSE 로 만든 항목이다. 다시 적용하면 그 전송 그대로 MCPRemoteProxy 를 렌더한다
+    # 이 판 전에 SSE 로 만든 항목이다
     mongo["hub_items"].update_one({"_id": item_id}, {"$set": {"source.transport": "sse"}})
     assert len(sse_warnings()) == 1
-    svc = client.app.state.hub_service
-    client.portal.call(svc.apply, client.portal.call(svc.store.get_unscoped, item_id))
     fake: FakeClusterClient = fake_clusters.by_name["edge"]
-    cr = fake.get(GV, "MCPRemoteProxy", "hub-old", "daegam-default")
-    assert cr["spec"]["remoteUrl"] == url and cr["spec"]["transport"] == "sse"
     base = "http://mcp-hub-old-remote-proxy.daegam-default.svc.cluster.local:8080"
     fake.set_status(
         GV, "MCPRemoteProxy", "hub-old", "daegam-default", {"phase": "Ready", "url": base}
@@ -73,8 +69,9 @@ def test_new_remote_items_are_refused(client):
     assert HubCreate.model_json_schema()["properties"]["kind"]["enum"] == ["entry", "image"]
 
 
-def test_remote_renders_mcpremoteproxy(client, fake_clusters):
-    """전에 만든 remote 항목은 MCPRemoteProxy 로 렌더된다."""
+def test_a_stored_remote_item_keeps_its_proxy_and_renders_nothing(client, fake_clusters):
+    """전에 만든 remote 항목은 적용돼 있는 MCPRemoteProxy 의 상태를 읽는다. 플랫폼은 그 프록시를
+    렌더하지 않아, 매니페스트가 비고 다시 적용해도 CR 이 그대로다."""
     _bootstrap(client)
     item = stored_remote(client, "calc-remote", SPIKE_URL)
     assert item["kind"] == "remote" and item["state"] == "created"
@@ -87,30 +84,24 @@ def test_remote_renders_mcpremoteproxy(client, fake_clusters):
     }
     assert item["source"]["transport"] == "streamable-http"
     fake: FakeClusterClient = fake_clusters.by_name["edge"]
-    cr = fake.get(GV, "MCPRemoteProxy", "hub-calc-remote", "daegam-default")
-    # groupRef 없음: 그룹 소속은 Agent 그룹의 Entry 래퍼가 담당한다
-    # (같은 그룹의 자기 게시물은 무한 재귀)
-    assert cr["spec"] == {
-        "remoteUrl": SPIKE_URL,
-        "transport": "streamable-http",
-        "allowPrivateEndpoint": True,
-        "proxyPort": 8080,
-        "resources": proxy_resources(),  # D54
-        # 원격 호출도 MCP 감사에 남는다
-        "audit": {"enabled": True},
-        # 역할 없는 ServiceAccount 로 돈다 (P50 10절)
-        "serviceAccount": "daegam-remote-proxy",
-    }
-    assert cr["metadata"]["labels"]["daegam.devops.ai.kr/hub-kind"] == "remote"
-    assert cr["metadata"]["labels"]["daegam.devops.ai.kr/id"] == item["id"]
-    # 네임스페이스·그룹이 먼저 보장됐다
-    assert fake.get(GV, "MCPGroup", "default", "daegam-default") is not None
-    # 외부 URL 은 allowPrivateEndpoint false
     stored_remote(client, "ext", "https://mcp.example.com/mcp")
-    cr = fake.get(GV, "MCPRemoteProxy", "hub-ext", "daegam-default")
-    assert (
-        cr["spec"]["allowPrivateEndpoint"] is False and cr["spec"]["transport"] == "streamable-http"
-    )
+    svc = client.app.state.hub_service
+    doc = client.portal.call(svc.store.get_unscoped, item["id"])
+    assert client.portal.call(svc.render, doc) == []
+    assert client.get(f"{HUB}/{item['id']}/manifest").json()["documents"] == []
+    # 손으로 고친 프록시도 다시 적용이 되돌리지 않는다
+    edited = fake.get(GV, "MCPRemoteProxy", "hub-calc-remote", "daegam-default")
+    edited["spec"]["remoteUrl"] = "http://edited.example.com/mcp"
+    fake.apply(edited)
+    assert client.portal.call(svc.rerender, doc) is True
+    cr = fake.get(GV, "MCPRemoteProxy", "hub-calc-remote", "daegam-default")
+    assert cr["spec"]["remoteUrl"] == "http://edited.example.com/mcp"
+    fake.delete(GV, "MCPRemoteProxy", "hub-calc-remote", "daegam-default")
+    assert client.portal.call(svc.rerender, doc) is True
+    assert fake.get(GV, "MCPRemoteProxy", "hub-calc-remote", "daegam-default") is None
+    st = client.get(f"{HUB}/{item['id']}").json()["status"]
+    assert st["ready"] is False and st["phase"] == "Missing"
+    fake.apply(edited)
     # status: CR 에 status 가 없으면 phase None, ready False
     st = client.get(f"{HUB}/{item['id']}").json()["status"]
     assert st["ready"] is False and st["phase"] is None

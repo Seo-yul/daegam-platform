@@ -1,7 +1,9 @@
 """공유 복제본의 기록과 그 적용 (P50 1절, D23).
 
-다른 테넌트가 연 shared 항목(remote·image)을 쓰는 Gateway 는 자기 네임스페이스에 복제본 CR 을 둔다.
-복제본의 기록(`store/shared_clones.py`)이 마지막으로 렌더한 원본 정의를 든다.
+다른 테넌트가 연 shared image 항목과 플랫폼 fetch 를 쓰는 Gateway 는 자기 네임스페이스에 복제본 CR
+을 둔다. 복제본의 기록(`store/shared_clones.py`)이 마지막으로 렌더한 원본 정의를 든다. remote 항목의
+복제본(MCPRemoteProxy)은 만들지도 다시 렌더하지도 않는다. 전에 만든 것과 그 기록은 그 항목이 entry
+항목으로 옮겨 갈 때까지(`services/entry_conversion.py`) 적용된 그대로 남고, 아래 스윕이 지운다.
 
 - 배포 경로: Gateway 의 provision 이 `apply` 로 복제본을 렌더해 적용하고 기록을 맞춘다. 쓰는
   테넌트가 consume 경계 밖이면 기록의 원본으로 렌더한다.
@@ -18,7 +20,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Sequence
 from typing import Any, NamedTuple
 
 from starlette.concurrency import run_in_threadpool
@@ -64,7 +66,6 @@ from daegam.services.platform_tools import (
     enabled,
     fetch_image,
 )
-from daegam.services.proxy_accounts import require_proxy_account
 from daegam.services.tool_rules import rules_toolhive_ok
 from daegam.store.auth_reapply import (
     AUTH_FIELDS,
@@ -77,7 +78,13 @@ from daegam.store.auth_reapply import (
 )
 from daegam.store.base import fields_of, utcnow
 from daegam.store.gateways import Gateway, MongoGatewayStore
-from daegam.store.hub import CLONED_KINDS, PLATFORM_KIND, HubItem, unknown_keys
+from daegam.store.hub import (
+    CLONED_KINDS,
+    KEPT_CLONE_KINDS,
+    PLATFORM_KIND,
+    HubItem,
+    unknown_keys,
+)
 from daegam.store.shared_clones import CLONE_LIVE_STATES, MongoSharedCloneStore, SharedClone
 from daegam.store.tenants import TenantSettings
 
@@ -192,21 +199,26 @@ class SharedClones:
         client: KubeClient,
         *,
         k8s: Any,
-        cluster_of: Callable[[Gateway], Awaitable[Any]],
         error_cls: type[ServiceError],
     ) -> list[str]:
         """문서가 참조하는 다른 테넌트 항목의 복제본 CR 을 이 테넌트 네임스페이스에 적용하고 그
         기록을 맞춘다 (P50 1절, `services/shared_clones.py`). 복제본의 이름은 기록의 것이라 그
         백엔드를 기록의 이름과 주소로 맞춘다. 복제본은 Gateway 사이에 공유되므로 ownerReference 없이
         둔다. 쓰는 Gateway 가 없어진 복제본은 리컨실의 스윕이 지운다. consume 판정은 배포·재배포의
-        validate_spec 이 먼저 했다.
+        validate_spec 이 먼저 했다. remote 행의 복제본은 렌더하지 않는다. 전에 만든 기록이 있으면
+        그 이름으로 백엔드를 맞추기만 하고, 없으면 그 행을 그대로 둔다.
 
-        k8s(Gateway 의 이름 묶음), cluster_of(클러스터 조회), error_cls(Gateway 의 오류 클래스)를
-        부를 때마다 받는다. 이 모듈이 Gateway 서비스를 들지 않게 하려는 것이다. 들면 서로를 잇는
-        뒷줄이 되살아나고(P72 2.4절), 오류 클래스를 import 하면 gateways 와 순환이 된다."""
+        k8s(Gateway 의 이름 묶음)와 error_cls(Gateway 의 오류 클래스)를 부를 때마다 받는다. 이
+        모듈이 Gateway 서비스를 들지 않게 하려는 것이다. 들면 서로를 잇는 뒷줄이 되살아나고(P72
+        2.4절), 오류 클래스를 import 하면 gateways 와 순환이 된다."""
         records: dict[str, SharedClone] = {}
         for b in doc.deployed_backends:
             if not b.shared_source_id:
+                continue
+            if b.kind in KEPT_CLONE_KINDS:
+                kept = await self.store.at(b.shared_source_id, doc.cluster_id or "", k8s.namespace)
+                if kept is not None:
+                    point_at_clone(b, kept.name, k8s.namespace)
                 continue
             if b.shared_source_id not in records:
                 item = await self.hub.store.get_unscoped(b.shared_source_id)
@@ -214,11 +226,6 @@ class SharedClones:
                     raise error_cls(
                         422, "unknown_hub_item", f"shared hub item {b.shared_source_id} is gone"
                     )
-                if item.kind == "remote" and not await self.store.at(
-                    item.id, doc.cluster_id or "", k8s.namespace
-                ):
-                    # 새 원격 프록시 복제본은 역할 없는 ServiceAccount 로만 만든다 (P50 2절·10절)
-                    require_proxy_account(await cluster_of(doc), error_cls)
                 record = await self.apply(
                     item,
                     client,
@@ -511,12 +518,19 @@ class _ClusterSweep:
     async def _check_live(self, record: SharedClone, live: LiveClones) -> None:
         """쓰이는 복제본이 실물에 없으면(손으로 지웠다) 렌더 번호를 -1 로 적어 재적용이 다시 만들게
         하고, 동결 표시를 원본의 consume 경계에 맞춘다. 둘을 한 번에 적는다. 복제본 기록은 턴 위임
-        게이트가 읽지 않으므로 바꾼 번호를 담는 표시(`stale_mark`)가 아니라 -1 그대로다."""
+        게이트가 읽지 않으므로 바꾼 번호를 담는 표시(`stale_mark`)가 아니라 -1 그대로다. 렌더하지
+        않는 종류(remote)의 복제본은 재적용이 다시 만들지 못하므로 표시하지 않는다."""
         fields: dict[str, Any] = {}
         key = (record.namespace, _clone_kind(record), record.name)
         # 실물을 읽은 뒤에 렌더한 기록은 그 실물 목록으로 판정하지 않는다
         rendered_since = record.updated_at >= self.seen_at
-        if key not in live and not rendered_since and not is_stale_epoch(record.render_epoch):
+        rendered = record.source.get("kind") not in KEPT_CLONE_KINDS
+        if (
+            rendered
+            and key not in live
+            and not rendered_since
+            and not is_stale_epoch(record.render_epoch)
+        ):
             fields["render_epoch"] = STALE_EPOCH
             self.result["missing"].append(f"{record.namespace}/{record.name}")
         frozen = (await self.clones.wanted_source(record)).frozen
@@ -677,9 +691,10 @@ def _gateway_clone_names(gateways: list[Gateway]) -> set[tuple[str, str]]:
 
 async def _live_clones(client: KubeClient) -> LiveClones:
     """클러스터의 복제본 CR 의 metadata 를 (네임스페이스, 종류, 이름)마다 둔다. 허브 항목 CR 가운데
-    원본 id 라벨이 있는 것이 복제본이다. 종류마다 목록 하나다."""
+    원본 id 라벨이 있는 것이 복제본이다. 종류마다 목록 하나다. 전에 만든 remote 복제본도 읽어 버려진
+    것을 지운다."""
     out: LiveClones = {}
-    for kind in sorted({CR_KIND[k] or "" for k in CLONED_KINDS}):
+    for kind in sorted({CR_KIND[k] or "" for k in (*CLONED_KINDS, *KEPT_CLONE_KINDS)}):
         items = await run_in_threadpool(
             client.list_metadata, TOOLHIVE_API, kind, labels={LABEL_RESOURCE: RESOURCE_HUB_ITEM}
         )

@@ -26,9 +26,9 @@ from tests.helpers.http import detail_code
 from tests.helpers.hub import (
     SHARED_ACCESS,
     clone_name_of,
-    gateway_on_remote_clone,
     hub_env,
-    shared_env,
+    other_tenant_gateway,
+    shared_image_env,
 )
 from tests.helpers.mcp_servers import clone_and_deploy
 from tests.helpers.workers import run_clone_sweep, run_data_plane_auth
@@ -433,32 +433,34 @@ def _mp(client):
 def test_revoked_boundary_warns_and_freezes_the_clone(client, fake_clusters, mongo):
     """consume 경계에서 빠진 테넌트의 복제본은 남고 경고가 뜬다. 원본을 고쳐도 복제본은 마지막
     원본으로 남고(D23), 경계에 다시 들어오면 원본을 다시 받는다 (P50 1절의 복제본 기록)."""
-    cid, items, shared, fake = shared_env(client, fake_clusters)
-    inst = gateway_on_remote_clone(client, shared)
+    shared, fake = shared_image_env(client, fake_clusters)
+    _profile, r = other_tenant_gateway(client, shared, tools=["Echo"])
+    assert r.status_code == 201, r.text
+    inst = r.json()
     name = clone_name_of(shared)
+    old, new = "ghcr.io/acme/tools:1", "ghcr.io/acme/tools:2"
+
+    def clone_image() -> str:
+        return fake.get(GV, "MCPServer", name, OTHER_NS)["spec"]["image"]
+
     assert client.get(f"{GW}/{inst['id']}", headers=T2).json()["status"]["warnings"] == []
     # 경계에서 other 를 뺀다 (빈 정책 = 소유 테넌트만). 복제본은 남고 경고가 뜬다
     r = client.put(f"{HUB}/{shared['id']}/access", json={})
     assert r.status_code == 200 and r.json()["scope"] == "tenant"
     st = client.get(f"{GW}/{inst['id']}", headers=T2).json()["status"]
-    assert st["warnings"] == ["hub_access_revoked: org-tools"]
-    assert fake.get(GV, "MCPRemoteProxy", name, OTHER_NS) is not None
+    assert st["warnings"] == ["hub_access_revoked: org-img"]
+    assert clone_image() == old
     # 원본이 바뀌어도 동결된 복제본에는 밀어 넣지 않는다. 스윕이 동결을 표시한다
-    mongo["hub_items"].update_one(
-        {"_id": shared["id"]}, {"$set": {"source.url": "https://mcp2.example.com/mcp"}}
-    )
+    mongo["hub_items"].update_one({"_id": shared["id"]}, {"$set": {"source.image": new}})
     assert run_data_plane_auth(client)["reapplied"] == []
     run_clone_sweep(client)
     assert mongo["shared_clones"].find_one({"source_item_id": shared["id"]})["frozen"] is True
-    assert fake.get(GV, "MCPRemoteProxy", name, OTHER_NS)["spec"]["remoteUrl"] == EXT_URL
+    assert clone_image() == old
     # 경계에 다시 들어오면 재개된다
     r = client.put(f"{HUB}/{shared['id']}/access", json={"consume": {"tenants": ["other"]}})
     assert r.status_code == 200 and r.json()["scope"] == "shared"
     assert len(run_data_plane_auth(client)["reapplied"]) == 1
-    assert (
-        fake.get(GV, "MCPRemoteProxy", name, OTHER_NS)["spec"]["remoteUrl"]
-        == "https://mcp2.example.com/mcp"
-    )
+    assert clone_image() == new
     assert client.get(f"{GW}/{inst['id']}", headers=T2).json()["status"]["warnings"] == []
     # 원본이 사라지면 복제본은 마지막 원본으로 남고, 스윕이 기록을 동결로 표시한다
     mongo["hub_items"].delete_one({"_id": shared["id"]})
@@ -467,8 +469,8 @@ def test_revoked_boundary_warns_and_freezes_the_clone(client, fake_clusters, mon
     run_clone_sweep(client)
     record = mongo["shared_clones"].find_one({"source_item_id": shared["id"]})
     assert record["frozen"] is True
-    assert record["source"]["source"]["url"] == "https://mcp2.example.com/mcp"
-    assert fake.get(GV, "MCPRemoteProxy", name, OTHER_NS) is not None
+    assert record["source"]["source"]["image"] == new
+    assert clone_image() == new
 
 
 def test_subjects_model_rejects_unknown_fields():

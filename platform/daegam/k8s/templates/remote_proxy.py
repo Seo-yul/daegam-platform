@@ -1,4 +1,5 @@
-"""MCPRemoteProxy 렌더. 허브 remote 항목(P4)과 MCP Server 노출 앞단(P8, D22)이 같이 쓴다."""
+"""MCPRemoteProxy 렌더. MCP Server 의 옛 노출 앞단(P8, D22)이 쓴다. 허브 항목과 그 복제본은 이
+프록시를 렌더하지 않는다. 전에 적용한 것은 옮기기 단계가 지운다(`services/entry_conversion.py`)."""
 
 from __future__ import annotations
 
@@ -34,8 +35,9 @@ def render_remote_proxy(
     pod_annotations: dict[str, str] | None = None,
     service_account: str | None = None,
 ) -> dict[str, Any]:
-    """MCPRemoteProxy. 허브 remote 항목(기본)과 노출 앞단 `expose-<k8s.name>`(resource 를 주면
-    대감 공통 라벨 + 그 resource, D22)이 같은 렌더러를 쓴다. groupRef 는 넣지 않는다 (그룹 소속은
+    """MCPRemoteProxy. 노출 앞단 `expose-<k8s.name>` 은 resource 를 주어 대감 공통 라벨과 그
+    resource 를 단다(D22). resource 가 없으면 앞 판이 허브 remote 항목에 적용하던 꼴(허브 라벨)이고,
+    지금은 그 꼴을 렌더하는 곳이 없다. groupRef 는 넣지 않는다 (그룹 소속은
     Gateway 그룹의 Entry 래퍼가 담당). 같은 그룹에 게시 프록시가 들어가면 vMCP 가 자기 자신을
     백엔드로 발견해 무한 재귀한다 (실측). 앞단은 oidcConfigRef(resourceUrl 포함)·Cedar authzConfig·
     trustProxyHeaders·audit 를 켠다. external_auth_config(bearerToken MCPExternalAuthConfig)는

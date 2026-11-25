@@ -5,10 +5,13 @@ test_shared_clone_records.py 가 본다."""
 
 from __future__ import annotations
 
+from typing import get_args
+
 from daegam.auth.cedar import tenant_fence_policies
 from daegam.auth.hub_access import Access
 from daegam.k8s.labels import LABEL_SOURCE_HASH, LABEL_SOURCE_ID
-from daegam.store.hub import HubItem, HubK8s, HubSource
+from daegam.services.hub import shared_clone_name
+from daegam.store.hub import PLATFORM_KIND, HubItem, HubK8s, HubKind, HubSource
 from tests.helpers.auth import bearer
 from tests.helpers.clusters import downgrade_toolhive
 from tests.helpers.consts import EXT_URL, GV, GW, HUB, OTHER_NS, T2
@@ -20,6 +23,8 @@ from tests.helpers.hub import (
     other_tenant_gateway,
     shared_env,
     shared_image_env,
+    shared_image_item,
+    stored_proxy_publish,
 )
 from tests.helpers.workers import run_clone_sweep, run_data_plane_auth
 
@@ -182,10 +187,18 @@ def test_a_remote_item_deploys_as_an_entry_row_with_no_proxy_and_no_clone(
 
 def test_a_remote_item_that_keeps_its_proxy_deploys_through_it(client, fake_clusters, mongo):
     """프록시를 떼지 못하는 remote 항목(SSE 만 말하는 서버, 감사 게이트 아래의 클러스터)을 쓰는
-    배포와 재배포는 지금처럼 그 프록시를, 다른 테넌트에서는 복제본을 부르는 행을 짓는다. 플랫폼은 그
-    주소를 직접 부르지 않고 프록시의 상태로 준비됐는지 본다."""
+    배포와 재배포는 지금처럼 그 프록시를, 다른 테넌트에서는 전에 만든 복제본을 부르는 행을 짓는다.
+    플랫폼은 그 주소를 직접 부르지 않고 프록시의 상태로 준비됐는지 본다. 프록시와 복제본은 적용돼
+    있는 그대로이고 플랫폼이 다시 렌더하지 않는다."""
     cid, _items, shared, fake = shared_env(client, fake_clusters)
     item = {"_id": shared["id"]}
+    # 프록시를 떼지 못하게 되기 전에 배포해 복제본을 둔 다른 테넌트의 Gateway
+    other = gateway_on_remote_clone(client, shared, name="gw-o")
+    name = clone_name_of(shared)
+    proxies = {
+        ns: fake.get(GV, "MCPRemoteProxy", n, ns)
+        for ns, n in (("daegam-default", "hub-org-tools"), (OTHER_NS, name))
+    }
 
     async def lister(_client, url, _headers=None):
         raise AssertionError(f"the platform called {url}")
@@ -207,14 +220,15 @@ def test_a_remote_item_that_keeps_its_proxy_deploys_through_it(client, fake_clus
     r = client.post(f"{GW}/{mine['id']}/redeploy", json={})
     assert r.status_code in (200, 201), r.text
     through_the_proxy(client.get(f"{GW}/{mine['id']}").json(), "/sse")
-    # 다른 테넌트의 Gateway 는 복제본을 둔다
-    _profile, r = other_tenant_gateway(client, shared, name="gw-o")
-    assert r.status_code == 201, r.text
-    (row,) = r.json()["deployed_backends"]
-    name = clone_name_of(shared)
+    # 다른 테넌트의 Gateway 는 전에 만든 복제본을 계속 부른다
+    r = client.post(f"{GW}/{other['id']}/redeploy", json={}, headers=T2)
+    assert r.status_code in (200, 201), r.text
+    (row,) = client.get(f"{GW}/{other['id']}", headers=T2).json()["deployed_backends"]
     assert (row["kind"], row["clone_kind"], row["clone_name"]) == ("remote", "MCPRemoteProxy", name)
     assert row["url"].startswith(f"http://mcp-{name}-remote-proxy.daegam-other.svc.cluster.local")
-    assert fake.get(GV, "MCPRemoteProxy", name, OTHER_NS) is not None
+    entry = fake.get(GV, "MCPServerEntry", row["workload"], OTHER_NS)
+    assert entry["spec"]["remoteUrl"] == row["url"]
+    assert mongo["shared_clones"].count_documents({"source_item_id": shared["id"]}) == 1
 
     # 감사 게이트 아래의 클러스터에서는 프록시만 이 호출을 감사에 남긴다
     mongo["hub_items"].update_one(item, {"$set": {"source.transport": "streamable-http"}})
@@ -222,6 +236,12 @@ def test_a_remote_item_that_keeps_its_proxy_deploys_through_it(client, fake_clus
     r = client.post(f"{GW}/{mine['id']}/redeploy", json={})
     assert r.status_code in (200, 201), r.text
     through_the_proxy(client.get(f"{GW}/{mine['id']}").json(), "/mcp")
+    # 배포도 재적용도 프록시와 복제본을 다시 쓰지 않았다
+    mongo["hub_items"].update_one(item, {"$set": {"render_epoch": 0}})
+    mongo["shared_clones"].update_many({}, {"$set": {"render_epoch": 0}})
+    run_data_plane_auth(client)
+    for ns, proxy in proxies.items():
+        assert fake.get(GV, "MCPRemoteProxy", proxy["metadata"]["name"], ns) == proxy
 
 
 # -- 원본 변경과 스윕 (P50 1절) ------------------------------------------------------------
@@ -231,58 +251,109 @@ def test_a_source_edit_reaches_the_clone_through_the_reapply(client, fake_cluste
     """원본을 고치면 복제본 기록의 판이 달라져 재적용이 복제본을 다시 렌더한다 (P50 1절). 원본이
     그대로면 할 일이 없다. 손으로 지운 복제본은 스윕이 찾아 재적용이 다시 만들고, 쓰는 Gateway 를
     지우면 스윕이 복제본을 지운다."""
-    cid, items, shared, fake = shared_env(client, fake_clusters)
+    shared, fake = shared_image_env(client, fake_clusters)
+    calculator = next(i for i in client.get(HUB).json() if i["name"] == "calculator")
     # 열린 항목은 다른 테넌트 목록에도 보이고, 테넌트 항목은 여전히 격리된다
     assert shared["scope"] == "shared" and shared["tenant"] == "default"
     mine = {i["name"]: i for i in client.get(HUB).json()}
-    assert mine["org-tools"]["scope"] == "shared"
+    assert mine["org-img"]["scope"] == "shared"
     other = {i["name"]: i for i in client.get(HUB, headers=T2).json()}
-    assert set(other) == {"org-tools"}
-    assert other["org-tools"]["tenant"] == "default" and other["org-tools"]["scope"] == "shared"
+    assert set(other) == {"org-img"}
+    assert other["org-img"]["tenant"] == "default" and other["org-img"]["scope"] == "shared"
     assert client.get(f"{HUB}/{shared['id']}", headers=T2).status_code == 200
-    assert client.get(f"{HUB}/{items['calculator']['id']}", headers=T2).status_code == 404
+    assert client.get(f"{HUB}/{calculator['id']}", headers=T2).status_code == 404
 
-    inst = gateway_on_remote_clone(client, shared)
+    _profile, r = other_tenant_gateway(client, shared, tools=["Echo"])
+    assert r.status_code == 201, r.text
+    inst = r.json()
     assert inst["state"] == "deployed"
-    # 쓰는 테넌트 네임스페이스에 복제본 프록시가 서고 Entry 래퍼가 그것을 가리킨다. 원본은 그대로다
+    # 쓰는 테넌트 네임스페이스에 복제본 서버가 서고 Entry 래퍼가 그것을 가리킨다. 원본은 그대로다
     b = inst["deployed_backends"][0]
     name = clone_name_of(shared)
-    assert name.startswith("shared-org-tools-") and len(name) == len("shared-org-tools-") + 6
+    assert name.startswith("shared-org-img-") and len(name) == len("shared-org-img-") + 6
     assert b["shared_source_id"] == shared["id"]
-    assert b["clone_kind"] == "MCPRemoteProxy" and b["clone_name"] == name
-    clone_url = f"http://mcp-{name}-remote-proxy.daegam-other.svc.cluster.local:8080/mcp"
+    assert b["clone_kind"] == "MCPServer" and b["clone_name"] == name
+    clone_url = f"http://mcp-{name}-proxy.daegam-other.svc.cluster.local:8080/mcp"
     assert b["url"] == clone_url
-    before = fake.get(GV, "MCPRemoteProxy", name, OTHER_NS)
-    assert before["spec"]["remoteUrl"] == EXT_URL
-    assert before["spec"]["allowPrivateEndpoint"] is False
+    before = fake.get(GV, "MCPServer", name, OTHER_NS)
+    assert before["spec"]["image"] == "ghcr.io/acme/tools:1"
     labels = before["metadata"]["labels"]
     assert labels[LABEL_SOURCE_ID] == shared["id"] and len(labels[LABEL_SOURCE_HASH]) == 32
     assert labels["daegam.devops.ai.kr/tenant"] == "other"
     entry = fake.get(GV, "MCPServerEntry", b["workload"], OTHER_NS)
     assert entry["spec"]["remoteUrl"] == clone_url
     assert entry["spec"]["groupRef"] == {"name": inst["k8s"]["group"]}
-    assert fake.get(GV, "MCPRemoteProxy", "hub-org-tools", "daegam-default") is not None
+    assert fake.get(GV, "MCPServer", "hub-org-img", "daegam-default") is not None
     assert run_data_plane_auth(client)["reapplied"] == []
 
     mongo["hub_items"].update_one(
-        {"_id": shared["id"]}, {"$set": {"source.url": "https://mcp2.example.com/mcp"}}
+        {"_id": shared["id"]}, {"$set": {"source.image": "ghcr.io/acme/tools:2"}}
     )
     record = mongo["shared_clones"].find_one({"source_item_id": shared["id"]})
     assert record["_id"] in run_data_plane_auth(client)["reapplied"]
-    after = fake.get(GV, "MCPRemoteProxy", name, OTHER_NS)
-    assert after["spec"]["remoteUrl"] == "https://mcp2.example.com/mcp"
+    after = fake.get(GV, "MCPServer", name, OTHER_NS)
+    assert after["spec"]["image"] == "ghcr.io/acme/tools:2"
     assert (
         after["metadata"]["labels"][LABEL_SOURCE_HASH]
         != before["metadata"]["labels"][LABEL_SOURCE_HASH]
     )
     assert run_data_plane_auth(client)["reapplied"] == []
 
-    fake.delete(GV, "MCPRemoteProxy", name, OTHER_NS)
+    fake.delete(GV, "MCPServer", name, OTHER_NS)
     assert run_clone_sweep(client)["missing"] == [f"{OTHER_NS}/{name}"]
     assert record["_id"] in run_data_plane_auth(client)["reapplied"]
-    assert fake.get(GV, "MCPRemoteProxy", name, OTHER_NS) is not None
+    assert fake.get(GV, "MCPServer", name, OTHER_NS) is not None
 
     inst_id = client.get(GW, headers=T2).json()[0]["id"]
     assert client.delete(f"{GW}/{inst_id}", headers=T2).status_code == 200
     assert run_clone_sweep(client)["deleted"] == [f"{OTHER_NS}/{name}"]
     assert mongo["shared_clones"].find_one({"_id": record["_id"]}) is None
+
+
+def test_no_hub_item_kind_and_no_clone_renders_a_remote_proxy(client, fake_clusters, mongo):
+    """허브 항목의 모든 종류와, 그 항목을 다른 테넌트의 네임스페이스에 둘 복제본을 렌더해도
+    MCPRemoteProxy 가 없다 (P54b 9절). 전에 만든 remote 항목과 proxy 모드로 게시한 항목도 그렇다.
+    CR 을 렌더하는 것은 image 항목과 그 복제본, 플랫폼 fetch 의 복제본뿐이다."""
+    cid, items, _shared, fake = shared_env(client, fake_clusters)
+    shared_image_item(client, fake)
+    entry = {"name": "ext", "kind": "entry", "url": EXT_URL, "transport": "streamable-http"}
+    assert client.post(HUB, json=entry).status_code == 201
+    for name in ("a", "b"):
+        gateway = gateway_up(client, items, name=name)
+        r = client.post(f"{GW}/{gateway['id']}/publish", json={"name": f"{name}-pub"})
+        assert r.status_code == 201, r.text
+    stored_proxy_publish(client, r.json())
+    web = {"fetch": {"enabled": True}, "search": {"enabled": True, "provider": "stub"}}
+    assert client.patch("/settings", json={"web_tools": web}).status_code == 200
+
+    portal, state = client.portal, client.app.state
+    hub = state.hub_service
+    cluster = portal.call(state.clusters.get, cid)
+    stored = [portal.call(hub.store.get_unscoped, d["_id"]) for d in mongo["hub_items"].find({})]
+    assert {i.kind for i in stored} == set(get_args(HubKind))
+    assert {i.k8s.kind for i in stored if i.kind in ("remote", "published")} == {
+        "MCPRemoteProxy",
+        "VirtualMCPServer",
+    }
+
+    async def rendered(item: HubItem) -> list[dict]:
+        # 플랫폼 항목은 자기 CR 이 없고 Gateway 의 네임스페이스에 복제본만 둔다
+        own = [] if item.kind == PLATFORM_KIND else await hub.render(item)
+        clone = await hub.shared_clone_docs(
+            item,
+            tenant="other",
+            namespace=OTHER_NS,
+            name=shared_clone_name(item),
+            cluster=cluster,
+        )
+        return own + clone
+
+    kinds: dict[str, set[str]] = {}
+    for item in stored:
+        kinds.setdefault(item.kind, set()).update(d["kind"] for d in portal.call(rendered, item))
+    assert all("MCPRemoteProxy" not in rendered_kinds for rendered_kinds in kinds.values())
+    assert {kind for kind, rendered_kinds in kinds.items() if rendered_kinds} == {
+        "image",
+        PLATFORM_KIND,
+    }
+    assert "MCPServer" in kinds["image"] and "MCPServer" in kinds[PLATFORM_KIND]

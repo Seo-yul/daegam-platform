@@ -3,7 +3,7 @@
 입력은 인스턴스 문서·effective_config 스냅샷·리비전·Backend API 뿐이다. 책임별로 나뉜다.
 - common: 상수·RenderError·ownerReferences·라벨·주소 규칙·설정을 받는 파드·Secret·env 조각
 - mcpserver: MCP Server 의 MCPServer CR 과 토큰 Secret
-- remote_proxy: 허브 remote 항목과 노출 앞단의 MCPRemoteProxy
+- remote_proxy: MCP Server 의 옛 노출 앞단의 MCPRemoteProxy
 - exposure: Ingress·NetworkPolicy (D22)
 - vmcp: Gateway 그룹·Entry·VirtualMCPServer 와 허브 image 항목
 - agent: Agent 의 Deployment·Service·NetworkPolicy 와 토큰·provider 키 Secret (D26)
