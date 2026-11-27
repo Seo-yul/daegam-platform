@@ -51,8 +51,8 @@ from tests.helpers.mcp_servers import two_backend_server
 # 다섯 지문 모두 제품 이름을 바꿀 때(P80) 번호 없이 바뀌었다. 옛 설치의 문서는 새 설치로 넘어오지
 # 않는다 (P80 2·3절)
 GOLDEN: dict[str, tuple[int, str]] = {
-    KIND_MCP_SERVER: (7, "21af2cda7ace476f"),
-    KIND_GATEWAY: (3, "433f0bb4c6397530"),
+    KIND_MCP_SERVER: (8, "43f7be68dd5c699a"),
+    KIND_GATEWAY: (4, "8d96e90f9d1538d3"),
     KIND_AGENT: (5, "d88bdfb68dceff83"),
     KIND_HUB_ITEM: (3, "e2e9ebe0740774b3"),
     KIND_CLONE: (3, "81dc8cfebb3f71dd"),

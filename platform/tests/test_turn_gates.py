@@ -117,8 +117,9 @@ def test_a_packed_epoch_unpacks_to_its_base_gates_and_binding(base, missing, bou
 
 def test_render_epoch_marks_only_local_gateway_renders_as_bound():
     passing = frozenset(Feature)
-    assert render_epoch(KIND_GATEWAY, passing, binds_delegation=True) == BOUND
-    assert render_epoch(KIND_GATEWAY, passing) == UNBOUND
+    now = RENDER_EPOCHS[KIND_GATEWAY]
+    assert render_epoch(KIND_GATEWAY, passing, binds_delegation=True) == pack_epoch(now, bound=True)
+    assert render_epoch(KIND_GATEWAY, passing) == now
     assert render_epoch(KIND_AGENT, passing, binds_delegation=True) == RENDER_EPOCHS[KIND_AGENT]
 
 
