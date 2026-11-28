@@ -29,6 +29,7 @@ from runtime.sessions import (
     LIVE_LEASE,
     SELECT_ROW,
     SESSIONS_DDL,
+    TASK_RUNS_DDL,
     PostgresSessionIndex,
     SessionStore,
     ddl_statements,
@@ -720,7 +721,8 @@ async def test_a_prepared_old_session_read_survives_this_phases_ddl() -> None:
     돌린 뒤에도 같은 연결에서 돈다. `daegam_sessions` 에 열을 더하면 그 문장은 깨지고, 열 이름으로
     읽는 새 문장은 그래도 돈다. 그래서 실행 표식을 제 표에 둔다. DDL 은 다른 연결에서 돌린다. 같은
     연결의 DDL 은 psycopg 가 준비해 둔 문장을 스스로 버려 깨짐을 가린다."""
-    statements = ddl_statements(SESSIONS_DDL)
+    # 새 세션 읽기는 작업 세션의 표도 본다. 그 표는 이 단계의 DDL 보다 먼저 있는 것으로 둔다
+    statements = ddl_statements(SESSIONS_DDL) + ddl_statements(TASK_RUNS_DDL)
     phase = [s for s in statements if "daegam_turn_runs" in s or "daegam_sessions_open" in s]
     assert len(phase) == 2
     async with pg_schema() as schema:

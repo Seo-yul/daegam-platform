@@ -86,6 +86,25 @@ AGENT_CALL_PATHS = re.compile(
 )
 
 
+# 다른 Agent 에게 맡긴 작업의 기계 경로 (P46 6.7절). Agent Protocol 의 일부이고, threads.create 의
+# 본문이 비어 있어 경로가 호출받는 Agent 를 댄다. 부르는 Agent 의 런타임이 thread 를 만들고 그
+# 아래에서 실행을 시작하고 읽고 취소한다
+AGENT_PROTOCOL_PATH = "/internal/agent-protocol/{agent_id}"
+_THREAD_PATH = f"{AGENT_PROTOCOL_PATH}/threads/{{thread_id}}"
+AGENT_PROTOCOL_ROUTES = {
+    "create_thread": f"{AGENT_PROTOCOL_PATH}/threads",
+    "get_thread": _THREAD_PATH,
+    "create_run": f"{_THREAD_PATH}/runs",
+    "get_run": f"{_THREAD_PATH}/runs/{{run_id}}",
+    "cancel_run": f"{_THREAD_PATH}/runs/{{run_id}}/cancel",
+}
+# 다섯 경로와 통째로만 맞는 정규식이다. 호출 경로처럼 감사 미들웨어가 빼고 본문 상한이 따로 건다
+AGENT_PROTOCOL_PATHS = re.compile(
+    rf"^{re.escape(API_PREFIX)}/internal/agent-protocol/[^/]+/threads"
+    r"(/[^/]+(/runs(/[^/]+(/cancel)?)?)?)?$"
+)
+
+
 # 웹훅 트리거의 공개 경로 (P41 4절). 다른 시스템이 Bearer 없이 서명으로 부른다. 감사 미들웨어가
 # 빼고(경로가 스스로 감사 행을 쓴다) 본문 상한은 경로가 읽으며 센다
 HOOK_ROUTE = "/hooks/{trigger_id}"

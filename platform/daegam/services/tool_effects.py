@@ -35,7 +35,10 @@
   스크립트는 소비자가 내놓지 않으므로(`published_pins`) 소비자의 이름에서 뺀다.
 - 게시한 Agent 를 부르는 소스는 Tool 하나(`ask_*`)를 효과 `write`, 종류 `agent` 로 낸다(P46
   6.6절, `agent_source`). 호출받은 Agent 가 제 Tool 로 데이터를 바꿀 수 있어서다. 캔버스의 읽기
-  전용 표시는 이 효과를 바꾸지 못한다(`node_effects`).
+  전용 표시는 이 효과를 바꾸지 못한다(`node_effects`). 노드가 작업 Tool 다섯(`TASK_TOOLS`)을 고르면
+  그 Agent 에게 작업을 맡기는 노드다(6.7절, `assigns_tasks`). 맡기고 잇고 취소하는 셋은 쓰기이고
+  상태를 읽는 둘(`TASK_READ_TOOLS`)은 읽기다. 다섯 모두 종류가 `agent` 이고, 호출받은 Agent 의 답을
+  읽어 오는 `TASK_ANSWER_TOOL` 의 결과만 바깥 내용이다.
 
 검증·컴파일은 스레드 풀에서 돌므로 서비스가 효과의 재료를 미리 읽어 `GraphContext.source_tools`
 (소스 id → `SourceTools`)에 둔다(`ToolEffectLoader`).
@@ -56,7 +59,7 @@ from daegam.services.advertised_names import (
     gateway_tools,
     server_tools,
 )
-from daegam.services.agent_graph import ToolsData
+from daegam.services.agent_graph import AGENT_SOURCE, ToolsData
 from daegam.services.platform_tools import WEB_FETCH_ITEM
 from daegam.store.agents import AgentSpec
 from daegam.store.backend_apis import BackendAPIStore, BackendAPIVersion
@@ -78,8 +81,22 @@ ORIGIN_SCRIPT = "script"
 효과는 `read` 이고, 결과는 늘 바깥 내용이며 캔버스의 어느 표시도 효과가 없다
 (`agent_tool_safety`)."""
 ORIGIN_AGENT = "agent"
-"""게시한 Agent 를 부르는 `ask_*` 다(P46 6.6절). 효과는 늘 `write` 이고 결과는 늘 바깥 내용이며
-캔버스의 어느 표시도 효과가 없다(`agent_tool_safety`)."""
+"""게시한 Agent 를 부르는 `ask_*` 와 작업 Tool 이다(P46 6.6·6.7절). `ask_*` 의 효과는 늘 `write`
+이고, 결과는 늘 바깥 내용이며 캔버스의 어느 표시도 효과가 없다(`agent_tool_safety`)."""
+TASK_TOOLS: tuple[str, ...] = (
+    "start_async_task",
+    "check_async_task",
+    "update_async_task",
+    "cancel_async_task",
+    "list_async_tasks",
+)
+"""게시한 Agent 에게 작업을 맡기는 노드의 Tool 다섯이다. 런타임이 만드는 이름이고
+(agent-runtime 의 `runtime/agent_task_tools.py`) tests/test_agent_task_parity.py 가 대조한다."""
+TASK_READ_TOOLS = frozenset({"check_async_task", "list_async_tasks"})
+"""작업 Tool 가운데 상태와 답을 읽기만 하는 것이다."""
+TASK_ANSWER_TOOL = "check_async_task"
+"""작업 Tool 가운데 호출받은 Agent 의 답을 읽어 오는 것이다. 이 결과만 바깥 내용이다. 나머지 넷의
+결과는 런타임과 플랫폼이 쓴 작업 id 와 상태다."""
 READ_METHODS = frozenset({"GET", "HEAD"})
 WEB_FETCH = "fetch"
 WEB_SEARCH = "search"
@@ -128,8 +145,17 @@ UNKNOWN_SOURCE = SourceTools(names=None)
 
 
 def agent_source(tool: str) -> SourceTools:
-    """게시한 Agent 하나를 부르는 소스다. Tool 은 tool 하나이고 쓰기다(모듈 머리)."""
-    return SourceTools(names=(tool,), effects={tool: EFFECT_WRITE}, origins={tool: ORIGIN_AGENT})
+    """게시한 Agent 하나를 부르는 소스다. 고른 Tool 이 없는 노드의 Tool 은 tool 하나이고 쓰기다.
+    작업 Tool 다섯은 노드가 골라야 내므로 이름에 없고 효과와 종류만 안다(모듈 머리)."""
+    effects = dict.fromkeys((tool, *TASK_TOOLS), EFFECT_WRITE)
+    effects.update(dict.fromkeys(TASK_READ_TOOLS, EFFECT_READ))
+    return SourceTools(names=(tool,), effects=effects, origins=dict.fromkeys(effects, ORIGIN_AGENT))
+
+
+def assigns_tasks(data: ToolsData) -> bool:
+    """게시한 Agent 에게 작업을 맡기는 노드인가. 그 소스의 노드는 고른 Tool 로 부르는 방식을
+    정한다. 작업 Tool 을 골랐으면 맡기는 노드이고, 고르지 않았거나 `ask_*` 면 답을 기다린다."""
+    return data.source.kind == AGENT_SOURCE and not set(TASK_TOOLS).isdisjoint(data.allow_tools)
 
 
 def without_script(tools: SourceTools) -> SourceTools:

@@ -43,6 +43,7 @@ from daegam.services.agent_graph import (
 from daegam.services.agent_skills import attach_skills, skill_pins
 from daegam.services.agent_tool_safety import attach_tool_safety
 from daegam.services.agent_web import attach_web
+from daegam.services.tool_effects import assigns_tasks, tools_nodes
 from daegam.store.agents import Agent, AgentRuntime, AgentSpec
 from daegam.store.base import utcnow
 from daegam.store.settings import LLMProvider
@@ -131,6 +132,11 @@ IN_POD_STATE = "in_pod_state"
 # 보므로 그래프가 쓰는 기능이라 `required` 다. 이 이름을 알리지 않은 이미지에 그런 그래프를 배포하면
 # 409 `runtime_feature_missing` 이다(`AgentService._feature_check`)
 AGENT_TOOLS = "agent_tools"
+# 다른 Agent 가 맡긴 작업의 세션과, 다른 Agent 에게 작업을 맡기는 Tool 다섯이다(P46 6.7절). 작업을
+# 맡기는 tools 노드는 호출받는 Agent 의 이미지와 부르는 Agent 의 이미지 모두에 이 이름을 요구한다.
+# 앞의 것은 저장과 배포의 `runtime_feature_missing` 이고(`agent_calls.call_issues`) 뒤의 것은
+# 그래프가 쓰는 기능이라 `required` 다. 문서에 실리지 않는다
+AGENT_TASKS = "agent_tasks"
 
 # agent-runtime/runtime/features.py 의 두 목록과 같다
 DOCUMENT_FEATURES: tuple[str, ...] = (
@@ -161,6 +167,7 @@ CAPABILITIES: tuple[str, ...] = (
     TOOL_REFUSALS,
     SCALE_TO_ZERO,
     TWO_ISSUERS,
+    AGENT_TASKS,
 )
 KNOWN: frozenset[str] = frozenset(DOCUMENT_FEATURES) | frozenset(CAPABILITIES)
 
@@ -213,7 +220,8 @@ def agent_features(
     `provider_stream_usage` 를 붙인다(P37). 세는 자리는 붙이는 함수가 칸을 싣는 자리와 같다
     (`compiled_model_providers`). `tool_safety` 는 웹 Tool 이 없는 그래프에도 붙인다(P43 8절).
     판정 모델을 붙인 그래프는 `injection_check` 와 `tool_safety` 를 요구한다(P43 7절). 게시한
-    Agent 를 Tool 로 쓰는 그래프는 `agent_tools` 를 요구한다(P46 6.2절).
+    Agent 를 Tool 로 쓰는 그래프는 `agent_tools` 를, 그 Agent 에게 작업을 맡기는 그래프는 런타임
+    능력 `agent_tasks` 도 요구한다(P46 6.2·6.7절). 능력은 문서의 `features` 에 실리지 않는다.
     `in_pod_state` 는 in_pod_approvals 일 때만 붙인다. 서비스가 미리 보기마다 정한다(P44b 7절,
     `AgentService._preview_asks`)."""
     del doc
@@ -226,6 +234,8 @@ def agent_features(
         required |= {INJECTION_CHECK, TOOL_SAFETY}
     if agent_source_items(rev):
         required.add(AGENT_TOOLS)
+    if any(assigns_tasks(data) for _node_id, data in tools_nodes(rev)):
+        required.add(AGENT_TASKS)
     used = [p for n in compiled_model_providers(rev) if (p := providers.get(n)) is not None]
     attached = {
         PROVIDER_EXTRA_BODY: any(p.extra_body for p in used),

@@ -1917,12 +1917,13 @@ class AgentService(ExposureValidationMixin, AgentRollbackMixin, BaseInstanceServ
         """배포·재배포 전 검사다(D65). 배포할 이미지의 기록이 있을 때만 `required` 가 빠지면 409
         이고 그 밖은 경고다. rev·effective 는 이 배포가 핀할 리비전과 스냅샷이고, ctx 는 그 요청이
         읽은 검증 문맥이다. 웹 Tool 은 이번 배포가 박을 핀(pins)으로 세고, 바인딩 Database 는 그
-        문맥이 막 읽은 것을 쓴다. 게시한 Agent 를 Tool 로 쓰는데 이미지가 `agent_tools` 를 모르면
-        409 `runtime_feature_missing` 이다 (P46 6.2절)."""
+        문맥이 막 읽은 것을 쓴다. 게시한 Agent 를 Tool 로 쓰는데 이미지가 `agent_tools` 를, 작업을
+        맡기는데 `agent_tasks` 를 모르면 409 `runtime_feature_missing` 이다 (P46 6.2·6.7절)."""
         wanted = await self._wanted_features(doc, ctx, rev=rev, pins=pins, effective=effective)
         check, warnings = agent_features.deploy_check(doc, effective.images.agent_image, wanted)
-        if check is not None and agent_features.AGENT_TOOLS in check.missing:
-            raise _agent_tools_missing()
+        for feature in (agent_features.AGENT_TOOLS, agent_features.AGENT_TASKS):
+            if check is not None and feature in check.missing:
+                raise _call_feature_missing(feature)
         if check is not None and check.missing:
             raise _image_too_old(check.missing)
         return warnings
@@ -1964,14 +1965,15 @@ def _redeploy_required(refs: list[str]) -> AgentError:
     )
 
 
-def _agent_tools_missing() -> AgentError:
-    """다른 Agent 를 Tool 로 부르지 못하는 이미지에 그런 그래프를 배포할 때의 409 다 (P46 6.2절)."""
+def _call_feature_missing(feature: str) -> AgentError:
+    """다른 Agent 를 Tool 로 부르거나 작업을 맡기지 못하는 이미지에 그런 그래프를 배포할 때의 409
+    다 (P46 6.2·6.7절)."""
     return AgentError(
         409,
         RUNTIME_FEATURE_MISSING,
-        "the runtime image has not reported the 'agent_tools' feature, so it cannot call other "
-        "agents as tools",
-        feature=agent_features.AGENT_TOOLS,
+        f"the runtime image has not reported the {feature!r} feature that this graph's agent "
+        "sources need; redeploy on a newer image",
+        feature=feature,
     )
 
 

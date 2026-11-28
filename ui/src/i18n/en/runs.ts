@@ -66,6 +66,8 @@ export const runs: Messages["runs"] = {
     accessLost: "The user it runs as lost access during the run.",
     callerEnded: "The calling Agent's turn ended, so the run was cancelled.",
     callerTimeout: "The calling Agent's wait ran out, so the run was cancelled.",
+    callerCancelled: "The calling Agent cancelled the task.",
+    callerUpdated: "The calling Agent sent a new instruction, so this run was cancelled.",
   },
   pausedReason: {
     actsAsLostAccess: "Stopped because the user it runs as can no longer use this Agent. Resuming runs it as whoever resumes it.",

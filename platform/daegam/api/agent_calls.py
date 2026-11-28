@@ -58,7 +58,8 @@ class CallCancelBody(BaseModel):
     reason: CancelReason
 
 
-def _credentials(request: Request) -> CallCredentials:
+def call_credentials(request: Request) -> CallCredentials:
+    """요청이 실어 온 Bearer 와 부르는 쪽의 머리다. 작업의 경로(`api/agent_protocol.py`)도 쓴다."""
     headers = request.headers
     return CallCredentials(
         bearer=bearer_value(request),
@@ -79,7 +80,7 @@ async def start_agent_call(request: Request, agent_id: str, body: CallStartBody)
     acts_as_unavailable, 409 agent_calls_disabled·agent_source_unpublished·agent_call_cycle·
     agent_call_too_deep·not_deployed, 410 turn_grant_ended, 413 max_input_chars, 429
     agent_call_busy·agent_call_fanout·agent_call_rate_limited 다."""
-    return await _calls(request).start(agent_id, _credentials(request), body.message)
+    return await _calls(request).start(agent_id, call_credentials(request), body.message)
 
 
 @router.get(AGENT_CALL_ROUTES["poll"])
@@ -90,7 +91,7 @@ async def poll_agent_call(
     wait: Annotated[float, Query(ge=0, le=REQUEST_WAIT_SECONDS)] = 0,
 ) -> dict[str, Any]:
     """실행의 지금 상태다. 이 턴이 시작한 호출이 아니면 404 다."""
-    return await _calls(request).poll(agent_id, run_id, _credentials(request), wait)
+    return await _calls(request).poll(agent_id, run_id, call_credentials(request), wait)
 
 
 @router.post(AGENT_CALL_ROUTES["cancel"])
@@ -98,4 +99,4 @@ async def cancel_agent_call(
     request: Request, agent_id: str, run_id: str, body: CallCancelBody
 ) -> dict[str, Any]:
     """`{run_id, status, cancelled}`. 이미 끝난 실행은 그대로 두고 그 상태를 답한다."""
-    return await _calls(request).cancel(agent_id, run_id, _credentials(request), body.reason)
+    return await _calls(request).cancel(agent_id, run_id, call_credentials(request), body.reason)

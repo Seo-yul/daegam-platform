@@ -25,7 +25,9 @@ SSE 응답 헤더 `X-Daegam-Session-Id` 가 세션 id 를, `X-Daegam-Turn-Id` �
 백그라운드 실행의 세션(P41 9절, runs.py)은 턴마다 임시로 돌고, 응답 머리 `X-Daegam-Run-Id` 와
 `turn_start`·`turn_end` 의 `run_id` 를 싣는다. 승인 대기 없이 끝난 턴은 세션을 닫는다. 색인은
 마감이 closed 로 적고, 체크포인트와 첨부는 리스를 푼 뒤 지우며, 전사는 남는다. `turn_end` 는 오류
-턴의 코드(`code`)도 싣는다. 플랫폼이 중지와 접근을 잃은 사람을 그것으로 가른다.
+턴의 코드(`code`)도 싣는다. 플랫폼이 중지와 접근을 잃은 사람을 그것으로 가른다. 작업 세션(runs.py)은
+턴이 끝나도 닫지 않고, 다음 실행의 턴은 태스크를 띄우기 직전에 세션의 run_id 를 그 실행의 것으로
+바꾼다(`open_turn`).
 """
 
 from __future__ import annotations
@@ -74,7 +76,7 @@ from runtime.fence import TurnFenced, fenced
 from runtime.fork import Fork
 from runtime.lease_keeper import HeldLease
 from runtime.outside import OutsideFlag
-from runtime.runs import run_exists, run_headers
+from runtime.runs import run_exists, run_headers, runs_once, take_next_run
 from runtime.sessions import (
     STATUS_ACTIVE,
     STATUS_CLOSED,
@@ -193,16 +195,18 @@ async def resolve_session(
     *,
     run_id: str | None = None,
     untrusted: bool = False,
+    task: bool = False,
 ) -> SessionRecord:
     """기존 세션이면 상태·소유자·턴 한도를 검사하고, 없으면 새로 만든다. 소유자는 caller.sub 다.
 
     run_id 를 주면 백그라운드 실행의 세션을 만든다(P41 9절, runs.py). 색인이 run_id 를 한 세션에만
-    주므로 같은 실행의 요청이 함께 와도 하나만 만들고, 진 쪽은 409 `run_exists` 다."""
+    주므로 같은 실행의 요청이 함께 와도 하나만 만들고, 진 쪽은 409 `run_exists` 다. task 면 작업
+    세션을 만들고, 기존 세션에 run_id 를 주면 그 작업의 다음 실행이라 작업 세션만 받는다."""
     entry = state.config.entry
     index = state.store.index
     if session_id:
         record = await load_session(state, session_id)
-        check_open_session(caller, record)
+        check_open_session(caller, record, next_run=run_id is not None)
         if record.turns >= entry["max_turns"]:
             raise rejected(
                 state,
@@ -235,6 +239,7 @@ async def resolve_session(
         title=title_from_message(message),
         run_id=run_id,
         untrusted=untrusted,
+        task=task,
         # 웹훅 실행의 세션은 처음부터 바깥 내용을 가진 대화다. P43 을 아는 옛 이미지의 파드가 배포
         # 도중에 결정을 이어도 표시된 대화로 돌게 바깥 표시도 함께 적는다(P41 10절)
         outside_at=now if untrusted else None,
@@ -242,7 +247,7 @@ async def resolve_session(
     try:
         await index.create(record)
     except RunTaken as e:
-        raise run_exists(e.session_id, await index.get(e.session_id)) from e
+        raise run_exists(run_id, e.session_id, await index.get(e.session_id)) from e
     return record
 
 
@@ -254,9 +259,10 @@ async def unstarted_session_forgotten(
     뒤에는 실패하지 않고, 턴이 돈 적이 없으니 샌드박스는 닫지 않는다. 지우지 못하면 로그만 남기고
     원래 오류를 낸다.
 
-    - 실행 세션(P41 9절, runs.py)은 어느 실패에서든 지운다. 턴 없는 세션이 run_id 를 쥐면 플랫폼이
-      다시 한 시작이 `run_exists`(턴 id null)를 받고 실행을 잃은 것으로 끝낸다(P41 5절). 실행
-      세션은 `/chat` 이 늘 새로 만든다.
+    - 이 요청이 만든 실행 세션(P41 9절, runs.py)은 어느 실패에서든 지운다. 턴 없는 세션이 run_id
+      를 쥐면 플랫폼이 다시 한 시작이 `run_exists`(턴 id null)를 받고 실행을 잃은 것으로
+      끝낸다(P41 5절). 작업의 다음 실행은 있던 세션에 오므로 지우지 않는다. 그 실행의 id 는 턴
+      태스크를 띄우기 직전에야 세션이 쥐므로 풀 것도 없다.
     - 이 요청이 만든(created) 채팅 세션은 drain 표시가 첫 잡기를 물렸을 때만 지운다(P44 7절).
       입구(`check_request`)가 표시를 본 뒤 잡기 전에 표시가 선 경우다. 빈 세션이 재우기 직전에 센
       세션 수와 동시 세션 상한에 들지 않게 한다."""
@@ -264,7 +270,7 @@ async def unstarted_session_forgotten(
         yield
     except Exception as e:
         drained = created and isinstance(e.__cause__, DrainMarked)
-        if record.run_id is not None or drained:
+        if (created and record.run_id is not None) or drained:
             try:
                 await state.store.delete_session(record.session_id, close_sandbox=False)
             except Exception as err:  # noqa: BLE001  원래 오류를 그대로 낸다
@@ -308,13 +314,14 @@ async def start_turn(
     attachments: list[StoredUpload] | None = None,
     grant: TurnGrant | None = None,
     choices: list[ApprovalChoice] | None = None,
+    next_run: str | None = None,
 ) -> StreamingResponse:
     """진행 중 턴을 막고 SSE 응답을 연다. /chat 과 /decisions 가 같이 쓴다.
 
     prelude 는 입구에서 이미 정해진 이벤트(새 세션의 인사말, 입력 가드레일 flag)다. 그래프
     이벤트보다 먼저 나간다. ephemeral 이면 이 턴은 장기 기억 저장소를 안 붙인다. 리스를 잡으면
     입구를 지난 첨부를 세션에 저장하고(attachments.py) 이 시도의 번호와 id 를 색인에
-    적는다(turn_gate.py).
+    적는다(turn_gate.py). next_run 은 작업 세션이 이 턴으로 받는 다음 실행의 id 다(`open_turn`).
     """
     async with held_lease(state, record.session_id) as lease:
         # 리스 전에 읽은 색인은 그 사이에 끝난 턴의 사용량과 `cite_seq` 를 모를 수 있다. 다시
@@ -347,6 +354,7 @@ async def start_turn(
             prelude=prelude,
             grant=grant,
             choices=choices,
+            next_run=next_run,
         )
 
 
@@ -364,6 +372,7 @@ async def open_turn(
     fork: Fork | None = None,
     grant: TurnGrant | None = None,
     choices: list[ApprovalChoice] | None = None,
+    next_run: str | None = None,
 ) -> StreamingResponse:
     """리스(lease)를 잡은 턴의 태스크를 띄우고 그 이벤트를 읽는 SSE 응답을 연다(D92). 응답을 하나도
     읽기 전에 연결이 닫혀도 턴은 돌고 리스를 푼다. 다시 생성은 리스를 잡은 뒤 입력 체크포인트를 찾고
@@ -383,7 +392,11 @@ async def open_turn(
     백그라운드 실행의 세션(P41 9절, runs.py)은 요청이 무엇을 싣든 임시로 돈다. 웹훅 실행의
     `untrusted` 는 첨부를 받은 대화처럼 웹 가드의 엄격한 URL 규칙과 바깥 표시를 켠다(P43 3절). 그
     세션은 만들 때 `outside_at` 도 적었다(`resolve_session`). 실행 세션의 기억한 선택은 거절만
-    남긴다(P43 5절)."""
+    남긴다(P43 5절).
+
+    작업 세션의 다음 실행(next_run, runs.py)은 실패할 수 있는 마지막 걸음으로 세션의 run_id 를 그
+    실행의 것으로 바꾼다. 그보다 앞에서 실패한 요청은 그 실행 id 를 쥐지 않아, 다시 한 시작이 돌지
+    않은 턴을 가리키는 `run_exists` 를 받지 않는다."""
     ephemeral = ephemeral or record.run_id is not None
     await load_turn_uploads(state, record, turn)
     turn.holds_attachments = record.upload_bytes > 0 or record.untrusted
@@ -396,6 +409,8 @@ async def open_turn(
     turn.approval_choices = choices_of(choices, rejects_only=record.run_id is not None)
     if lease.fence.standing:
         raise turn_aborted()
+    if next_run is not None:
+        record = await take_next_run(state.store.index, record, next_run, token=lease.token)
     watch = CancelWatch(
         state.store.index,
         record.session_id,
@@ -601,8 +616,9 @@ async def _write_end(
     백그라운드 실행의 세션은 승인 대기 없이 끝난 턴에서 닫는다(P41 9절). 상태를 active 대신 closed
     로 적고, 그 쓰기가 된 뒤에 `turn.closes_session` 을 세워 리스를 푼 뒤 체크포인트와 첨부를
     지우게 한다(`_run_turn`). 전사는 남는다. 체크포인트를 읽지 못해 상태를 모르는 오류 턴은 닫지
-    않고 TTL 에 맡긴다."""
-    closing = record.run_id is not None and fields.get("status") == STATUS_ACTIVE
+    않고 TTL 에 맡긴다. 작업 세션(runs.py)은 다음 실행을 받으려고 턴 사이에 열려 있으므로 닫지
+    않는다."""
+    closing = runs_once(record) and fields.get("status") == STATUS_ACTIVE
     if closing:
         fields["status"] = STATUS_CLOSED
     await state.store.index.update_held(record.session_id, token, settle=True, **fields)

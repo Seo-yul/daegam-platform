@@ -20,7 +20,7 @@ import { dictionary } from "@/i18n";
 import { AGENT_SOURCE, DEFAULT_SERVICE, defaultNodeData, issueText, validateGraph, type Graph, type ToolsData } from "@/lib/agentGraph";
 import { agentCallToolName, hubItemOfAgent, hubKindLabel, hubToolNames, isAgentCallTool, isExternalHubItem } from "@/lib/hub";
 import { calledByText, runReasonText, runSourceText } from "@/lib/runs";
-import { outsideFixed } from "@/lib/toolSafety";
+import { TASK_ANSWER_TOOL, TASK_READ_TOOLS, TASK_TOOLS, assignsTasks, outsideFixed } from "@/lib/toolSafety";
 import { describeWarning } from "@/lib/warningText";
 
 import { submitConfirm } from "./confirm";
@@ -63,6 +63,9 @@ describe("lib: 게시한 Agent 의 항목과 그 Tool", () => {
     expect(calledByText(ko, runFixture(), () => "x")).toBeNull();
     expect(runReasonText(ko, "caller_ended", 30)).toEqual({ text: "부른 Agent 의 턴이 끝나 실행을 취소했습니다.", code: false });
     expect(runReasonText(ko, "caller_timeout", 30)).toEqual({ text: "부른 Agent 가 기다리는 시간을 넘겨 실행을 취소했습니다.", code: false });
+    expect(runReasonText(ko, "caller_cancelled", 30)).toEqual({ text: "부른 Agent 가 작업을 취소했습니다.", code: false });
+    expect(runReasonText(ko, "caller_updated", 30)).toEqual({ text: "부른 Agent 가 새 지시를 보내 이 실행을 취소했습니다.", code: false });
+    expect(runReasonText(en, "caller_updated", 30)?.text).toBe("The calling Agent sent a new instruction, so this run was cancelled.");
   });
 
   it("상태 경고는 경고 표의 문장이고, 게시를 거둔 소스와 꺼진 호출은 오류 표의 문장이다", () => {
@@ -160,6 +163,50 @@ describe("tools 노드 패널의 Agent 소스", () => {
     await user.click(screen.getByTestId("inspector-tabs-approval"));
     await user.click(screen.getByTestId(`approval-${TOOL}-approve`));
     expect(stored().approval).toEqual({ [TOOL]: ["approve"] });
+  });
+
+  it("부르는 방식을 작업으로 바꾸면 허용 Tool 이 작업 Tool 다섯이 되고 앞 방식의 규칙을 비운다", async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<Panel reviewed />);
+    await selectValue(user, "tools-source-kind", AGENT_SOURCE);
+    await selectValue(user, "tools-source", ITEM.id);
+    // 처음은 답을 기다리는 호출이다
+    expect(screen.getByTestId("tools-agent-mode")).toHaveTextContent(ko.canvas.tools.agentMode.wait);
+    expect(screen.getByText(ko.canvas.tools.agentMode.hint.wait)).toBeInTheDocument();
+    await user.click(screen.getByTestId("inspector-tabs-approval"));
+    await user.click(screen.getByTestId(`approval-${TOOL}-approve`));
+    await user.click(screen.getByTestId("inspector-tabs-tools"));
+
+    await selectValue(user, "tools-agent-mode", ko.canvas.tools.agentMode.task);
+    expect(stored()).toMatchObject({ allow_tools: [...TASK_TOOLS], approval: {}, timeouts: {}, rememberable: [] });
+    expect(screen.getByText(ko.canvas.tools.agentMode.hint.task)).toBeInTheDocument();
+    // Tool 다섯의 효과는 정해져 있고 ask_* 는 보이지 않는다
+    expect(screen.queryByTestId("tools-agent-tool")).not.toBeInTheDocument();
+    expect(screen.getByTestId("tools-agent-task-tools").querySelectorAll("li")).toHaveLength(TASK_TOOLS.length);
+    expect(screen.getByTestId("tool-effect-start_async_task")).toHaveTextContent(ko.canvas.tools.effect.write);
+    expect(screen.getByTestId("tool-effect-check_async_task")).toHaveTextContent(ko.canvas.tools.effect.read);
+    expect(screen.getByTestId("tools-agent-marks")).toHaveTextContent(ko.canvas.tools.agentTaskMarks);
+
+    // 승인 규칙은 작업 Tool 에만 걸고, 타임아웃은 정하지 않는다
+    await user.click(screen.getByTestId("inspector-tabs-approval"));
+    expect(screen.queryByTestId(`approval-${TOOL}-approve`)).not.toBeInTheDocument();
+    await user.click(screen.getByTestId("approval-start_async_task-approve"));
+    expect(stored().approval).toEqual({ start_async_task: ["approve"] });
+    await user.click(screen.getByTestId("inspector-tabs-timeouts"));
+    expect(screen.getByTestId("tools-timeouts-help")).toHaveTextContent(ko.canvas.tools.agentTaskTimeout);
+    expect(screen.queryByTestId("timeout-start_async_task")).not.toBeInTheDocument();
+
+    await user.click(screen.getByTestId("inspector-tabs-tools"));
+    await selectValue(user, "tools-agent-mode", ko.canvas.tools.agentMode.wait);
+    expect(stored()).toMatchObject({ allow_tools: [], approval: {} });
+    expect(screen.getByTestId("tools-agent-tool")).toHaveTextContent(TOOL);
+  });
+
+  it("작업 Tool 이 허용 Tool 에 있는 노드만 작업을 맡기는 노드다", () => {
+    expect(assignsTasks([...TASK_TOOLS])).toBe(true);
+    expect(assignsTasks([TOOL])).toBe(false);
+    expect(assignsTasks(undefined)).toBe(false);
+    expect(TASK_READ_TOOLS.has(TASK_ANSWER_TOOL)).toBe(true);
   });
 });
 

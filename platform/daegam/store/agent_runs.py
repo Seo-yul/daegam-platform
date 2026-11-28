@@ -6,7 +6,7 @@ agent_runs {_id, tenant, agent_id, source, source_id?, scheduled_for?, delivery_
             stop_requested_at?, stop_reason?, created_at, started_at?, ended_at?, deadline?,
             expires_at, count?, first_at?, last_at?,
             caller?: {agent_id, session_id?, turn_id?, grant_id?, chain, long_bound, untrusted,
-                      timeout_at}}
+                      timeout_at?, thread_id?}}
 
 실행 하나는 플랫폼이 묶인 사람으로 새 세션에서 여는 턴 하나와 그 뒤의 기록이다. `scheduled_for` 는
 스케줄의 울림 시각이고 `delivery_id` 는 웹훅 호출의 id 다. 둘 다 있을 때만 문서에 적어 부분 유일
@@ -27,6 +27,11 @@ Agent, 그 세션과 턴의 위임(위임 없는 턴은 파드가 댄 턴 id), �
 기다리는 끝(`timeout_at`)이다. 호출은 스케줄·웹훅·지금 실행의 상한(`RUN_CAP_SOURCES`)과 따로 센다.
 부른 턴이 끝나면 아직 첫 턴인 실행을 취소한다. 첫 턴은 `starting` 이나 `running` 이고 마감
 (`deadline`)이 한 번도 적히지 않은 기록이다. 승인을 기다린 적이 있는 실행은 마감이 남는다.
+
+맡긴 작업(`caller.thread_id`, P46 6.7절)의 실행은 아무도 기다리지 않는다. 작업 하나의 실행들은 세션
+하나를 나눠 쓰므로 세션 하나에 기록이 여럿이고, 세션으로 찾으면 가장 늦게 만든 기록이다. 부른 턴이
+끝나도 취소하지 않으므로 `caller.grant_id` 와 `timeout_at` 을 적지 않는다. 그래서 위임의 끝을 쓸어
+담는 조건이 이 기록을 고르지 않고, 호출만 아는 판의 쓸기도 고르지 않는다.
 
 `starting` 과 `waiting_approval` 에서 나가는 이동은 모두 조건부 갱신이다. 같은 초에 만난 결정·마감·
 중지가 결과 하나만 남긴다. 시작 워커는 `starting` 기록 하나에 리스(`lease`)를 걸고 시작하며, 다시 할
@@ -94,6 +99,8 @@ SkipReason = Literal["missed", "previous_running", "agent_run_limit"]
 _OMIT_WHEN_NONE = ("scheduled_for", "delivery_id", "source_id", "caller")
 # 첫 턴인 열린 실행을 고르는 조건이다(모듈 머리)
 _FIRST_TURN: dict[str, Any] = {"status": {"$in": MOVING_STATUSES}, "deadline": None}
+# 가장 늦게 만든 기록부터 읽는 차례
+_LATEST = [("created_at", DESCENDING)]
 
 
 class ActsAs(BaseModel):
@@ -112,7 +119,8 @@ class ActsAs(BaseModel):
 class RunCaller(BaseModel):
     """다른 Agent 가 Tool 로 부른 실행의 부른 쪽이다 (P46 6.3·6.5절). agent_id 는 부른 Agent(미리
     보기는 원본)이고 chain 은 뿌리부터 그 Agent 까지다. grant_id 는 부른 턴의 위임이고, 위임 없는
-    턴(header 모드)은 없어 session_id 와 turn_id 가 그 턴을 가린다."""
+    턴(header 모드)은 없어 session_id 와 turn_id 가 그 턴을 가린다. thread_id 는 맡긴 작업의
+    id 이고(6.7절) 그 실행은 grant_id 와 timeout_at 을 적지 않는다(모듈 머리)."""
 
     model_config = ConfigDict(extra="ignore")
 
@@ -124,6 +132,7 @@ class RunCaller(BaseModel):
     long_bound: bool = False
     untrusted: bool = True
     timeout_at: UtcDatetime | None = None
+    thread_id: str | None = None
 
 
 class AgentRun(Document):
@@ -313,6 +322,12 @@ class MongoAgentRunStore:
             name="ix_caller_grant",
             partialFilterExpression={"caller.grant_id": {"$exists": True}},
         )
+        # 맡긴 작업 하나의 실행들을 찾는다 (P46 6.7절)
+        await self.coll.create_index(
+            [("caller.thread_id", ASCENDING), ("status", ASCENDING)],
+            name="ix_caller_thread",
+            partialFilterExpression={"caller.thread_id": {"$exists": True}},
+        )
         await ensure_ttl_index(self.coll, "expires_at", 0, "ttl_expires_at")
 
     async def insert(self, run: AgentRun) -> bool:
@@ -324,22 +339,43 @@ class MongoAgentRunStore:
         return AgentRun.from_doc(doc) if doc else None
 
     async def for_session(self, tenant: str, agent_id: str, session_id: str) -> AgentRun | None:
-        """그 세션의 실행. 실행 세션이 아니면 None 이다."""
+        """그 세션의 실행. 실행 세션이 아니면 None 이다. 맡긴 작업의 세션은 실행이 여럿이라 가장
+        늦게 만든 것이다."""
         doc = await self.coll.find_one(
-            {"tenant": tenant, "agent_id": agent_id, "session_id": session_id}
+            {"tenant": tenant, "agent_id": agent_id, "session_id": session_id}, sort=_LATEST
         )
         return AgentRun.from_doc(doc) if doc else None
 
     async def for_sessions(
         self, tenant: str, agent_id: str, session_ids: list[str]
     ) -> dict[str, AgentRun]:
-        """세션 id → 그 세션의 실행. 실행 세션이 아닌 것은 빠진다."""
+        """세션 id → 그 세션의 실행. 실행 세션이 아닌 것은 빠진다. 실행이 여럿인 세션은
+        `for_session` 처럼 가장 늦게 만든 것이다."""
         if not session_ids:
             return {}
+        # 만든 차례로 읽어 같은 세션의 늦은 기록이 앞의 것을 덮는다
         cursor = self.coll.find(
             {"tenant": tenant, "agent_id": agent_id, "session_id": {"$in": session_ids}}
-        )
+        ).sort("created_at", ASCENDING)
         return {d["session_id"]: AgentRun.from_doc(d) async for d in cursor}
+
+    # -- 맡긴 작업 (P46 6.7절) ---------------------------------------------------------------
+
+    async def for_thread(self, tenant: str, agent_id: str, thread_id: str) -> list[AgentRun]:
+        """작업 하나의 실행들이다. 가장 늦게 만든 것부터다."""
+        cursor = self.coll.find(
+            {"tenant": tenant, "agent_id": agent_id, "caller.thread_id": thread_id}, sort=_LATEST
+        )
+        return [AgentRun.from_doc(d) async for d in cursor]
+
+    async def thread_turn_running(self, thread_id: str, *, besides: str) -> bool:
+        """그 작업에서 besides 가 아닌 실행이 아직 도는가. 그 턴이 끝나야 세션이 다음 턴을
+        받는다."""
+        doc = await self.coll.find_one(
+            {"caller.thread_id": thread_id, "status": "running", "_id": {"$ne": besides}},
+            projection={"_id": 1},
+        )
+        return doc is not None
 
     async def find_delivery(self, source_id: str, delivery_id: str) -> AgentRun | None:
         """웹훅 호출 하나의 기록. 같은 delivery id 로 다시 온 호출이 같은 실행을 받는다."""

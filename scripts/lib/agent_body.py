@@ -10,7 +10,8 @@
   허용한다(e2e_evaluation 의 쓰기 Tool 과 읽기 Tool 소스 둘). 셋 다 없으면 Tool 노드를 뺀다. `--outside A,B` 는 그 Tool 의 결과를 바깥 내용으로 표시하고, `--rememberable A,B` 는
   그 Tool 의 승인을 사람이 기억할 수 있게 한다(P43 2·5절). `--approval-for A,B` 는 그 Tool 의 승인 규칙을 승인과 거절로
   둔다. 셋은 Tool 노드가 있을 때만 쓴다. `--agent-source ITEM:TOOL` 은 거듭 주는 만큼 게시한 Agent 의 허브 항목 ITEM 을
-  Tool TOOL 로 부르는 Tool 노드를 위의 것에 더해 메인에 잇는다. 그 노드는 승인 규칙이 없다.
+  Tool TOOL 로 부르는 Tool 노드를 위의 것에 더해 메인에 잇는다. 그 노드는 승인 규칙이 없다. `--agent-task ITEM` 은 거듭
+  주는 만큼 그 항목의 Agent 에게 작업을 맡기는 Tool 노드(작업 Tool 다섯)를 같은 식으로 더한다.
 - memory 노드: `--ds-id ID` 면 그 Data Service 를 체크포인터로 쓰고 `--long-term-days N` 이면 장기 기억(D34)을 켠다.
   없으면 memory 노드와 그것을 필요로 하는 승인을 뺀다(인메모리 경로). `--files` 는 파일 도구를, `--approve-edit` 는
   승인에 고치기를 더한다.
@@ -51,6 +52,16 @@ def tool_node(kind: str, source_id: str, tool: str, approval: list) -> dict:
         "approval": {tool: approval} if approval else {},
         "timeouts": {},
     }
+
+
+# 게시한 Agent 에게 작업을 맡기는 Tool 노드가 허용하는 Tool 다섯이다(플랫폼 `tool_effects.TASK_TOOLS`)
+TASK_TOOLS = [
+    "start_async_task",
+    "check_async_task",
+    "update_async_task",
+    "cancel_async_task",
+    "list_async_tasks",
+]
 
 
 def build(template: dict, args: argparse.Namespace) -> dict:
@@ -124,6 +135,12 @@ def build(template: dict, args: argparse.Namespace) -> dict:
         graph["nodes"].append({"id": node_id, "type": "tools", "data": data})
         attach(main["id"], node_id, "tools")
         layout[node_id] = {"x": 620 + 140 * i, "y": 260}
+    for i, item in enumerate(args.agent_task, start=1):
+        node_id = f"tools-task-{i}"
+        data = {**tool_node("agent", item, "", approval=[]), "allow_tools": list(TASK_TOOLS)}
+        graph["nodes"].append({"id": node_id, "type": "tools", "data": data})
+        attach(main["id"], node_id, "tools")
+        layout[node_id] = {"x": 620 + 140 * i, "y": 400}
     if args.ds_id:
         long_term = {"retention_days": args.long_term_days} if args.long_term_days else None
         node("memory")["data"].update(checkpointer={"data_service_id": args.ds_id}, long_term=long_term)
@@ -231,6 +248,12 @@ def parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         help="ITEM:TOOL. 거듭 주는 만큼 게시한 Agent 의 허브 항목을 그 Tool 로 부르는 Tool 노드를 더한다",
+    )
+    ap.add_argument(
+        "--agent-task",
+        action="append",
+        default=[],
+        help="ITEM. 거듭 주는 만큼 게시한 Agent 의 허브 항목에 작업을 맡기는 Tool 노드를 더한다",
     )
     ap.add_argument("--allow", default="", help="--source 의 Tool 목록을 이 이름들(쉼표로 가른다)만 남긴다")
     ap.add_argument(

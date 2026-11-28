@@ -74,6 +74,8 @@ export const runs = {
     /** 다른 Agent 가 부른 실행을 부른 쪽이 끝냈다 (P46 6.3·6.5절). */
     callerEnded: "부른 Agent 의 턴이 끝나 실행을 취소했습니다.",
     callerTimeout: "부른 Agent 가 기다리는 시간을 넘겨 실행을 취소했습니다.",
+    callerCancelled: "부른 Agent 가 작업을 취소했습니다.",
+    callerUpdated: "부른 Agent 가 새 지시를 보내 이 실행을 취소했습니다.",
   },
   /** 일정과 트리거가 멈춘 까닭. 손으로 멈춘 것은 상태만 보인다. */
   pausedReason: {

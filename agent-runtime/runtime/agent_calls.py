@@ -2,7 +2,9 @@
 
 agent.json 의 `tools[]` 가운데 `source.kind` 가 `agent` 인 항목마다 Tool 하나(`ask_*`)를 만든다.
 이름은 항목의 `allow` 하나, 설명과 제한 시간은 항목에 박힌 것이고 인자는 `message` 하나다. 검색
-도구처럼 항목만으로 만들므로 목록을 읽지 않고, 플랫폼이 답하지 않아도 파드는 준비된다.
+도구처럼 항목만으로 만들므로 목록을 읽지 않고, 플랫폼이 답하지 않아도 파드는 준비된다. `mode` 가
+`task` 인 항목은 답을 기다리지 않고 작업을 맡기는 소스라 여기서 Tool 을 만들지 않는다
+(agent_task_tools.py). 요청의 자격(`CallSender`)과 거절의 Tool 오류(`refused`)는 두 쪽이 같이 쓴다.
 
 - **호출은 플랫폼의 실행이다.** 항목의 `url` 이 호출받는 Agent 의 호출 경로다. Tool 은
   `POST <url>` 에 `{message}` 를 보내 실행을 시작하고, 끝나지 않았으면
@@ -148,11 +150,19 @@ class CallAnswer(BaseModel):
 
 
 @dataclass(frozen=True)
-class _Caller:
+class Caller:
     """호출 하나가 요청마다 알리는 것이다. 호출을 시작할 때 턴 문맥에서 한 번 읽는다."""
 
     owner: str | None
     outside: bool
+
+    @classmethod
+    def of(cls, runtime: Any) -> Caller:
+        return cls(
+            owner=context_field(runtime, "owner_sub"),
+            # 표시를 모르는 문맥은 바깥 내용을 가진 대화로 알린다
+            outside=getattr(context_field(runtime, "outside"), "flagged", True),
+        )
 
 
 def _answer(response: httpx2.Response) -> CallAnswer | None:
@@ -181,16 +191,63 @@ def _refusal(response: httpx2.Response) -> tuple[str, str, int | None]:
     )
 
 
+@dataclass(frozen=True)
+class CallSender:
+    """호출받는 Agent 하나에게 가는 요청의 자격이다. target 은 턴의 위임이 토큰을 싣는 대상이다."""
+
+    target: Target
+    grants: TurnGrants
+    instance_token: str | None
+
+    def headers(self, tool: str, caller: Caller, *, started: bool) -> dict[str, str]:
+        """요청 하나의 머리다. 턴의 위임이 이 대상에 토큰을 실었으면 그 지금 토큰이고(갱신이 바꾼
+        토큰도 다음 요청부터 실린다) 끝났으면 `TurnTokenUnavailable` 이다. 아니면 인스턴스 토큰과
+        세션, 턴, 소유자다. 누구의 턴인지 모르면 보내지 않는다. tool 은 문장에 싣는 Tool 이름이고
+        started 는 그 호출이 이미 실행을 시작했는가다."""
+        headers = {OUTSIDE_HEADER: "1" if caller.outside else "0"}
+        calls = self.grants.current()
+        if calls is not None and calls.credentials.holds(self.target):
+            token = calls.credentials.token(self.target)
+            if token is None:
+                text = INTERRUPTED_MESSAGE if started else UNAVAILABLE_MESSAGE
+                raise TurnTokenUnavailable(text.format(tool=tool))
+            headers["Authorization"] = f"Bearer {token}"
+            return headers
+        turn = current_turn()
+        if turn is None:
+            raise TurnTokenUnavailable(UNKNOWN_TURN_MESSAGE)
+        if self.instance_token:
+            headers["Authorization"] = f"Bearer {self.instance_token}"
+        headers[SESSION_HEADER] = turn.session_id
+        headers[TURN_HEADER] = turn.turn_id
+        if caller.owner:
+            headers[OWNER_HEADER] = quote(caller.owner, safe="")
+        return headers
+
+
+async def refused(tool: str, response: httpx2.Response) -> AgentCallError:
+    """플랫폼이 거절한 요청의 Tool 오류다. 코드와 플랫폼의 문장, 한도가 있으면 한도를 싣는다."""
+    code, sentence, limit = _refusal(response)
+    log.warning("%s 호출을 플랫폼이 거절했다: %s %s", tool, response.status_code, code)
+    kind = REFUSAL_KINDS.get(response.status_code)
+    if kind is not None:
+        await signal(TOOL_REFUSED, {"tool": tool, "kind": kind})
+    parts = [REFUSED_MESSAGE.format(tool=tool, code=code)]
+    if sentence:
+        parts.append(sentence)
+    if limit is not None:
+        parts.append(f"(limit: {limit})")
+    return AgentCallError(" ".join(parts))
+
+
 @dataclass
 class AgentCall:
     """Agent 소스 하나의 호출이다."""
 
     name: str
     url: str
-    target: Target
+    sender: CallSender
     timeout: float
-    grants: TurnGrants
-    instance_token: str | None
     http: Callable[[], httpx2.AsyncClient]
     poll_wait: int = POLL_WAIT_SECONDS
     poll_min_interval: float = POLL_MIN_INTERVAL_SECONDS
@@ -198,11 +255,7 @@ class AgentCall:
 
     async def run(self, message: str, runtime: Any) -> tuple[str, dict[str, Any]]:
         """실행을 시작하고 끝날 때까지 묻는다. (모델이 읽는 글, artifact)다."""
-        caller = _Caller(
-            owner=context_field(runtime, "owner_sub"),
-            # 표시를 모르는 문맥은 바깥 내용을 가진 대화로 알린다
-            outside=getattr(context_field(runtime, "outside"), "flagged", True),
-        )
+        caller = Caller.of(runtime)
         seconds = self._budget(runtime)
         ends_at = time.monotonic() + seconds
         run_id: str | None = None
@@ -231,31 +284,10 @@ class AgentCall:
             return self.timeout
         return max(0.0, min(self.timeout, deadline - time.monotonic()))
 
-    def _headers(self, caller: _Caller, *, started: bool) -> dict[str, str]:
-        """요청 하나의 머리다. 턴의 위임이 이 대상에 토큰을 실었으면 그 지금 토큰이고(갱신이 바꾼
-        토큰도 다음 요청부터 실린다) 끝났으면 `TurnTokenUnavailable` 이다. 아니면 인스턴스 토큰과
-        세션, 턴, 소유자다. 누구의 턴인지 모르면 보내지 않는다."""
-        headers = {OUTSIDE_HEADER: "1" if caller.outside else "0"}
-        calls = self.grants.current()
-        if calls is not None and calls.credentials.holds(self.target):
-            token = calls.credentials.token(self.target)
-            if token is None:
-                text = INTERRUPTED_MESSAGE if started else UNAVAILABLE_MESSAGE
-                raise TurnTokenUnavailable(text.format(tool=self.name))
-            headers["Authorization"] = f"Bearer {token}"
-            return headers
-        turn = current_turn()
-        if turn is None:
-            raise TurnTokenUnavailable(UNKNOWN_TURN_MESSAGE)
-        if self.instance_token:
-            headers["Authorization"] = f"Bearer {self.instance_token}"
-        headers[SESSION_HEADER] = turn.session_id
-        headers[TURN_HEADER] = turn.turn_id
-        if caller.owner:
-            headers[OWNER_HEADER] = quote(caller.owner, safe="")
-        return headers
+    def _headers(self, caller: Caller, *, started: bool) -> dict[str, str]:
+        return self.sender.headers(self.name, caller, started=started)
 
-    async def _start(self, message: str, caller: _Caller) -> CallAnswer:
+    async def _start(self, message: str, caller: Caller) -> CallAnswer:
         """실행을 시작한다. 보내지 못했거나 플랫폼이 거절했으면 Tool 오류다. 다시 하지 않는다."""
         try:
             response = await self.http().post(
@@ -270,13 +302,13 @@ class AgentCall:
                 START_FAILED_MESSAGE.format(tool=self.name, error=type(e).__name__)
             ) from None
         if not response.is_success:
-            raise await self._refused(response)
+            raise await refused(self.name, response)
         answer = _answer(response)
         if answer is None:
             raise AgentCallError(BAD_ANSWER_MESSAGE.format(tool=self.name))
         return answer
 
-    async def _poll(self, run_id: str, caller: _Caller, ends_at: float) -> CallAnswer:
+    async def _poll(self, run_id: str, caller: Caller, ends_at: float) -> CallAnswer:
         """실행의 지금 상태를 묻는다. 연결 오류, 5xx, 429, 모양이 다른 답은 쉬었다 다시 묻는다.
         제한 시간은 부른 쪽의 `asyncio.timeout` 이 끊는다."""
         delay = self.retry_initial
@@ -293,7 +325,7 @@ class AgentCall:
             await asyncio.sleep(delay)
             delay = min(delay * 2, POLL_RETRY_MAX_SECONDS)
 
-    async def _poll_once(self, run_id: str, caller: _Caller, wait: int) -> CallAnswer | None:
+    async def _poll_once(self, run_id: str, caller: Caller, wait: int) -> CallAnswer | None:
         """묻기 한 번이다. None 이면 다시 묻는다. 플랫폼이 거절했으면(다시 하지 않는 4xx) Tool
         오류다."""
         try:
@@ -309,10 +341,10 @@ class AgentCall:
         if response.is_success:
             return _answer(response)
         if 400 <= response.status_code < 500 and response.status_code not in RETRIED_STATUSES:
-            raise await self._refused(response)
+            raise await refused(self.name, response)
         return None
 
-    async def _cancel(self, run_id: str, caller: _Caller, reason: str) -> bool:
+    async def _cancel(self, run_id: str, caller: Caller, reason: str) -> bool:
         """실행을 취소한다. 받아들여졌으면 참이다. 실패는 삼킨다. 실행의 제 한도와 위임의 끝이
         마지막 그물이다."""
         try:
@@ -329,7 +361,7 @@ class AgentCall:
             return False
         return response.is_success
 
-    async def _timed_out(self, run_id: str | None, caller: _Caller, seconds: float) -> str:
+    async def _timed_out(self, run_id: str | None, caller: Caller, seconds: float) -> str:
         """제한 시간을 넘긴 호출의 문장이다. 시작된 실행은 취소하고 그 결과를 말한다."""
         text = TIMEOUT_MESSAGE.format(tool=self.name, seconds=seconds)
         if run_id is None:
@@ -337,20 +369,6 @@ class AgentCall:
         if await self._cancel(run_id, caller, CANCEL_TIMEOUT):
             return text + TIMEOUT_CANCELLED
         return text + TIMEOUT_NOT_CANCELLED
-
-    async def _refused(self, response: httpx2.Response) -> AgentCallError:
-        """플랫폼이 거절한 호출의 Tool 오류다. 코드와 플랫폼의 문장, 한도가 있으면 한도를 싣는다."""
-        code, sentence, limit = _refusal(response)
-        log.warning("%s 호출을 플랫폼이 거절했다: %s %s", self.name, response.status_code, code)
-        kind = REFUSAL_KINDS.get(response.status_code)
-        if kind is not None:
-            await signal(TOOL_REFUSED, {"tool": self.name, "kind": kind})
-        parts = [REFUSED_MESSAGE.format(tool=self.name, code=code)]
-        if sentence:
-            parts.append(sentence)
-        if limit is not None:
-            parts.append(f"(limit: {limit})")
-        return AgentCallError(" ".join(parts))
 
     def _result(self, answer: CallAnswer) -> tuple[str, dict[str, Any]]:
         """끝난 실행의 Tool 결과다. 답 없이 끝났으면 그 코드의 Tool 오류다."""
@@ -369,7 +387,7 @@ class AgentCall:
         )
 
 
-def _tool_error(error: ToolException) -> str:
+def tool_error(error: ToolException) -> str:
     """`handle_tool_error` 다. 문장은 이 모듈과 turn_grants.py 가 정한 것이라 그대로 모델에게
     간다."""
     return str(error)
@@ -387,14 +405,15 @@ def build_ask_tool(call: AgentCall, description: str) -> BaseTool:
         name=call.name,
         description=description + DESCRIPTION_SUFFIX,
         args_schema=AskArgs,
-        handle_tool_error=_tool_error,
+        handle_tool_error=tool_error,
         response_format="content_and_artifact",
     )
 
 
 class AgentCalls:
-    """agent.json 의 Agent 소스 전부의 Tool 이다. 기동 때 한 번 만들고 재컴파일마다 같은 것을
-    넘긴다. 요청은 클라이언트 하나를 같이 쓴다."""
+    """agent.json 의 답을 기다리는 Agent 소스 전부의 Tool 이다. 기동 때 한 번 만들고 재컴파일마다
+    같은 것을 넘긴다. 요청은 클라이언트 하나를 같이 쓰고, 작업을 맡기는 소스의 Tool 도 이 자격과
+    클라이언트로 보낸다(`sender`, `client`)."""
 
     def __init__(
         self,
@@ -406,20 +425,25 @@ class AgentCalls:
     ) -> None:
         self._http = http
         self._owns_http = http is None
+        self._grants = grants
+        self._instance_token = instance_token
         self.tools_by_ref: dict[str, list[BaseTool]] = {}
-        for source in config.agent_sources:
+        for source in config.ask_sources:
             call = AgentCall(
                 name=source["allow"][0],
                 url=str(source["url"]).rstrip("/"),
-                target=(source["source"]["kind"], source["source"]["id"]),
+                sender=self.sender(source),
                 timeout=float(source["timeout_seconds"]),
-                grants=grants,
-                instance_token=instance_token,
-                http=self._client,
+                http=self.client,
             )
             self.tools_by_ref[source["ref"]] = [build_ask_tool(call, str(source["description"]))]
 
-    def _client(self) -> httpx2.AsyncClient:
+    def sender(self, source: dict[str, Any]) -> CallSender:
+        """Agent 소스 하나에게 가는 요청의 자격이다."""
+        target = (source["source"]["kind"], source["source"]["id"])
+        return CallSender(target, self._grants, self._instance_token)
+
+    def client(self) -> httpx2.AsyncClient:
         if self._http is None:
             self._http = httpx2.AsyncClient()
         return self._http

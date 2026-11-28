@@ -164,7 +164,7 @@
     },
     "tools": {
       "type": "array",
-      "description": "도구 소스다. MCP 소스는 런타임이 MultiServerMCPClient(streamable_http) 로 읽고 allow 로 이름을 거른다. Agent 소스(source.kind 가 agent, 기능 agent_tools)는 목록을 읽지 않고 이 항목으로 Tool 하나를 만든다. ref 는 문서 안에서 유일해야 한다.",
+      "description": "도구 소스다. MCP 소스는 런타임이 MultiServerMCPClient(streamable_http) 로 읽고 allow 로 이름을 거른다. Agent 소스(source.kind 가 agent, 기능 agent_tools)는 목록을 읽지 않고 이 항목으로 Tool 을 만든다. 답을 기다리는 소스는 Tool 하나이고, 작업을 맡기는 소스(mode 가 task)들은 Tool 다섯 한 벌을 같이 쓴다. ref 는 문서 안에서 유일해야 한다.",
       "items": {
         "type": "object",
         "additionalProperties": false,
@@ -174,25 +174,45 @@
           "required": ["source"]
         },
         "then": {
-          "$comment": "Agent 소스다. Tool 은 allow 의 이름 하나이고 설명과 제한 시간이 항목에 박혀 있다. 결과는 늘 바깥 내용이고 호출은 늘 쓰기라 inside·read 를 받지 않는다.",
-          "required": ["description", "timeout_seconds"],
+          "$comment": "Agent 소스다. 설명이 항목에 박혀 있고 MCP 의 칸을 받지 않는다. 결과는 늘 바깥 내용이다.",
+          "required": ["description"],
           "properties": {
             "transport": false,
             "auth": false,
             "web": false,
-            "inside": false,
-            "read": false,
-            "allow": {
-              "minItems": 1,
-              "maxItems": 1,
-              "items": { "pattern": "^ask_[a-z0-9_]+$", "maxLength": 36 }
-            },
             "timeouts": { "maxProperties": 0 }
+          },
+          "if": { "properties": { "mode": { "const": "task" } }, "required": ["mode"] },
+          "then": {
+            "$comment": "작업을 맡기는 소스다. Tool 은 작업 Tool 다섯이고 기다리는 시간이 없다. 기능 tool_safety 가 있으면 상태를 읽는 두 Tool 을 read 에, 호출받은 Agent 의 답을 싣지 않는 네 Tool 을 inside 에 적을 수 있다. 답을 읽어 오는 check_async_task 의 결과는 늘 바깥 내용이다.",
+            "properties": {
+              "timeout_seconds": false,
+              "allow": {
+                "minItems": 5,
+                "maxItems": 5,
+                "items": { "enum": ["start_async_task", "check_async_task", "update_async_task", "cancel_async_task", "list_async_tasks"] }
+              },
+              "inside": { "items": { "enum": ["start_async_task", "update_async_task", "cancel_async_task", "list_async_tasks"] } },
+              "read": { "items": { "enum": ["check_async_task", "list_async_tasks"] } }
+            }
+          },
+          "else": {
+            "$comment": "답을 기다리는 소스다. Tool 은 allow 의 이름 하나이고 제한 시간이 박혀 있다. 호출은 늘 쓰기라 inside·read 를 받지 않는다.",
+            "required": ["timeout_seconds"],
+            "properties": {
+              "inside": false,
+              "read": false,
+              "allow": {
+                "minItems": 1,
+                "maxItems": 1,
+                "items": { "pattern": "^ask_[a-z0-9_]+$", "maxLength": 36 }
+              }
+            }
           }
         },
         "else": {
           "required": ["transport", "auth"],
-          "properties": { "description": false, "timeout_seconds": false }
+          "properties": { "description": false, "timeout_seconds": false, "mode": false }
         },
         "properties": {
           "ref": {
@@ -218,7 +238,7 @@
             "type": "string",
             "format": "uri",
             "minLength": 1,
-            "description": "MCP 엔드포인트 URL 이다. 클러스터 안 Service 주소이며 compile 이 해석해 넣는다. Agent 소스면 그 Agent 를 부르는 플랫폼의 호출 경로다. 런타임은 여기에 호출을 시작하고 그 아래 runs/{run_id} 와 runs/{run_id}/cancel 을 부른다."
+            "description": "MCP 엔드포인트 URL 이다. 클러스터 안 Service 주소이며 compile 이 해석해 넣는다. Agent 소스면 그 Agent 를 부르는 플랫폼의 호출 경로다. 런타임은 여기에 호출을 시작하고 그 아래 runs/{run_id} 와 runs/{run_id}/cancel 을 부른다. 작업을 맡기는 소스면 그 Agent 의 Agent Protocol 경로이고 런타임은 그 아래 threads 의 경로 다섯을 부른다."
           },
           "transport": {
             "const": "streamable_http",
@@ -229,13 +249,17 @@
             "type": "array",
             "uniqueItems": true,
             "items": { "type": "string", "minLength": 1 },
-            "description": "허용 툴 이름이다. 비어 있으면 tools/list 가 주는 전부를 쓴다. Agent 소스면 그 소스의 Tool 이름 하나다."
+            "description": "허용 툴 이름이다. 비어 있으면 tools/list 가 주는 전부를 쓴다. Agent 소스면 그 소스의 Tool 이름 하나이거나 작업 Tool 다섯이다."
+          },
+          "mode": {
+            "const": "task",
+            "description": "Agent 소스가 작업을 맡기는 소스라는 표시다. 런타임이 이 소스들로 작업 Tool 다섯 한 벌을 만들고 메인 에이전트만 그것을 쓴다. 없으면 답을 기다리는 호출이다."
           },
           "description": {
             "type": "string",
             "minLength": 1,
             "maxLength": 1024,
-            "description": "Agent 소스의 Tool 설명이다. 배포 때 박힌 것이고 부르는 모델이 읽는다."
+            "description": "Agent 소스의 Tool 설명이다. 배포 때 박힌 것이고 부르는 모델이 읽는다. 작업을 맡기는 소스면 맡길 수 있는 Agent 의 목록에 그 이름과 함께 실린다."
           },
           "timeout_seconds": {
             "type": "integer",

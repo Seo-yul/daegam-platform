@@ -15,7 +15,8 @@ TTL 과 기록 보존 기간을 가르는 규칙(D46)도 Postgres 와 같다. `e
 하나를 지킨다. 만들기 스크립트(CREATE_LUA)가 그 키를 SET NX 로 잡은 뒤에만 해시와 정렬 집합을
 쓰므로 같은 실행 id 의 두 만들기 가운데 하나만 이긴다. 키는 색인 행을 지울 때 함께 지운다. 실행
 세션은 최근 순·사용자별 정렬 집합을 따로 둔다(`sessions:runs:*`). Agent 하나가 하루 500 번 돌고
-보존 기간 동안 남으므로 채팅 목록이 실행 세션을 훑지 않게 하려는 것이다.
+보존 기간 동안 남으므로 채팅 목록이 실행 세션을 훑지 않게 하려는 것이다. 작업 세션(runs.py)은
+다음 실행마다 실행 키를 하나 더 잡고(TAKE_RUN_LUA) 앞 실행의 id 를 해시 칸 `past_runs` 에 둔다.
 
 턴이 리스를 풀지 못하고 끝난 세션(P79 3절)은 해시 칸 `turn_open`(잡은 턴의 토큰)이 리스 키 없이
 남는다. 잡기 스크립트가 그 칸을 적고 세션 id 를 `turns:open` 집합에 넣으며, 풀기와 되살리기
@@ -136,6 +137,27 @@ for i = 2, 4 do
 end
 return false
 """
+
+# 작업 세션의 다음 실행이다(runs.py). 앞머리(HELD_LEASE_LUA)가 리스의 토큰을 보고 아니면 0 이다.
+# 그 실행 키를 SET NX 로 잡고, 이미 있으면 아무것도 쓰지 않고 그 키가 든 세션 id 를 돌려준다.
+# 잡았으면 해시의 run_id 를 그 id 로 바꾸고 앞 실행의 id 를 past_runs(JSON 배열)에 보태며 1 을
+# 돌려준다. 앞 실행의 키는 그대로 남아 그 id 로도 세션을 찾는다. KEYS 는 session:{sid}·
+# turn_lease:{sid}·run:{run_id} 이고 ARGV 는 토큰, 세션 id, 실행 id 다
+TAKE_RUN_LUA = (
+    HELD_LEASE_LUA
+    + """if redis.call('EXISTS', KEYS[1]) == 0 then
+  return 0
+end
+if not redis.call('SET', KEYS[3], ARGV[2], 'NX') then
+  return redis.call('GET', KEYS[3])
+end
+local past = redis.call('HGET', KEYS[1], 'past_runs')
+local ids = past and cjson.decode(past) or {}
+ids[#ids + 1] = redis.call('HGET', KEYS[1], 'run_id')
+redis.call('HSET', KEYS[1], 'run_id', ARGV[3], 'past_runs', cjson.encode(ids))
+return 1
+"""
+)
 
 # 턴 리스 잡기다(D65). 세션 해시가 있고 열린 표시(turn_open)가 없을 때만 SET NX PX 로 잡는다(P79
 # 1절). 잡았으면 같은 스크립트 안에서 세션 해시의 turn_id 를 지우고(새 시도가 제 id 를 적기 전에 앞
@@ -431,6 +453,7 @@ def _from_hash(mapping: Mapping[str, str], *, running: bool = False) -> SessionR
         outside_at=when("outside_at"),
         run_id=mapping.get("run_id"),
         untrusted=mapping.get("untrusted") == "1",
+        task=mapping.get("task") == "1",
         **turn_record_fields(mapping),
     )
 
@@ -508,6 +531,7 @@ class RedisSessionIndex:
         self._renew_script = client.register_script(RENEW_LUA)
         self._write_script = client.register_script(WRITE_LUA)
         self._create_script = client.register_script(CREATE_LUA)
+        self._take_run_script = client.register_script(TAKE_RUN_LUA)
         self._repair_script = client.register_script(REPAIR_LUA)
         self._align_script = client.register_script(ALIGN_LUA)
         self._prune_script = client.register_script(PRUNE_OPEN_LUA)
@@ -589,6 +613,28 @@ class RedisSessionIndex:
         """실행 키가 든 세션 id 의 한 줄이다. 키는 색인 행을 지울 때까지 남아 닫힌 세션도 찾는다."""
         holder = await self._client.get(self._run_key(run_id))
         return await self.get(holder) if holder else None
+
+    async def take_run(self, session_id: str, token: str, run_id: str) -> SessionRecord:
+        """스크립트 하나(TAKE_RUN_LUA)가 리스의 토큰을 보고 실행 키를 잡은 뒤 해시를 고친다. 빈
+        토큰은 스크립트가 검사 없는 쓰기로 읽으므로 받지 않는다."""
+        if not token:
+            raise ValueError("a held write needs the lease token")
+        taken = await self._take_run_script(
+            keys=[
+                self._session_key(session_id),
+                turn_lease_key(self._prefix, session_id),
+                self._run_key(run_id),
+            ],
+            args=[token, session_id, run_id],
+        )
+        if taken == 0:
+            raise refused()
+        if taken != 1:
+            raise RunTaken(taken)
+        row = await self.get(session_id)
+        if row is None:
+            raise refused()
+        return row
 
     async def _fetch(self, session_ids: Iterable[str]) -> list[SessionRecord]:
         """sid 목록의 해시와 리스 키를 파이프라인 하나(HGETALL, EXISTS)로 읽는다. 지워진 해시는
@@ -958,15 +1004,19 @@ class RedisSessionIndex:
 
     async def delete(self, session_id: str) -> None:
         """색인 행을 통째로 지운다. 해시·임차·중지 표시·실행 키와 정렬 집합, turns:open 에서 함께
-        빠져야 하므로 MULTI 하나다. 사용자 집합과 실행 키의 이름을 알려면 user_sub 와 run_id 가
-        필요한데 두 값은 만들 때 정해져 바뀌지 않으므로 MULTI 앞에 읽는다. 해시가 이미 없으면 채팅과
-        실행의 최근 순 집합과 상태 집합만 훑고 끝난다."""
+        빠져야 하므로 MULTI 하나다. 사용자 집합과 실행 키의 이름을 알려면 user_sub 와 세션이 쥔
+        실행 id(run_id, 작업 세션은 past_runs 도)가 필요해 MULTI 앞에 읽는다. user_sub 는 만들 때
+        정해져 바뀌지 않고, 실행 id 는 턴의 리스를 쥔 쓰기만 보태는데 지우기는 리스를 잡았거나 닫힌
+        세션에만 온다. 해시가 이미 없으면 채팅과 실행의 최근 순 집합과 상태 집합만 훑고 끝난다."""
         session_key = self._session_key(session_id)
-        user_sub, run_id = await self._client.hmget(session_key, ["user_sub", "run_id"])
+        user_sub, run_id, past_runs = await self._client.hmget(
+            session_key, ["user_sub", "run_id", "past_runs"]
+        )
         pipe = self._client.pipeline(transaction=True)
         pipe.delete(session_key, *self._lease_keys(session_id))
-        if run_id is not None:
-            pipe.delete(self._run_key(run_id))
+        held_runs = [*json.loads(past_runs or "[]"), *([run_id] if run_id is not None else [])]
+        for held in held_runs:
+            pipe.delete(self._run_key(held))
         for key in self._by_turn_keys():
             pipe.zrem(key, session_id)
         for name in STATUSES:

@@ -11,7 +11,9 @@
   Tool 에서 표시를 끄면 경고 `outside_mark_off` 다.
 - **게시한 Agent 를 부르는 Tool.** `ask_*`(종류 `agent`)의 결과는 늘 바깥 내용이고 호출은 늘
   쓰기다(P46 6.6절). 호출받은 Agent 가 바깥 내용을 읽었을 수 있고 제 Tool 로 데이터를 바꿀 수
-  있어서다. 런타임이 그 소스에 두 목록을 받지 않으므로 문서의 그 항목에는 싣지 않는다.
+  있어서다. 런타임이 그 소스에 두 목록을 받지 않으므로 문서의 그 항목에는 싣지 않는다. 작업을
+  맡기는 소스의 항목에는 싣는다(6.7절). 상태를 읽는 두 Tool 이 `read` 이고, 호출받은 Agent 의 답을
+  읽어 오는 `check_async_task` 를 뺀 넷이 `inside` 다. 그 넷의 결과는 작업 id 와 상태뿐이다.
 - **읽기 표시.** 바깥 내용 뒤의 승인 규칙이 쓰는 효과(`tool_effects.node_effects` 의 tool_safety)가
   `read` 거나 웹 Tool 이면 읽기다. 캔버스의 읽기 전용 표시는 서버가 읽기 여부를 알려 주지 않는
   Tool(`image`·`remote`·`entry`)에서만 읽기로 바꾸고 경고 `read_only_by_canvas` 를 낸다. `internal`
@@ -50,6 +52,9 @@ from daegam.services.tool_effects import (
     ORIGIN_AGENT,
     ORIGIN_INTERNAL,
     ORIGIN_SCRIPT,
+    TASK_ANSWER_TOOL,
+    TASK_TOOLS,
+    assigns_tasks,
     canvas_mark_applies,
     known_read,
     node_effects,
@@ -73,10 +78,13 @@ class NodeMarks:
 
 
 def _inside(name: str, node: WebNode) -> bool:
-    """결과가 바깥 내용이 아닌가. 웹 Tool, 백엔드 종류를 모르는 이름, 스크립트와 게시한 Agent 를
-    부르는 Tool 은 노드의 표시와 상관없이 늘 바깥이다(모듈 머리)."""
+    """결과가 바깥 내용이 아닌가. 웹 Tool, 백엔드 종류를 모르는 이름, 스크립트와 게시한 Agent 의
+    답을 싣는 Tool 은 노드의 표시와 상관없이 늘 바깥이다. 작업 Tool 가운데 답을 읽어 오지 않는
+    넷은 늘 안쪽이다(모듈 머리)."""
     origin = node.tools.origins.get(name)
-    if origin in (None, ORIGIN_SCRIPT, ORIGIN_AGENT) or node.tools.effect(name) == EFFECT_WEB:
+    if origin == ORIGIN_AGENT:
+        return name in TASK_TOOLS and name != TASK_ANSWER_TOOL
+    if origin in (None, ORIGIN_SCRIPT) or node.tools.effect(name) == EFFECT_WEB:
         return False
     override = node.data.outside.get(name)
     return origin == ORIGIN_INTERNAL if override is None else not override
@@ -106,14 +114,16 @@ def attach_tool_safety(
 ) -> dict[str, Any]:
     """기능 `tool_safety` 가 허락됐을 때의 붙이는 함수다. 소스마다 `inside`·`read` 를, Knowledge
     항목마다 `outside` 를 싣는다. 문맥의 핀을 따르므로 `apply_pins` 가 정한 `allow` 와 같은
-    이름이다. 게시한 Agent 를 부르는 소스는 건너뛴다(모듈 머리). 받은 문서는 바꾸지 않는다."""
+    이름이다. 게시한 Agent 를 부르는 소스는 작업을 맡기는 것만 싣는다(모듈 머리). 받은 문서는 바꾸지
+    않는다."""
     final = copy.deepcopy(document)
     a = analyze_structure(rev)
     graph = web_graph(rev, ctx.source_tools, ctx.tool_pins, a=a)
     for source in final["tools"]:
-        if source["source"]["kind"] == AGENT_SOURCE:
-            continue
         node = graph.nodes.get(source["ref"])
+        waits = node is None or not assigns_tasks(node.data)
+        if source["source"]["kind"] == AGENT_SOURCE and waits:
+            continue
         marks = node_marks(node) if node is not None else NodeMarks()
         source["inside"] = marks.inside
         source["read"] = marks.read

@@ -346,6 +346,20 @@ export const canvas = {
     agentRecording: { on: "켜짐", off: "꺼짐" },
     /** Agent 소스의 타임아웃 탭. */
     agentTimeout: "기다리는 시간을 넘기면 호출을 멈추고 호출받은 Agent 의 실행도 취소합니다.",
+    /** Agent 소스를 부르는 방식 (P46 6.7절). wait 는 답을 기다리는 ask_* 하나, task 는 작업 Tool 다섯이다. */
+    agentMode: {
+      label: "호출 방식",
+      wait: "답을 기다리기",
+      task: "작업으로 맡기기",
+      hint: {
+        wait: "호출받은 Agent 의 답이 올 때까지 이 턴이 기다립니다.",
+        task: "작업을 맡기고 이 턴은 바로 이어집니다. 모델은 사용자가 물을 때 작업의 상태와 답을 확인합니다. 작업이 끝나도 알림은 없습니다.",
+      },
+    },
+    /** 작업 Tool 다섯의 효과와 외부 내용 표시는 바꿀 수 없다 (P46 6.7절). */
+    agentTaskMarks: "맡기기, 이어서 지시하기, 취소는 쓰기 Tool 로 다루고 상태 확인과 목록은 읽기 Tool 로 다룹니다. 상태 확인으로 가져온 답은 외부 내용으로 표시합니다.",
+    /** 작업을 맡기는 Agent 소스의 타임아웃 탭. */
+    agentTaskTimeout: "맡긴 작업은 답을 기다리지 않으므로 타임아웃을 정하지 않습니다.",
     /** Agent 가 이 Tool 을 Gateway 보다 먼저 끊는다 (P50 7절). agent·gateway 는 초다. */
     timeoutShorter: (tool: string, agent: number, gateway: number): string =>
       `${tool} 의 타임아웃(${agent}초)이 Gateway 가 이 Tool 을 기다리는 시간(${gateway}초)보다 짧습니다. 느린 호출은 Agent 가 먼저 끊습니다.`,

@@ -37,6 +37,7 @@ from tests.app_fixtures import sid_of
 from tests.attachment_fixtures import stored
 from tests.conftest import chat, load_fixture, needs_pg, offline_doc, run_app
 from tests.store_fixtures import (
+    assert_a_task_session_holds_several_runs,
     assert_cancel_mark_follows_the_lease_token,
     assert_expire_skips_a_leased_session,
     assert_filters_updates_and_counts,
@@ -149,10 +150,11 @@ async def test_memory_index_purges_only_closed_rows() -> None:
     "contract",
     [
         assert_holds_one_session_per_run,
+        assert_a_task_session_holds_several_runs,
         assert_lists_run_sessions_on_request,
         assert_expire_skips_a_leased_session,
     ],
-    ids=["one-session-per-run", "runs-filter", "expire-skips-leased"],
+    ids=["one-session-per-run", "task-runs", "runs-filter", "expire-skips-leased"],
 )
 async def test_memory_index_keeps_the_run_contract(
     contract: Callable[[SessionIndex], Awaitable[None]],
@@ -374,10 +376,18 @@ async def test_real_postgres_renews_turns_by_token_and_never_revives_a_lapsed_le
         assert_filters_updates_and_counts,
         assert_purges_only_closed_rows,
         assert_holds_one_session_per_run,
+        assert_a_task_session_holds_several_runs,
         assert_lists_run_sessions_on_request,
         assert_expire_skips_a_leased_session,
     ],
-    ids=["filters", "purge", "one-session-per-run", "runs-filter", "expire-skips-leased"],
+    ids=[
+        "filters",
+        "purge",
+        "one-session-per-run",
+        "task-runs",
+        "runs-filter",
+        "expire-skips-leased",
+    ],
 )
 async def test_real_postgres_index_keeps_the_shared_contract(
     contract: Callable[[SessionIndex], Awaitable[None]],

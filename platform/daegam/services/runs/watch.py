@@ -27,7 +27,12 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
 from typing import Any
 
-from daegam.services.agent_runtime import AgentRuntimeProxy, serves_turns, transcript_items
+from daegam.services.agent_runtime import (
+    AgentRuntimeProxy,
+    ends_undecided,
+    serves_turns,
+    transcript_items,
+)
 from daegam.services.lease_worker import LeaseWorker
 from daegam.services.runs.events import approval_deadline
 from daegam.services.runs.fire import GONE_STATES
@@ -45,7 +50,6 @@ DEADLINE_PASSED = "approval_deadline"
 # 런타임 전사의 항목 종류 (agent-runtime/runtime/transcript.py)
 KIND_DONE = "done"
 KIND_ERROR = "error"
-KIND_INTERRUPT = "interrupt"
 CLOSED_SESSION_STATUS = "closed"
 
 
@@ -175,7 +179,7 @@ class RunWatchWorker(LeaseWorker[AgentRun]):
             await self._move(run, "succeeded", None, now)
         elif kind == KIND_ERROR:
             await self._move(run, "failed", str(last.get("code") or "turn_failed"), now)
-        elif kind == KIND_INTERRUPT and not last.get("resolved"):
+        elif ends_undecided(items):
             if session.get("status") == CLOSED_SESSION_STATUS:
                 await self._move(run, "refused", DEADLINE_PASSED, now)
                 return

@@ -125,6 +125,13 @@ TWO_ISSUERS = "two_issuers"
 # 부른다. 모르는 이미지는 그 항목을 스키마 위반으로 보므로 빼지 않는다
 AGENT_TOOLS = "agent_tools"
 
+# 다른 Agent 가 맡긴 작업의 세션(runs.py)과 다른 Agent 에게 작업을 맡기는 Tool 다섯
+# (agent_task_tools.py)이다. `/chat` 이 플랫폼 경로에서만 `task` 를 받아 세션에 두고, 그 세션은 턴이
+# 끝나도 닫히지 않으며 `session_id` 와 새 `run_id` 로 온 다음 실행을 새 턴으로 받는다. 문서에
+# 실리지 않는다. 옛 이미지는 `task` 를 버리고 첫 실행의 끝에 세션을 닫으므로, 플랫폼은 이 이름을
+# 알린 이미지의 Agent 에만 작업을 맡긴다
+AGENT_TASKS = "agent_tasks"
+
 # agent.json 의 features[] 에 실리는 문서 기능
 DOCUMENT_FEATURES: tuple[str, ...] = (
     PROVIDER_EXTRA_BODY,
@@ -155,6 +162,7 @@ CAPABILITIES: tuple[str, ...] = (
     TOOL_REFUSALS,
     SCALE_TO_ZERO,
     TWO_ISSUERS,
+    AGENT_TASKS,
 )
 KNOWN: frozenset[str] = frozenset(DOCUMENT_FEATURES) | frozenset(CAPABILITIES)
 

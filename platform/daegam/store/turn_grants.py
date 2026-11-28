@@ -163,6 +163,11 @@ class MongoTurnGrantStore:
             return False
         return True
 
+    async def turn_calls(self, key: str) -> int:
+        """위임 없는 턴이 key 로 센 호출 수다. 세지 않고 읽기만 한다."""
+        doc = await self.call_turns.find_one({"_id": key}, {"calls": 1})
+        return doc["calls"] if doc else 0
+
     async def closed(self, grant_ids: Collection[str], now: datetime) -> list[str]:
         """grant_ids 가운데 끝났거나 마감이 지났거나 기록이 없는 위임의 id 다. 그 위임이 시작한
         호출을 지켜보기가 끝낸다."""

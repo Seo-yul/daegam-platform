@@ -4,7 +4,8 @@
 `agent_tool_safety._inside`)과 `THIRD_PARTY_ORIGINS`(캔버스의 읽기 전용 표시가 효과를 내는 종류)다.
 화면 `ui/src/lib/toolSafety.ts` 가 같은 값을 두고, 검사 응답의 `ToolOrigin` 은 그 종류와 웹 Tool,
 code mode 의 스크립트(`ORIGIN_SCRIPT`, P56 6.5절), 게시한 Agent 를 부르는 Tool(`ORIGIN_AGENT`, P46
-6.6절)의 전부다.
+6.6절)의 전부다. 작업을 맡기는 노드의 Tool 다섯(`TASK_TOOLS`, P46 6.7절)과 그 가운데 읽는 것, 답을
+가져오는 것도 두 쪽이 따로 적는다.
 어긋나면 캔버스가 플랫폼이 렌더하지 않는 표시를 보인다. 플랫폼 쪽이 원본이므로 화면의 사본을 맞춘다.
 """
 
@@ -19,6 +20,9 @@ from daegam.services.tool_effects import (
     ORIGIN_INTERNAL,
     ORIGIN_PLATFORM,
     ORIGIN_SCRIPT,
+    TASK_ANSWER_TOOL,
+    TASK_READ_TOOLS,
+    TASK_TOOLS,
     THIRD_PARTY_ORIGINS,
 )
 from tests.helpers.source import (
@@ -44,6 +48,16 @@ def test_screen_origin_rules_match_the_platform() -> None:
     assert _ts_const(source, "ORIGIN_AGENT") == f'"{ORIGIN_AGENT}"', FIX
     third_party = re.findall(r'"([a-z]+)"', _ts_const(source, "THIRD_PARTY_ORIGINS"))
     assert set(third_party) == THIRD_PARTY_ORIGINS, FIX
+
+
+def test_screen_task_tools_match_the_platform() -> None:
+    """캔버스는 허용 Tool 에 작업 Tool 다섯을 두어 작업을 맡기는 노드를 만든다. 이름이 어긋나면
+    플랫폼이 그 노드를 답을 기다리는 노드로 읽고 `invalid_node_data` 로 막는다."""
+    source = read_source(TOOL_SAFETY_TS)
+    names = r'"([a-z_]+)"'
+    assert tuple(re.findall(names, _ts_const(source, "TASK_TOOLS"))) == TASK_TOOLS, FIX
+    assert set(re.findall(names, _ts_const(source, "TASK_READ_TOOLS"))) == TASK_READ_TOOLS, FIX
+    assert _ts_const(source, "TASK_ANSWER_TOOL") == f'"{TASK_ANSWER_TOOL}"', FIX
 
 
 def test_the_validate_origins_are_every_backend_kind_the_rules_know() -> None:
