@@ -355,7 +355,12 @@ U3_CTL="$(local_login_any "$U3" "$LOCAL_PW")"; [ -n "$U3_CTL" ] || die 2 "login 
 issue_ok 2 "$U3_CTL" "$TENANT" "e2e-pat rules"; TOK5="$ISSUED"; TOK5_ID="$ISSUED_ID"
 # STEP 4s 의 서비스 어카운트(P53b 6.7절). 관리자가 자기 비밀번호로 낸다. 토큰은 지금 받아 STEP 3 의 기다림이 덮게 한다
 sa_create 2 "$TENANT" "$SA_NAME" viewer
-if [ "$TARGET" = install ]; then SA_PW="$PASSWORD"; else SA_PW="$LOCAL_PW2"; fi
+# 설치본에서는 로그인 뒤에 관리자 비밀번호를 지우므로(lib/e2e_local_auth.sh) 여기서 다시 읽는다
+if [ "$TARGET" = install ]; then
+  SA_PW="$(install_e2e_password "$USER_NAME")" || die 2 "no password for $USER_NAME"
+else
+  SA_PW="$LOCAL_PW2"
+fi
 sa_issue 2 "$TENANT" "$SA_ID" "e2e-pat ci" password "$SA_PW"; TOK_SA="$SA_TOKEN"
 pass 2 "$U1 got a $TENANT token (ES256, kid pat-, iss $PUBLIC_URL, aud $MCP_AUDIENCE, groups [$T_GROUP]); wrong password 403 invalid_credentials; $OTHER 403 not_a_member; second $TENANT token, $U2's $OTHER token and developer $U3's $TENANT token issued"
 

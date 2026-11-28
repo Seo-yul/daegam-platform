@@ -161,13 +161,15 @@ RENDER_EPOCHS: dict[str, int] = {
     # 6: 노출 앞단이 백엔드 하나의 vMCP 이고, 옛 앞단이 도는 서버는 vMCP 앞단이 그 자리를
     #    넘겨받는다. 노출 NetworkPolicy 가 두 종류의 앞단 파드를 고른다 (P54 5·6절)
     # 7: 그 리비전이 아는 Tool 이름 밖의 것을 닫는 forbid 를 모든 내부 서버가 싣는다 (P52 2절)
-    KIND_MCP_SERVER: 7,
+    # 8: 프록시와 노출 앞단의 자원 요청이 실측을 따른다 (10m, 128Mi)
+    KIND_MCP_SERVER: 8,
     # 1: 감사, 이름 바꾼 툴의 필터, resources·prompts 표면, 백엔드마다의 호출 타임아웃, Cedar 참조,
     # 정적 백엔드 인증, Entry 마다의 토큰 (P50 4·6·7·8·9·12·13절)
     # 2: authz_policy 를 문장마다 정책 원소 하나로 (T63)
     # 3: local 모드에서 이 Gateway 에 묶인 위임 토큰의 permit 과 그 밖의 위임 토큰의 forbid,
     #    ConfigMap authzConfig 의 잠금 (P53 3.1절)
-    KIND_GATEWAY: 3,
+    # 4: vMCP 의 기본 자원 요청이 실측을 따른다 (10m, 128Mi)
+    KIND_GATEWAY: 4,
     # 1: MCP Server 소스마다의 토큰 env 와 init 의 토큰 표 지문 (P50 9절)
     # 2: 이벤트 수집 주소와 파드 이름·uid env (P37 3절)
     # 3: overrides 가 파드 템플릿에 단 app.kubernetes.io/name: mcpserver 를 뺀다 (T67)
@@ -178,11 +180,13 @@ RENDER_EPOCHS: dict[str, int] = {
     # 1: 원격 프록시의 역할 없는 ServiceAccount (P50 10절)
     # 2: 0.52 클러스터에서 image 항목의 테넌트 울타리 (P50 11절)
     # 3: image 항목의 백엔드 파드의 라벨 (T67)
-    KIND_HUB_ITEM: 3,
+    # 4: image 항목의 프록시 자원 요청이 실측을 따른다 (10m, 128Mi)
+    KIND_HUB_ITEM: 4,
     # 1: 원격 프록시 복제본의 역할 없는 ServiceAccount (P50 10절)
     # 2: 0.52 클러스터에서 image 복제본의 테넌트 울타리 (P50 11절)
     # 3: image 복제본과 플랫폼 fetch 복제본의 백엔드 파드의 라벨 (T67)
-    KIND_CLONE: 3,
+    # 4: 복제본의 프록시 자원 요청이 실측을 따른다 (10m, 128Mi)
+    KIND_CLONE: 4,
 }
 # 종류마다 렌더가 따르는 클러스터 게이트 (P50 2절). 그 클러스터에서 이 기능의 판정이 바뀌면 그
 # 종류의 기대 렌더 번호가 달라져(`render_epoch`) 살아 있는 문서가 재적용의 속도로 다시 렌더된다.

@@ -40,6 +40,11 @@
 
 name: e2e-cluster
 
+# 손으로 돌렸거나 매주 돈 실행의 이름이 고른 게이트를 싣는다. release-images 의 evidence 잡이 이 이름과 그 커밋의
+# 트리로, 후보 태그가 다시 돌리지 않아도 되는 통과한 실행을 찾는다(scripts/lib/e2e_select.py earlier). 태그가 부른
+# 실행은 release-images 의 이름을 가진다
+run-name: e2e-cluster e2e=${{ github.event_name == 'schedule' && 'all' || inputs.e2e }}
+
 on:
   workflow_call:
     inputs:

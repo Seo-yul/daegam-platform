@@ -1,7 +1,9 @@
 # 릴리스 이미지(D53, D66). 릴리스 태그를 올리면 돈다. 손으로 다시 돌릴 수도 있다. 태그 꼴이 할 일을 정한다.
 #   X.Y.Z-rcN  candidate: 그 태그의 코드로 테스트 워크플로 일곱과 클러스터 e2e 잡을 먼저 돌리고, 모두 통과하면 제품
-#              이미지를 굽고 레지스트리에 올려 서명한다. make push-images 를 그대로 돌리므로 태그·서명·취약점 보고는 개발
-#              머신에서 올릴 때와 같다(docs/guide/images.md 3절)
+#              이미지를 굽고 레지스트리에 올려 서명한다. 같은 트리에서 태그가 고른 게이트를 모두 돌려 통과한
+#              e2e-cluster 실행(손으로 돌렸거나 매주 돈 것)이 있으면 클러스터 e2e 는 다시 돌지 않는다(evidence 잡).
+#              make push-images 를 그대로 돌리므로 태그·서명·취약점 보고는 개발 머신에서 올릴 때와 같다
+#              (docs/guide/images.md 3절)
 #   X.Y.Z      promote: 굽지 않는다. 그 정식 태그가 가리키는 Release 병합 커밋이 합친 후보 태그를 읽고, 후보 이미지의
 #              서명을 확인한 뒤 같은 digest 에 정식 태그를 붙인다(scripts/promote-images.sh). 서명 키를 쓰지 않는다
 # 태그를 올리면 GitHub 는 그 태그 커밋에 든 이 파일을 읽는다. 이 파일이 없는 커밋의 태그는 손으로 돌린다.
@@ -117,12 +119,69 @@ jobs:
     uses: ./.github/workflows/sandbox.yml
     with:
       ref: ${{ needs.route.outputs.sha }}
-  # 같은 태그의 코드로 일회용 k3d 클러스터 위에서 e2e 를 조각으로 나눠 돌린다(조각은 e2e-cluster.yml
-  # 머리말, docs/guide/e2e.md 20절). 조각 하나라도 실패하면 candidate 가 돌지 않는다. 태그 메시지의 e2e: 줄이 고른
-  # 게이트도 막고, scripts/lib/e2e_select.py 의 NOT_BLOCKING_YET 게이트만 실패해도 막지 않는다
-  e2e-cluster:
+  # 태그의 커밋과 트리가 같은 커밋에서 이 태그가 고른 k3d 게이트를 모두 돌려 통과한 e2e-cluster 실행을 찾는다. 릴리스
+  # 절차는 태그를 달기 전에 develop 에서 그 실행을 돌리므로, 있으면 같은 코드에 같은 게이트를 다시 돌리지 않는다. 세는
+  # 실행은 손으로 돌렸거나 매주 돈 것이고, 고른 게이트는 그 실행의 이름(e2e-cluster.yml 의 run-name)에서 읽는다. 찾지
+  # 못했거나 찾다가 실패하면 run 이 비어 클러스터 e2e 가 돈다. 통과한 실행은 가장 새 것부터 서른 개를 본다
+  evidence:
     needs: route
     if: needs.route.outputs.kind == 'candidate'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      run: ${{ steps.find.outputs.run }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.route.outputs.sha }}
+          sparse-checkout: scripts/lib/e2e_select.py
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - id: find
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RELEASE: ${{ needs.route.outputs.release }}
+          SHA: ${{ needs.route.outputs.sha }}
+        run: |
+          find_run() {
+            local object tree id event sha title t
+            object="$(gh api "repos/$REPO/git/ref/tags/$RELEASE" --jq '.object.type + " " + .object.sha')" || return 1
+            [ "${object%% *}" = tag ] || return 1
+            gh api "repos/$REPO/git/tags/${object#* }" --jq .message >"$RUNNER_TEMP/message" || return 1
+            tree="$(gh api "repos/$REPO/commits/$SHA" --jq .commit.tree.sha)" || return 1
+            gh api "repos/$REPO/actions/workflows/e2e-cluster.yml/runs?status=success&per_page=30" \
+              --jq '.workflow_runs[] | [.id, .event, .head_sha, .display_title] | @tsv' >"$RUNNER_TEMP/runs.tsv" || return 1
+            : >"$RUNNER_TEMP/runs.jsonl"
+            while IFS=$'\t' read -r id event sha title; do
+              t="$(gh api "repos/$REPO/commits/$sha" --jq .commit.tree.sha)" || continue
+              jq -cn --argjson id "$id" --arg event "$event" --arg tree "$t" --arg title "$title" \
+                '{id: $id, event: $event, tree: $tree, title: $title}' >>"$RUNNER_TEMP/runs.jsonl"
+            done <"$RUNNER_TEMP/runs.tsv"
+            python3 scripts/lib/e2e_select.py earlier "$tree" "$RUNNER_TEMP/runs.jsonl" <"$RUNNER_TEMP/message"
+          }
+          run="$(find_run)" || run=""
+          [[ $run =~ ^[0-9]+$ ]] || run=""
+          echo "run=$run" >>"$GITHUB_OUTPUT"
+          if [ -n "$run" ]; then
+            msg="cluster e2e does not run again: run $run passed every gate this tag picks on the same tree"
+            echo "::notice::$msg"
+            echo "$msg (https://github.com/$REPO/actions/runs/$run)" >>"$GITHUB_STEP_SUMMARY"
+          else
+            echo "No earlier passing e2e-cluster run covers this tag on its tree: cluster e2e runs" >>"$GITHUB_STEP_SUMMARY"
+          fi
+
+  # 같은 태그의 코드로 일회용 k3d 클러스터 위에서 e2e 를 조각으로 나눠 돌린다(조각은 e2e-cluster.yml
+  # 머리말, docs/guide/e2e.md 20절). 조각 하나라도 실패하면 candidate 가 돌지 않는다. 태그 메시지의 e2e: 줄이 고른
+  # 게이트도 막고, scripts/lib/e2e_select.py 의 NOT_BLOCKING_YET 게이트만 실패해도 막지 않는다. evidence 가 통과한
+  # 앞 실행을 찾았으면 돌지 않는다
+  e2e-cluster:
+    needs: [route, evidence]
+    if: needs.route.outputs.kind == 'candidate' && needs.evidence.outputs.run == ''
     uses: ./.github/workflows/e2e-cluster.yml
     with:
       ref: ${{ needs.route.outputs.sha }}
@@ -131,8 +190,17 @@ jobs:
   # 기본은 arm64 실행기에서 arm64 만 굽는다(QEMU 없음).
   # make push-images 의 PUSH_PLATFORMS 기본이 linux/arm64 다. amd64 는 이 파일 끝에 주석으로 둔 잡이 켤 때만 굽는다
   candidate:
-    needs: [route, test-platform, test-agent-runtime, test-mcp-runtime, test-mock-oidc, test-ui, test-web-tools, test-sandbox, e2e-cluster]
-    if: needs.route.outputs.kind == 'candidate'
+    needs: [route, evidence, test-platform, test-agent-runtime, test-mcp-runtime, test-mock-oidc, test-ui, test-web-tools, test-sandbox, e2e-cluster]
+    # 건너뛴 잡이 있으면 기본으로는 이 잡도 건너뛰므로 결과를 하나씩 적는다. 클러스터 e2e 만, evidence 가 앞 실행을
+    # 찾았을 때에 한해 건너뛴 것을 받는다
+    if: >-
+      !cancelled() && needs.route.outputs.kind == 'candidate'
+      && needs.route.result == 'success' && needs.evidence.result == 'success'
+      && needs.test-platform.result == 'success' && needs.test-agent-runtime.result == 'success'
+      && needs.test-mcp-runtime.result == 'success' && needs.test-mock-oidc.result == 'success'
+      && needs.test-ui.result == 'success' && needs.test-web-tools.result == 'success'
+      && needs.test-sandbox.result == 'success'
+      && (needs.e2e-cluster.result == 'success' || (needs.e2e-cluster.result == 'skipped' && needs.evidence.outputs.run != ''))
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 90
     environment: release

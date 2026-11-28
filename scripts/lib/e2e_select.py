@@ -8,6 +8,9 @@
   e2e_select.py check   고른 것을 조각별로 찍는다(태그를 달기 전에 본다)
   e2e_select.py matrix  e2e-cluster.yml 의 plan 잡이 쓰는 matrix JSON 한 줄
   e2e_select.py install scripts/run_e2e_install_extra.sh 가 돌 게이트(공백으로 나눈 한 줄)
+  e2e_select.py earlier TREE RUNS  같은 트리에서 이 태그가 고른 k3d 게이트를 모두 돌려 통과한 앞 실행의 id 한 줄.
+                        없으면 빈 줄이다. RUNS 는 줄마다 {"id", "event", "title", "tree"} 인 JSON 파일이다
+                        (release-images.yml 의 evidence 잡이 통과한 e2e-cluster 실행에서 만든다)
 
 platform/tests/test_e2e_select.py 가 단위 테스트한다. 맥의 시스템 python3(3.9)
 에서도 돌아야 하므로 3.10 이후 문법을 쓰지 않는다.
@@ -148,6 +151,38 @@ def chosen(message: str) -> set[str]:
     return {g for g in picked if COVERED_BY.get(g) not in picked}
 
 
+# 손으로 돌렸거나 매주 돈 e2e-cluster 실행의 이름(e2e-cluster.yml 의 run-name). 그 실행이 고른 줄을 싣는다.
+# 태그가 부른 실행은 release-images 의 이름을 가지므로 여기에 맞지 않는다
+RUN_TITLE = re.compile(r"e2e-cluster e2e=(.*)")
+EARLIER_EVENTS = ("workflow_dispatch", "schedule")
+
+
+def k3d_gates(picked: set[str]) -> set[str]:
+    """고른 게이트 가운데 e2e-cluster 가 k3d 에서 도는 것. 설치본에서만 도는 게이트는 뺀다."""
+    return {g for g in picked if any(g == name for gates in OPTIONAL.values() for name, _ in gates)}
+
+
+def earlier(message: str, tree: str, runs: list[dict]) -> int | None:
+    """태그 메시지가 고른 k3d 게이트를 같은 트리에서 모두 돌린, 통과한 앞 실행의 id. 없으면 None 이다.
+
+    늘 도는 게이트는 모든 실행이 돈다. 이름이 꼴에 맞지 않거나 모르는 게이트를 실은 실행은 세지 않는다.
+    """
+    want = k3d_gates(chosen(message))
+    for run in runs:
+        if not tree or run.get("tree") != tree or run.get("event") not in EARLIER_EVENTS:
+            continue
+        m = RUN_TITLE.fullmatch(str(run.get("title") or ""))
+        if not m:
+            continue
+        try:
+            had = k3d_gates(chosen("e2e: " + m.group(1)))
+        except ValueError:
+            continue
+        if want <= had:
+            return int(run["id"])
+    return None
+
+
 def matrix(picked: set[str]) -> dict:
     """고른 게이트 -> e2e-cluster.yml 의 matrix.
 
@@ -199,8 +234,22 @@ def describe(picked: set[str]) -> str:
 
 
 def main(argv: list[str]) -> int:
+    if len(argv) == 4 and argv[1] == "earlier":
+        try:
+            with open(argv[3], encoding="utf-8") as f:
+                runs = [json.loads(line) for line in f if line.strip()]
+            found = earlier(sys.stdin.read(), argv[2], runs)
+        except ValueError as e:
+            print(f"e2e_select: {e}", file=sys.stderr)
+            return 2
+        print("" if found is None else found)
+        return 0
     if len(argv) != 2 or argv[1] not in ("check", "matrix", "install"):
-        print(f"usage: {argv[0]} check|matrix|install < tag-message", file=sys.stderr)
+        print(
+            f"usage: {argv[0]} check|matrix|install < tag-message\n"
+            f"       {argv[0]} earlier TREE RUNS < tag-message",
+            file=sys.stderr,
+        )
         return 2
     try:
         picked = chosen(sys.stdin.read())

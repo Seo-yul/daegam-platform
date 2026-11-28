@@ -66,12 +66,13 @@ FOREIGN_POD_SECURITY: dict[str, Any] = {"seccompProfile": {"type": "RuntimeDefau
 # 요구하는 클러스터에서 LimitRange 가 덮지 못하는 경우(Deployment·StatefulSet 수준의 강제)까지
 # 통과하려고 CR 에 직접 적는다. ToolHive 는 MCPServer·MCPRemoteProxy 의 spec.resources 를 프록시
 # 컨테이너에 넣고, vMCP 는 spec.resources 를 읽지 않아 podTemplateSpec 의 vmcp 컨테이너로만
-# 바뀐다(ToolHive 0.51.2). 메모리 실측은 0.46.0 에서 잰 프록시 16~27MiB, vMCP 33MiB 다. 호출마다
-# 새 dict 를 준다(매니페스트끼리 공유하지 않는다)
+# 바뀐다(ToolHive 0.51.2). 실측은 0.53.0 에서 잰 프록시 CPU 3m·메모리 103MiB, vMCP CPU 2m·메모리
+# 107MiB 다. 메모리 요청이 실제보다 작으면 노드 메모리가 모자랄 때 이 파드가 먼저 쫓겨나므로
+# 요청을 실제보다 크게 둔다. 호출마다 새 dict 를 준다(매니페스트끼리 공유하지 않는다)
 def proxy_resources() -> dict[str, Any]:
     """MCPServer·MCPRemoteProxy 의 프록시와 기본 vMCP 컨테이너."""
     return {
-        "requests": {"cpu": "20m", "memory": "32Mi"},
+        "requests": {"cpu": "10m", "memory": "128Mi"},
         "limits": {"cpu": "500m", "memory": "256Mi"},
     }
 
