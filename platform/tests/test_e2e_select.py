@@ -23,6 +23,7 @@ from e2e_select import (
     OPTIONAL,
     chosen,
     describe,
+    earlier,
     install,
     main,
     matrix,
@@ -256,3 +257,79 @@ def test_runs_is_an_install_gate_only() -> None:
         "e2e-runs" not in m["blocking_gates"] + m["soft_gates"] for m in _shards(picked).values()
     )
     assert "e2e-runs" in install(chosen("e2e: all"))
+
+
+RELEASE_WORKFLOW = REPO / ".github" / "workflows" / "release-images.yml"
+TREE = "a" * 40
+
+
+def _run(
+    title: str, *, event: str = "workflow_dispatch", tree: str = TREE, run_id: int = 7
+) -> dict:
+    return {"id": run_id, "event": event, "title": title, "tree": tree}
+
+
+def test_an_earlier_run_of_every_picked_gate_on_the_same_tree_counts() -> None:
+    tag = SIGNED.format(line="e2e: e2e-mcp-auth e2e-pat")
+    assert earlier(tag, TREE, [_run("e2e-cluster e2e=all")]) == 7
+    assert earlier(tag, TREE, [_run("e2e-cluster e2e=e2e-mcp-auth,e2e-netpol")]) == 7
+    # 설치본에서만 도는 게이트(e2e-pat)는 클러스터 e2e 가 돌지 않으므로 견주지 않는다
+    assert earlier(SIGNED.format(line="e2e: all"), TREE, [_run("e2e-cluster e2e=all")]) == 7
+    assert earlier(SIGNED.format(line=""), TREE, [_run("e2e-cluster e2e=")]) == 7
+    weekly = _run("e2e-cluster e2e=all", event="schedule")
+    assert earlier(SIGNED.format(line="e2e: all"), TREE, [weekly]) == 7
+
+
+@pytest.mark.parametrize(
+    "run",
+    [
+        _run("e2e-cluster e2e=all", tree="b" * 40),
+        _run("e2e-cluster e2e=e2e-agent-oidc"),
+        _run("e2e-cluster e2e="),
+        _run("e2e-cluster e2e=all", event="push"),
+        _run("release-images"),
+        _run("e2e-cluster e2e=all e2e-nope"),
+        _run(""),
+    ],
+    ids=["other-tree", "other-gate", "no-gate", "tag-run", "other-name", "unknown-gate", "no-name"],
+)
+def test_an_earlier_run_that_does_not_cover_the_tag_does_not_count(run: dict) -> None:
+    assert earlier(SIGNED.format(line="e2e: e2e-mcp-auth"), TREE, [run]) is None
+
+
+def test_an_earlier_run_needs_a_tree() -> None:
+    assert earlier(SIGNED.format(line=""), "", [_run("e2e-cluster e2e=all", tree="")]) is None
+
+
+def test_main_prints_the_earlier_run(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path
+) -> None:
+    runs = tmp_path / "runs.jsonl"
+    runs.write_text('{"id": 9, "event": "schedule", "title": "e2e-cluster e2e=all", "tree": "t"}\n')
+    monkeypatch.setattr("sys.stdin", io.StringIO("e2e: all"))
+    assert main(["e2e_select.py", "earlier", "t", str(runs)]) == 0
+    assert capsys.readouterr().out == "9\n"
+    monkeypatch.setattr("sys.stdin", io.StringIO("e2e: all"))
+    assert main(["e2e_select.py", "earlier", "u", str(runs)]) == 0
+    assert capsys.readouterr().out == "\n"
+
+
+def test_the_cluster_run_names_the_gates_it_picked() -> None:
+    # evidence 잡이 이 이름에서 앞 실행이 고른 게이트를 읽는다
+    name = yaml.safe_load(WORKFLOW.read_text())["run-name"]
+    assert name.startswith("e2e-cluster e2e=") and "inputs.e2e" in name and "'all'" in name
+    assert e2e_select.RUN_TITLE.fullmatch("e2e-cluster e2e=all")
+
+
+def test_the_candidate_builds_after_a_skipped_cluster_run_only_with_an_earlier_run() -> None:
+    jobs = yaml.safe_load(RELEASE_WORKFLOW.read_text())["jobs"]
+    assert "needs.evidence.outputs.run == ''" in jobs["e2e-cluster"]["if"]
+    cond = " ".join(jobs["candidate"]["if"].split())
+    assert "!cancelled()" in cond
+    assert (
+        "(needs.e2e-cluster.result == 'success' || (needs.e2e-cluster.result == 'skipped' && "
+        "needs.evidence.outputs.run != ''))" in cond
+    )
+    for job in jobs["candidate"]["needs"]:
+        if job != "e2e-cluster":
+            assert f"needs.{job}.result == 'success'" in cond, job
