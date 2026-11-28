@@ -331,6 +331,7 @@ VMCP_PORT="${E2E_VMCP_PORT:-$PORT_AGENT_VMCP}"
 RULES_PORT="${E2E_RULES_PORT:-$PORT_AGENT_RULES}"
 RULES_STRANGER="svc:agent:agent-e2e-unnamed"; RULES_RENAMED="add_numbers"
 RULES_OUTSIDER="e2e-rules-outsider"   # 11r 의 위임 토큰에 싣는, 어느 테넌트의 멤버도 아닌 사람
+RULES_OPEN_WITHIN=60      # 11r: 규칙이 이름 댄 Agent 의 첫 Add 가 통과해야 하는 초
 RULES_SET=0               # 11r 이 STEP 3 의 MCP Server 에 규칙을 둔 동안 1 이다. EXIT 트랩이 걷는다
 ADMIN_SUB=""; APPROVER_SUB=""; APPROVER_TOKEN=""; TURN_GW_ID=""; TURN_MCP_GROUP=""
 TURN_ROLE_BEFORE=""    # 1t 전 관리자의 $TENANT manual 역할 (lib/e2e_turn_tokens.sh turn_member_developer)
@@ -1972,10 +1973,19 @@ if [ "$AUTH_MODE" = local ]; then
   "${K[@]}" -n "$AG_NS" rollout status "deployment/$AG_K8S" --timeout="${READY_TIMEOUT}s" >/dev/null \
     || die 11r "deployment/$AG_K8S did not finish rolling within ${READY_TIMEOUT}s"
   # 채팅: 이름 댄 Agent 는 사람이 누구든 Add 를 부른다. 조건을 어긴 호출은 백엔드에 가지 않는 Tool 오류다
-  code="$(chat "/agents/$AG_ID/chat" "$(msg "$ADD_MSG")")"
-  [ "$code" = 200 ] || { cp "$WORK/sse" "$WORK/body"; die 11r "POST /agents/$AG_ID/chat (Add) -> $code"; }
-  { [ "$(sse_ 'first("tool_result")["status"]')" = success ] && sse_ 'first("tool_result")["content"]' | grep -q 7; } \
-    || die 11r "Add under a rule naming $AG_NAME: $(sse_ 'names') tool_result=$(sse_ 'first("tool_result")')"
+  # 상태가 재발급을 다 알린 뒤에도 서버가 이 Agent 의 새 토큰을 받기까지 틈이 있을 수 있다(후보 태그의 실행에서 한 번
+  # 거절됐다). RULES_OPEN_WITHIN 초 안에서 다시 부르고, 걸린 시간을 PASS 줄에 남긴다
+  rules_open=""
+  for ((i = 0; i <= RULES_OPEN_WITHIN; i += 5)); do
+    code="$(chat "/agents/$AG_ID/chat" "$(msg "$ADD_MSG")")"
+    [ "$code" = 200 ] || { cp "$WORK/sse" "$WORK/body"; die 11r "POST /agents/$AG_ID/chat (Add) -> $code"; }
+    if [ "$(sse_ 'first("tool_result")["status"]')" = success ] && sse_ 'first("tool_result")["content"]' | grep -q 7; then
+      rules_open="$i"; break
+    fi
+    sleep 5
+  done
+  [ -n "$rules_open" ] \
+    || die 11r "Add under a rule naming $AG_NAME after ${RULES_OPEN_WITHIN}s: $(sse_ 'names') tool_result=$(sse_ 'first("tool_result")')"
   code="$(chat "/agents/$AG_ID/chat" "$(msg '{"tool":"Add","args":{"a":500,"b":1}}')")"
   [ "$code" = 200 ] || { cp "$WORK/sse" "$WORK/body"; die 11r "POST /agents/$AG_ID/chat (Add 500) -> $code"; }
   REFUSAL="$(sse_ 'first("tool_result")["content"]')"
@@ -2036,7 +2046,7 @@ if [ "$AUTH_MODE" = local ]; then
     sleep 5
   done
   RULES_SET=0
-  pass 11r "rules on $MS_NAME (Add: $AG_NAME only, a <= 100; Divide: developer and up) listed $AG_NAME as may restart; conditions recorded; $AG_NAME status hides Divide (not_named); chat Add(3,4) -> 7 and Add(500,1) -> '$REFUSAL'; at the proxy $AG_NAME's own and delegated tokens list Add alone and get 7, an unnamed Agent's service and delegation tokens get an empty list and a refused call; renaming Add to $RULES_RENAMED: $probes probes during the roll and one after refused both names to the unnamed Agent, $AG_NAME then lists $RULES_RENAMED alone -> 7; rules removed and redeployed"
+  pass 11r "rules on $MS_NAME (Add: $AG_NAME only, a <= 100; Divide: developer and up) listed $AG_NAME as may restart; conditions recorded; $AG_NAME status hides Divide (not_named); chat Add(3,4) -> 7 after ${rules_open}s and Add(500,1) -> '$REFUSAL'; at the proxy $AG_NAME's own and delegated tokens list Add alone and get 7, an unnamed Agent's service and delegation tokens get an empty list and a refused call; renaming Add to $RULES_RENAMED: $probes probes during the roll and one after refused both names to the unnamed Agent, $AG_NAME then lists $RULES_RENAMED alone -> 7; rules removed and redeployed"
 else
   cond_skip 11r "Tool rules are checked in local mode (make e2e-agent-local); header mode renders no caller rule, which e2e-gateway checks with its warning"
 fi
