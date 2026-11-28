@@ -3,7 +3,7 @@
 # it. The build stage follows platform/Dockerfile so the image carries the same CPython; the last stage is Debian slim
 # because commands need /bin/sh, coreutils and GNU grep (deepagents' BaseSandbox calls them).
 # 빌드 단계는 다른 CPython 이미지 넷과 같다(platform/tests/test_python_image_copy.py 가 맞댄다)
-FROM python:3.12-slim-trixie@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b AS build
+FROM python:3.12-slim-trixie@sha256:191083cdf6c7bda8c76158983163ead5d5cf7b77cf3033e805bb0f5296f51b4b AS build
 # 사내 방화벽 CA (선택). make 의 DAEGAM_CA_FILE 이 빌드 비밀 daegam_ca 로 오면, 받기 단계만 시스템 CA 묶음에 그 CA 를
 # 더한 묶음을 tmpfs 에 만들어 믿는다. 이미지 층에는 CA 도 묶음도 남지 않는다. 비밀이 없으면 받기는 그대로다
 # (docs/guide/images.md 3절)
@@ -48,7 +48,7 @@ RUN mkdir -p /opt/sandbox/mplconfig \
     && ls /opt/sandbox/mplconfig/fontlist-*.json
 
 # 명령에 셸·coreutils·GNU grep 이 있어야 해서 distroless 가 아니라 Debian slim 이다. 바탕은 digest 로 고정한다(D55)
-FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
+FROM debian:trixie-slim@sha256:8aa5a7bf5a1955bddbe7d74fcdd0b91ab30e74362a8b73af672b0481b35b44a0
 # 바탕 태그가 다시 구워지기 전에 Debian 이 낸 보안 판을 받는다. push-images 가 OS_PATCH_DATE 에 그날 날짜를 넘겨 아래
 # 층의 빌드 캐시를 하루에 한 번 버린다(D55, deploy/dev/mock-oidc/Dockerfile 과 같다). Debian slim 의 apt 원천은
 # http 이고 서명으로 확인하므로 사내 CA 는 https 원천을 쓸 때만 쓰인다. 바탕에 시스템 CA 묶음이 없으면 그 CA 만 믿는다.
