@@ -3,15 +3,16 @@
  * Tool 로 부른 실행은 출처 아래에 부른 Agent 를 이름 링크로 적는다(P46 6.5절). 대화 보기와
  * 중단은 그 실행의 묶인 사람과 agent:approve 만이고, 대화는 세션 탭의 상세(읽기 전용)로 연다. 세션 탭은 턴을 받는 Agent 에만
  * 있어 그때만 대화 보기가 선다. 지금 실행은 agent:write 와 agent:chat 이 있고 Agent 가 턴을 받을 때 메시지 상자를 연다. 움직이는
- * 실행이 있는 동안 승인함과 같은 간격으로 목록을 다시 읽는다.
+ * 실행이 있는 동안 승인함과 같은 간격으로 목록을 다시 읽는다. 주소의 `?run=` 은 실행 하나를 짚는다(부른 채팅과 트레이스의
+ * "실행 보기", P46 6.3절). 그 줄을 강조해 보이는 자리로 옮기고, 목록의 상한 밖이면 따로 읽어 맨 위에 둔다.
  */
 import { useQuery } from "@tanstack/react-query";
-import { type FormEvent, useState } from "react";
-import { Link } from "react-router";
+import { type FormEvent, useEffect, useRef, useState } from "react";
+import { Link, useSearchParams } from "react-router";
 
 import { ApiError } from "@/api/client";
 import { APPROVAL_POLL_MS } from "@/components/ApprovalInbox";
-import { cancelAgentRun, listAgentRuns, listAgents, runAgentNow } from "@/api/resources";
+import { cancelAgentRun, getAgentRun, listAgentRuns, listAgents, runAgentNow } from "@/api/resources";
 import type { AgentRun } from "@/api/types";
 import { ErrorMessage } from "@/components/ErrorMessage";
 import { StateRow } from "@/components/StateBlock";
@@ -51,7 +52,18 @@ export function RunHistoryCard({ agentId, canWrite, live }: RunsCardProps) {
     refetchInterval: (query) => (query.state.data?.some((r) => OPEN_RUN_STATUSES.has(r.status)) ? APPROVAL_POLL_MS : false),
   });
   const stop = useRunAction(agentId, (runId: string) => cancelAgentRun(agentId, runId));
-  const rows = q.data ?? [];
+  const [params] = useSearchParams();
+  const focusId = params.get("run");
+  const listed = q.data ?? [];
+  // 짚은 실행이 목록에 없을 때만 따로 읽는다. 없는 실행(지난 보관)은 조용히 목록만 보인다
+  const focused = useQuery({
+    queryKey: [...agentRunsKey(tenant, agentId, "history"), focusId],
+    queryFn: () => getAgentRun(agentId, focusId ?? ""),
+    enabled: Boolean(focusId) && q.isSuccess && !listed.some((r) => r.id === focusId),
+    retry: false,
+    refetchInterval: (query) => (query.state.data && OPEN_RUN_STATUSES.has(query.state.data.status) ? APPROVAL_POLL_MS : false),
+  });
+  const rows = focused.data && !listed.some((r) => r.id === focused.data.id) ? [focused.data, ...listed] : listed;
   // 부른 Agent 의 이름. 다른 Agent 가 부른 실행이 있을 때만 Agent 목록을 읽는다. 목록 화면과 같은 키다
   const agents = useQuery({ queryKey: ["agents", tenant], queryFn: listAgents, enabled: rows.some((r) => r.caller) });
   const callerName = (id: string) => resolveName(t, agents.data, id);
@@ -83,7 +95,7 @@ export function RunHistoryCard({ agentId, canWrite, live }: RunsCardProps) {
           </THead>
           <TBody>
             {rows.map((run) => (
-              <RunRow key={run.id} run={run} calledBy={calledByText(t, run, callerName)} follow={canFollowRun(run, me, tenant)} live={live} stopping={stop.isPending} onStop={() => stop.mutate(run.id)} />
+              <RunRow key={run.id} run={run} focused={run.id === focusId} calledBy={calledByText(t, run, callerName)} follow={canFollowRun(run, me, tenant)} live={live} stopping={stop.isPending} onStop={() => stop.mutate(run.id)} />
             ))}
             {!rows.length ? <StateRow colSpan={COLUMNS} loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()} empty={text.empty} /> : null}
           </TBody>
@@ -94,7 +106,7 @@ export function RunHistoryCard({ agentId, canWrite, live }: RunsCardProps) {
   );
 }
 
-function RunRow({ run, calledBy, follow, live, stopping, onStop }: { run: AgentRun; calledBy: string | null; follow: boolean; live: boolean; stopping: boolean; onStop: () => void }) {
+function RunRow({ run, focused, calledBy, follow, live, stopping, onStop }: { run: AgentRun; focused: boolean; calledBy: string | null; follow: boolean; live: boolean; stopping: boolean; onStop: () => void }) {
   const t = useT();
   const text = t.runs.history;
   const auth = useAuthState();
@@ -102,8 +114,12 @@ function RunRow({ run, calledBy, follow, live, stopping, onStop }: { run: AgentR
   const seconds = runSeconds(run);
   // 건너뛴 줄은 시작이 없다. 마지막으로 건너뛴 때를 보인다
   const started = run.status === "skipped" ? run.last_at : run.started_at;
+  const row = useRef<HTMLTableRowElement>(null);
+  useEffect(() => {
+    if (focused) row.current?.scrollIntoView?.({ block: "nearest" });
+  }, [focused]);
   return (
-    <TR data-testid={`run-${run.id}`}>
+    <TR ref={row} data-testid={`run-${run.id}`} aria-current={focused ? "true" : undefined} className={focused ? "bg-hover" : undefined}>
       <TD className="text-xs">
         {runSourceText(t, run.source)}
         {run.caller && calledBy ? (

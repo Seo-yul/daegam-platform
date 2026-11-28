@@ -310,7 +310,7 @@ export function ToolCallView({ item, testId }: { item: Extract<ChatItem, { kind:
       </button>
       {written ? <WrittenFileDownload path={written} testId={`${testId}-download`} /> : null}
       {/* 다른 Agent 를 부른 호출은 그 Agent 의 실행이다 (P46 6.3절). 답이 왔거나 거절된 뒤에 그 기록을 연다 */}
-      {item.result && isAgentCallTool(item.call.name) ? <AgentRunLink tool={item.call.name} testId={`${testId}-view-run`} /> : null}
+      {item.result && isAgentCallTool(item.call.name) ? <AgentRunLink tool={item.call.name} runId={item.result.run_id} testId={`${testId}-view-run`} /> : null}
       {open ? (
         <div className="mt-2 flex flex-col gap-1.5" data-testid={`${testId}-detail`}>
           <div className="text-[11px] font-semibold text-muted">{text.args}</div>

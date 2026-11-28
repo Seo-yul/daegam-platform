@@ -13,7 +13,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 from daegam.services.telemetry.normalize import (
@@ -28,6 +28,7 @@ from daegam.services.telemetry.normalize import (
 )
 from daegam.services.usage.costs import priced_sums
 from daegam.store.agent_events import BODY, MongoAgentEventStore
+from daegam.store.agent_runs import AgentRun
 from daegam.store.agents import Agent
 from daegam.store.usage import MongoUsageStore, UsageRecord, agent_records
 
@@ -45,6 +46,14 @@ TRUNCATED_SPANS = "spans"
 TRUNCATED_EVENTS = "events"
 # span 과 점 이벤트의 attributes 에서 빼는 칸. 문서의 제 칸으로 이미 있다
 _PLACED = frozenset(AGENT_EVENT_FIELDS) | frozenset(BODY_KEYS)
+
+
+def usage_row(sums: Mapping[str, Any]) -> dict[str, Any]:
+    """원장의 합 한 줄을 화면이 읽는 `usage` 와 `cost_usd` 로 바꾼다."""
+    return {
+        "usage": {"input_tokens": sums["input_tokens"], "output_tokens": sums["output_tokens"]},
+        "cost_usd": sums["cost_usd"],
+    }
 
 
 class AgentTraces:
@@ -137,13 +146,25 @@ class AgentTraces:
         """세션마다 원장의 입력·출력 토큰(`usage`)과 금액(`cost_usd`)의 합. 백그라운드 실행 기록이
         자기 세션의 몫을 붙인다(P41 11절). 원장에 행이 없는 세션은 없다."""
         sums = await self._costs(doc, "ref", session_ids)
-        return {
-            k: {
-                "usage": {"input_tokens": v["input_tokens"], "output_tokens": v["output_tokens"]},
-                "cost_usd": v["cost_usd"],
-            }
-            for k, v in sums.items()
-        }
+        return {k: usage_row(v) for k, v in sums.items()}
+
+    async def call_usage(self, tenant: str, runs: list[AgentRun]) -> dict[str, dict[str, Any]]:
+        """부른 실행(id)마다 그 실행의 턴이 쓴 원장 토큰(`usage`)과 금액(`cost_usd`)이다. 호출받은
+        Agent 의 원장 행을 턴으로 더한다. 맡긴 작업은 한 세션에 실행이 여럿이라 세션이 아니라 턴으로
+        가른다. 아직 턴이 없거나 원장에 행이 없는 실행은 없다."""
+        by_agent: dict[str, list[AgentRun]] = defaultdict(list)
+        for run in runs:
+            if run.turn_id:
+                by_agent[run.agent_id].append(run)
+        out: dict[str, dict[str, Any]] = {}
+        for agent_id, called in by_agent.items():
+            sums = await priced_sums(
+                self.usage, agent_records(tenant, agent_id), "turn_id", [r.turn_id for r in called]
+            )
+            for run in called:
+                if (v := sums.get(run.turn_id)) is not None:
+                    out[run.id] = usage_row(v)
+        return out
 
     async def _costs(self, doc: Agent, key: str, values: list[str]) -> dict[str, dict[str, Any]]:
         """key 의 값마다 원장 행의 합. 호출이 모두 가격 규칙이 없으면 `cost_usd` 가 null 이다."""

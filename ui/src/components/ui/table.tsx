@@ -1,4 +1,4 @@
-import type { HTMLAttributes, ReactNode, TdHTMLAttributes, ThHTMLAttributes } from "react";
+import type { ComponentProps, HTMLAttributes, ReactNode, TdHTMLAttributes, ThHTMLAttributes } from "react";
 import { Link } from "react-router";
 
 import { CopyButton } from "@/components/ui/copy-button";
@@ -33,7 +33,8 @@ export function TBody({ className, ...props }: HTMLAttributes<HTMLTableSectionEl
   return <tbody className={cn("divide-y divide-line", className)} {...props} />;
 }
 
-export function TR({ className, ...props }: HTMLAttributes<HTMLTableRowElement>) {
+/** ref 는 줄을 보이는 자리로 옮길 때 쓴다(실행 기록의 짚은 줄). */
+export function TR({ className, ...props }: ComponentProps<"tr">) {
   return <tr className={cn("hover:bg-hover", className)} {...props} />;
 }
 

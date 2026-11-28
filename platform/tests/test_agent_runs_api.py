@@ -14,14 +14,14 @@ from typing import Any
 import pytest
 
 from daegam.services.runs.service import MAX_RUNNING
-from daegam.store.agent_runs import ActsAs, new_run
+from daegam.store.agent_runs import ActsAs, AgentRun, RunCaller, new_run
 from daegam.store.base import utcnow
 from tests.helpers.agent_runtime import deployed_agent
 from tests.helpers.agents import agent_env, create_agent, deploy_spec, template_for
 from tests.helpers.consts import AG, TENANT_HEADER
 from tests.helpers.http import api_client, detail_code, make_app
 from tests.helpers.runs import schedule_of, waiting_run_of
-from tests.helpers.telemetry import model_call, push_events
+from tests.helpers.telemetry import RUN, model_call, push_events, run_event
 
 SCHEDULE = {"cron": "0 9 * * 1-5", "time_zone": "Asia/Seoul", "message": "daily report"}
 
@@ -223,6 +223,54 @@ def test_the_run_list_and_read_carry_the_sessions_ledger_tokens_and_cost(
     assert (listed[unstarted.id]["usage"], listed[unstarted.id]["cost_usd"]) == (None, None)
     read = runs_client.get(f"{agent.url}/runs/{ran.id}").json()
     assert (read["usage"], read["cost_usd"]) == (got["usage"], got["cost_usd"])
+
+
+def test_the_turns_of_a_session_list_the_runs_they_called_with_their_usage(
+    runs_client, fake_clusters, mongo
+):
+    """부른 턴의 트레이스 창이 읽는 목록이다 (P46 6.5절). 호출받은 Agent 의 원장에서 그 실행의 턴
+    몫을 붙이고, 다른 세션이 부른 실행은 싣지 않는다."""
+    agent = deployed_agent(runs_client, fake_clusters, mongo)
+
+    made = iter(range(3))
+
+    def called(session: str, turn: str, **fields: Any) -> AgentRun:
+        caller = RunCaller(
+            agent_id=agent.id, session_id=session, turn_id=turn, chain=[agent.id], **fields
+        )
+        run = new_run(
+            tenant="default",
+            agent_id=agent.id,
+            source="agent",
+            acts_as=ActsAs(sub="header"),
+            # 목록은 만든 차례다. 같은 밀리초에 만든 기록은 차례가 없다
+            now=utcnow() + timedelta(seconds=next(made)),
+            caller=caller,
+        )
+        mongo["agent_runs"].insert_one(run.to_doc())
+        return run
+
+    ran = called("s1", "t1").model_copy(
+        update={"status": "succeeded", "session_id": "s-called", "turn_id": "t-called"}
+    )
+    mongo["agent_runs"].replace_one({"_id": ran.id}, ran.to_doc())
+    task = called("s1", "t1", thread_id="th-1")
+    called("s-other", "t1")
+    push_events(
+        runs_client,
+        agent,
+        [
+            run_event("turn_start", 0, span_id=RUN),
+            model_call(1, "a000000000000001", session_id="s-called", turn_id="t-called"),
+        ],
+    )
+    (turn,) = runs_client.get(f"{agent.url}/sessions/s1/turns").json()["turns"]
+    first, second = turn["calls"]
+    assert (first["run_id"], first["agent_id"], first["status"]) == (ran.id, agent.id, "succeeded")
+    assert first["agent_name"] and not first["task"]
+    assert first["usage"] == {"input_tokens": 1000, "output_tokens": 500} and first["cost_usd"] > 0
+    # 아직 턴이 없는 실행은 원장 몫이 없다
+    assert (second["run_id"], second["task"], second["usage"]) == (task.id, True, None)
 
 
 def _waiting_run(mongo, agent_id: str, **fields: Any) -> str:

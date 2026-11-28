@@ -43,7 +43,8 @@
 #   STEP 7   b 가 답하는 동안 a 의 턴을 중지하면 b 의 실행이 cancelled(caller_ended)로 끝난다
 #   STEP 8   b 가 승인 규칙의 addPet 을 부르면 호출은 기다린다는 글로 곧 돌아오고 실행은 waiting_approval 로 받은 결정함에
 #            선다. 승인하면 succeeded 다
-#   STEP 9   b 의 실행 목록이 출처 agent 의 기록마다 부른 Agent 를 싣고, 끝난 호출의 기록에 원장의 토큰이 있다
+#   STEP 9   b 의 실행 목록이 출처 agent 의 기록마다 부른 Agent 를 싣고, 끝난 호출의 기록에 원장의 토큰이 있다. a 의 부른
+#            턴도 그 실행을 토큰과 함께 싣는다
 #   STEP 10  d 의 게시를 해제하면 c 의 호출이 agent_source_unpublished 로 거절되고 c 의 상태가 같은 코드로 경고한다
 #   STEP 11  b 에게 작업을 맡기는 t 를 배포한다. t 와의 대화에서 start_async_task 가 작업 id 를 곧바로 돌려주고, b 의 실행
 #            기록은 출처 agent, 부른 Agent t 다. check_async_task 가 success 와 b 의 답을 돌려줄 때까지 턴마다 확인한다.
@@ -462,6 +463,7 @@ if [ "$TARGET" = install ]; then
   [ "$(run_field 'd["acts_as"]["sub"]')" = "$U1_ID" ] || die 3 "the run acts as $(run_field 'd["acts_as"]["sub"]'), want $U1 ($U1_ID)"
 fi
 FIRST_RUN="$RUN_ID"
+FIRST_SID="$CALL_SID"
 pass 3 "$ASK_B returned the answer of $NAME_B (after $tries turns); run $FIRST_RUN has source agent, caller $NAME_A, session $CALL_SID and acts as $kind"
 
 # ---------- 4. 호출받은 Agent 의 Tool 호출이 Gateway 에 닿는다 ----------
@@ -591,7 +593,19 @@ code="$(api GET "/agents/$ID_B/runs?limit=500")"; [ "$code" = 200 ] || die 9 "GE
 calls="$(jq_ "len([r for r in d['runs'] if r['source'] == 'agent'])")"
 [ "$(jq_ "all((r.get('caller') or {}).get('agent_id') == '$ID_A' for r in d['runs'] if r['source'] == 'agent')")" = True ] \
   || die 9 "a run of $NAME_B with source agent does not name $NAME_A as its caller"
-pass 9 "the runs of $NAME_B list $calls calls, each with caller $NAME_A; run $FIRST_RUN used $usage tokens"
+# 부른 턴의 트레이스 창이 읽는 목록이다. 부른 세션의 턴이 그 실행을 원장의 토큰과 함께 싣는다
+listed=0
+for ((i = 0; i < USAGE_TRIES; i++)); do
+  code="$(api GET "/agents/$ID_A/sessions/$FIRST_SID/turns")"
+  if [ "$code" = 200 ]; then
+    listed="$(jq_ "sum((c.get('usage') or {}).get('input_tokens', 0) + (c.get('usage') or {}).get('output_tokens', 0) for t in d['turns'] for c in t.get('calls', []) if c['run_id'] == '$FIRST_RUN' and c['agent_id'] == '$ID_B')")"
+    [ "${listed:-0}" -gt 0 ] && break
+  fi
+  sleep 2
+done
+[ "${listed:-0}" -gt 0 ] \
+  || die 9 "the turns of session $FIRST_SID of $NAME_A do not list run $FIRST_RUN with its usage ($code)"
+pass 9 "the runs of $NAME_B list $calls calls, each with caller $NAME_A; run $FIRST_RUN used $usage tokens and the calling turn lists it with $listed"
 
 # ---------- 10. 게시를 해제한 Agent ----------
 code="$(api DELETE "/agents/$ID_D/publish")"; [ "$code" = 200 ] || die 10 "DELETE /agents/$ID_D/publish -> $code"

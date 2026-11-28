@@ -22,9 +22,11 @@ agent.json 의 `tools[]` 가운데 `source.kind` 가 `agent` 인 항목마다 To
 - **바깥 내용.** 요청마다 이 대화가 바깥 내용을 가졌는지를 머리로 알린다(outside.py 의 표시).
   모르는 문맥은 가진 것으로 알린다.
 - **결과.** 끝난 실행의 답은 글이고 `run_id` 는 모델이 보지 않는 artifact 의 `structured_content`
-  에 싣는다. 승인을 기다리는 실행은 고정 문장으로 곧바로 답한다. 실패, 거절, 취소와 플랫폼이 실행
-  전에 거절한 호출은 그 코드를 실은 Tool 오류다. 이 Tool 의 결과는 다른 소스의 Tool 처럼
-  tool_safety.py 가 다룬다. 항목에 `inside` 와 `read` 가 없으므로 늘 바깥 내용이고 쓰기다.
+  에 싣는다. 같은 artifact 의 `called_run` 은 `tool_result` 이벤트가 `run_id` 로 실어 화면의 "실행
+  보기"가 그 실행 하나를 열게 한다. MCP 서버의 결과는 artifact 에 이 칸을 둘 수 없다. 승인을
+  기다리는 실행은 고정 문장으로 곧바로 답한다. 실패, 거절, 취소와 플랫폼이 실행 전에 거절한 호출은
+  그 코드를 실은 Tool 오류다. 이 Tool 의 결과는 다른 소스의 Tool 처럼 tool_safety.py 가 다룬다.
+  항목에 `inside` 와 `read` 가 없으므로 늘 바깥 내용이고 쓰기다.
 """
 
 from __future__ import annotations
@@ -32,7 +34,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote
@@ -63,6 +65,9 @@ from runtime.turn_grants import (
 )
 
 log = logging.getLogger("daegam.agent-runtime.agent-calls")
+
+# 이 호출이 시작한 실행의 id 를 싣는 artifact 의 칸이다(모듈 머리의 "결과")
+CALLED_RUN_KEY = "called_run"
 
 # 요청 하나의 상한(초)이다. 플랫폼은 시작과 묻기를 25초 안에 답한다
 REQUEST_TIMEOUT_SECONDS = 30.0
@@ -201,9 +206,9 @@ class CallSender:
 
     def headers(self, tool: str, caller: Caller, *, started: bool) -> dict[str, str]:
         """요청 하나의 머리다. 턴의 위임이 이 대상에 토큰을 실었으면 그 지금 토큰이고(갱신이 바꾼
-        토큰도 다음 요청부터 실린다) 끝났으면 `TurnTokenUnavailable` 이다. 아니면 인스턴스 토큰과
-        세션, 턴, 소유자다. 누구의 턴인지 모르면 보내지 않는다. tool 은 문장에 싣는 Tool 이름이고
-        started 는 그 호출이 이미 실행을 시작했는가다."""
+        토큰도 다음 요청부터 실린다) 끝났으면 `TurnTokenUnavailable` 이다. 토큰과 함께 턴의 id 도
+        보낸다. 아니면 인스턴스 토큰과 세션, 턴, 소유자다. 누구의 턴인지 모르면 보내지 않는다.
+        tool 은 문장에 싣는 Tool 이름이고 started 는 그 호출이 이미 실행을 시작했는가다."""
         headers = {OUTSIDE_HEADER: "1" if caller.outside else "0"}
         calls = self.grants.current()
         if calls is not None and calls.credentials.holds(self.target):
@@ -212,6 +217,10 @@ class CallSender:
                 text = INTERRUPTED_MESSAGE if started else UNAVAILABLE_MESSAGE
                 raise TurnTokenUnavailable(text.format(tool=tool))
             headers["Authorization"] = f"Bearer {token}"
+            # 위임은 턴을 싣지 않는다. 플랫폼이 실행 기록에 부른 턴을 적어 트레이스가 그 턴의
+            # 호출을 찾는다
+            if (granted := current_turn()) is not None:
+                headers[TURN_HEADER] = granted.turn_id
             return headers
         turn = current_turn()
         if turn is None:
@@ -372,7 +381,10 @@ class AgentCall:
 
     def _result(self, answer: CallAnswer) -> tuple[str, dict[str, Any]]:
         """끝난 실행의 Tool 결과다. 답 없이 끝났으면 그 코드의 Tool 오류다."""
-        artifact = {"structured_content": {"run_id": answer.run_id, "status": answer.status}}
+        artifact = {
+            "structured_content": {"run_id": answer.run_id, "status": answer.status},
+            CALLED_RUN_KEY: answer.run_id,
+        }
         if answer.status == SUCCEEDED:
             return answer.answer or EMPTY_ANSWER_MESSAGE, artifact
         if answer.status == WAITING_APPROVAL:
@@ -385,6 +397,15 @@ class AgentCall:
                 run_id=answer.run_id,
             )
         )
+
+
+def called_run(status: str | None, artifact: Any) -> str | None:
+    """`tool_result` 의 `run_id` 에 실을, 이 호출이 시작한 실행의 id 다. 오류 결과와 막힌 결과
+    (artifact 가 빈다), 다른 Tool 의 결과는 None 이다."""
+    if status == "error" or not isinstance(artifact, Mapping):
+        return None
+    value = artifact.get(CALLED_RUN_KEY)
+    return value if isinstance(value, str) and value else None
 
 
 def tool_error(error: ToolException) -> str:

@@ -345,6 +345,8 @@ export const agents = {
     kind: { run: "실행", model: "모델", tool: "Tool", subagent: "서브 에이전트", embeddings: "임베딩" } satisfies Record<TraceSpan["kind"], string>,
     flag: { error: "오류", retry: "재시도", fallback: "예비 모델", cache: "캐시 적중", gateway: "LLM 게이트웨이" },
     cost: (usd: string): string => `비용 ${usd}`,
+    /** 턴이 Tool 로 부른 다른 Agent 의 실행들 (P46 6.5절). task 는 답을 기다리지 않고 맡긴 작업의 실행이다. */
+    calls: { title: "Agent 호출", task: "작업", tokens: (count: string): string => `토큰 ${count}` },
     attributes: "속성",
     body: "본문",
     points: "그 밖의 이벤트",

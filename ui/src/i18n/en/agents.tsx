@@ -285,6 +285,7 @@ export const agents: Messages["agents"] = {
     kind: { run: "Run", model: "Model", tool: "Tool", subagent: "Subagent", embeddings: "Embeddings" },
     flag: { error: "Error", retry: "Retry", fallback: "Fallback model", cache: "Cache hit", gateway: "Gateway" },
     cost: (usd: string): string => `Cost ${usd}`,
+    calls: { title: "Agent calls", task: "Task", tokens: (count: string): string => `${count} tokens` },
     attributes: "Attributes",
     body: "Body",
     points: "Other events",

@@ -7,7 +7,9 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict
 
 from daegam.api.schemas import REQUIRED_DEFAULTS
+from daegam.api.schemas.agent_runs import RunUsageOut
 from daegam.api.schemas.agents import AgentChatOut
+from daegam.store.agent_runs import RunStatus
 from daegam.store.base import UtcDatetime
 
 MetricsWindow = Literal["1h", "24h"]
@@ -264,7 +266,26 @@ class TurnRunOut(BaseModel):
     resumed: bool
 
 
+class TurnCallOut(BaseModel):
+    """턴이 다른 Agent 를 Tool 로 불러 생긴 실행 하나 (P46 6.5절). `task` 는 답을 기다리지 않고 맡긴
+    작업의 실행이다. 토큰과 금액은 호출받은 Agent 의 원장에서 그 실행의 턴 몫이고, 아직 턴이 없거나
+    원장에 행이 없으면 null 이다. 호출받은 Agent 가 지워졌으면 `agent_name` 이 null 이다."""
+
+    model_config = REQUIRED_DEFAULTS
+
+    run_id: str
+    agent_id: str
+    agent_name: str | None
+    status: RunStatus
+    reason: str | None
+    task: bool
+    usage: RunUsageOut | None
+    cost_usd: float | None
+
+
 class AgentTurnOut(BaseModel):
+    """`calls` 는 이 턴이 부른 실행이고 만든 차례다. 자동 실행이 꺼진 플랫폼에서는 비어 있다."""
+
     model_config = REQUIRED_DEFAULTS
 
     turn_id: str
@@ -273,6 +294,7 @@ class AgentTurnOut(BaseModel):
     runs: list[TurnRunOut]
     usage: dict[str, int]
     cost_usd: float | None
+    calls: list[TurnCallOut] = []
 
 
 class AgentTurnsOut(BaseModel):

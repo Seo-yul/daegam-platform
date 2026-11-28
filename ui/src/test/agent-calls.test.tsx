@@ -25,7 +25,7 @@ import { describeWarning } from "@/lib/warningText";
 
 import { submitConfirm } from "./confirm";
 import { inspectorOptions } from "./inspector";
-import { agentFixture, agentState, filledTemplateGraph, hubAgentFixture, hubState, lastRequest, mockValidationContext, runFixture, runsState } from "./msw";
+import { agentFixture, agentState, filledTemplateGraph, http, HttpResponse, hubAgentFixture, hubState, lastRequest, mockValidationContext, runFixture, runsState, server } from "./msw";
 import { renderWithProviders } from "./render";
 import { selectValue } from "./select";
 
@@ -298,6 +298,32 @@ describe("자동 실행 탭의 Agent 호출", () => {
   });
 });
 
+describe("자동 실행 탭이 짚는 실행", () => {
+  it("주소의 run 이 목록에 있으면 그 줄을 짚는다", async () => {
+    runsState.runs = [runFixture({ id: "run-a" }), runFixture({ id: "run-b" })];
+    render(<TestApp initialPath="/agents/ag-support?tab=runs&run=run-b" />);
+    expect(await screen.findByTestId("run-run-b")).toHaveAttribute("aria-current", "true");
+    expect(screen.getByTestId("run-run-a")).not.toHaveAttribute("aria-current");
+  });
+
+  it("목록에 없는 실행은 따로 읽어 맨 위에 두고, 없는 실행은 목록만 보인다", async () => {
+    runsState.runs = [runFixture({ id: "run-a" })];
+    server.use(
+      http.get("/agents/:id/runs/:runId", ({ params }) =>
+        params.runId === "run-old" ? HttpResponse.json(runFixture({ id: "run-old" })) : HttpResponse.json({ detail: { code: "not_found", message: "run not found" } }, { status: 404 }),
+      ),
+    );
+    const { unmount } = render(<TestApp initialPath="/agents/ag-support?tab=runs&run=run-old" />);
+    const row = await screen.findByTestId("run-run-old");
+    expect(row).toHaveAttribute("aria-current", "true");
+    expect(row.compareDocumentPosition(screen.getByTestId("run-run-a")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    unmount();
+    render(<TestApp initialPath="/agents/ag-support?tab=runs&run=run-none" />);
+    expect(await screen.findByTestId("run-run-a")).toBeInTheDocument();
+    expect(screen.queryByTestId("run-run-none")).toBeNull();
+  });
+});
+
 describe("채팅의 Tool 카드", () => {
   const call = { id: "c1", name: TOOL, args: { message: "find it" } };
   const result = { id: "c1", name: TOOL, status: "success" as const, content: "done" };
@@ -308,6 +334,12 @@ describe("채팅의 Tool 카드", () => {
     const link = await screen.findByTestId("tool-view-run");
     expect(link).toHaveTextContent("실행 보기");
     expect(link).toHaveAttribute("href", "/agents/ag-research?tab=runs");
+  });
+
+  it("결과가 실행의 id 를 실었으면 그 실행 하나를 연다", async () => {
+    hubState.items = [ITEM];
+    renderWithProviders(<ToolCallView item={{ kind: "tool_call", call, result: { ...result, run_id: "run-9" } }} testId="tool" />);
+    expect(await screen.findByTestId("tool-view-run")).toHaveAttribute("href", "/agents/ag-research?tab=runs&run=run-9");
   });
 
   it("답이 오기 전과 게시한 항목을 찾지 못한 호출에는 링크가 없다", async () => {

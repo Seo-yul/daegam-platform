@@ -79,6 +79,7 @@ export const agentTurnsFixture: AgentTurn[] = [
     ],
     usage: { input_tokens: 1400, output_tokens: 120 },
     cost_usd: 0.0123,
+    calls: [],
   },
 ];
 

@@ -3390,8 +3390,9 @@ export interface paths {
         };
         /**
          * List Agent Turns
-         * @description 세션의 턴 시도(최신부터)와 그 실행, 토큰과 금액. 소유자나 `agent:approve` 만 본다. 소유자를
-         *     아직 정할 수 없으면 approver 가 아닌 사람에게는 404 다.
+         * @description 세션의 턴 시도(최신부터)와 그 실행, 토큰과 금액. 턴이 다른 Agent 를 불렀으면 그 실행들이
+         *     `calls` 다(P46 6.5절). 소유자나 `agent:approve` 만 본다. 소유자를 아직 정할 수 없으면
+         *     approver 가 아닌 사람에게는 404 다.
          */
         get: operations["list_agent_turns_api_agents__agent_id__sessions__session_id__turns_get"];
         put?: never;
@@ -6477,7 +6478,10 @@ export interface components {
             /** Limit */
             limit: number;
         };
-        /** AgentTurnOut */
+        /**
+         * AgentTurnOut
+         * @description `calls` 는 이 턴이 부른 실행이고 만든 차례다. 자동 실행이 꺼진 플랫폼에서는 비어 있다.
+         */
         AgentTurnOut: {
             /** Turn Id */
             turn_id: string;
@@ -6493,6 +6497,11 @@ export interface components {
             };
             /** Cost Usd */
             cost_usd: number | null;
+            /**
+             * Calls
+             * @default []
+             */
+            calls: components["schemas"]["TurnCallOut"][];
         };
         /** AgentTurnsOut */
         AgentTurnsOut: {
@@ -14730,6 +14739,32 @@ export interface components {
         TriggersOut: {
             /** Triggers */
             triggers: components["schemas"]["TriggerOut"][];
+        };
+        /**
+         * TurnCallOut
+         * @description 턴이 다른 Agent 를 Tool 로 불러 생긴 실행 하나 (P46 6.5절). `task` 는 답을 기다리지 않고 맡긴
+         *     작업의 실행이다. 토큰과 금액은 호출받은 Agent 의 원장에서 그 실행의 턴 몫이고, 아직 턴이 없거나
+         *     원장에 행이 없으면 null 이다. 호출받은 Agent 가 지워졌으면 `agent_name` 이 null 이다.
+         */
+        TurnCallOut: {
+            /** Run Id */
+            run_id: string;
+            /** Agent Id */
+            agent_id: string;
+            /** Agent Name */
+            agent_name: string | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "starting" | "running" | "waiting_approval" | "succeeded" | "failed" | "cancelled" | "refused" | "skipped";
+            /** Reason */
+            reason: string | null;
+            /** Task */
+            task: boolean;
+            usage: components["schemas"]["RunUsageOut"] | null;
+            /** Cost Usd */
+            cost_usd: number | null;
         };
         /**
          * TurnGateHolderOut

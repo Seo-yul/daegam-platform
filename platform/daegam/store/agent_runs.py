@@ -328,6 +328,12 @@ class MongoAgentRunStore:
             name="ix_caller_thread",
             partialFilterExpression={"caller.thread_id": {"$exists": True}},
         )
+        # 부른 세션의 트레이스 창이 그 세션의 턴들이 부른 실행을 찾는다 (P46 6.5절)
+        await self.coll.create_index(
+            [("caller.session_id", ASCENDING), ("caller.agent_id", ASCENDING)],
+            name="ix_caller_session",
+            partialFilterExpression={"caller.session_id": {"$exists": True}},
+        )
         await ensure_ttl_index(self.coll, "expires_at", 0, "ttl_expires_at")
 
     async def insert(self, run: AgentRun) -> bool:
@@ -358,6 +364,17 @@ class MongoAgentRunStore:
             {"tenant": tenant, "agent_id": agent_id, "session_id": {"$in": session_ids}}
         ).sort("created_at", ASCENDING)
         return {d["session_id"]: AgentRun.from_doc(d) async for d in cursor}
+
+    async def called_from_session(
+        self, tenant: str, caller_agent_id: str, session_id: str, *, limit: int
+    ) -> list[AgentRun]:
+        """그 Agent 의 세션 하나에서 턴들이 부른 실행이다(호출과 맡긴 작업). 가장 늦게 만든 것부터
+        limit 개까지다."""
+        cursor = self.coll.find(
+            {"tenant": tenant, "caller.session_id": session_id, "caller.agent_id": caller_agent_id},
+            sort=_LATEST,
+        ).limit(limit)
+        return [AgentRun.from_doc(d) async for d in cursor]
 
     # -- 맡긴 작업 (P46 6.7절) ---------------------------------------------------------------
 

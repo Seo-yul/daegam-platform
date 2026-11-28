@@ -75,6 +75,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolCa
 from langgraph.types import Command, StateSnapshot
 
 from runtime import llm_http, signals, tool_limit
+from runtime.agent_calls import called_run
 from runtime.approvals import PendingCalls, with_reason
 from runtime.budget import ACTION_TURN_ENDED, SCOPE_SESSION
 from runtime.cancel import CancelWatch, arm
@@ -674,6 +675,8 @@ def _translate_tool_message(
     kind = untrusted_kind(message.status, message.artifact)
     if kind is not None:
         payload["untrusted"] = kind
+    if (run_id := called_run(message.status, message.artifact)) is not None:
+        payload["run_id"] = run_id
     out = [(TOOL_RESULT, _with_agent(payload, agent_label))]
     items = emitted_citations(message.status, message.artifact)
     if items is not None:

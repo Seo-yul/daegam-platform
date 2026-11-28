@@ -14,7 +14,7 @@ import { ko } from "@/i18n/ko";
 import { runStatusName } from "@/lib/agentEvents";
 import { itemsFromTranscript } from "@/lib/assistant";
 
-import { http, HttpResponse, server, TRACE_ID, traceFixture } from "./msw";
+import { agentTurnsFixture, http, HttpResponse, server, TRACE_ID, traceFixture } from "./msw";
 import { renderWithProviders } from "./render";
 import { TURN_FIXTURE } from "./runtimeFixtures";
 
@@ -46,6 +46,28 @@ describe("traces", () => {
     unmount();
     renderWithProviders(<TraceDrawer agentId="ag-support" target={{}} onClose={() => {}} />);
     expect(await screen.findByTestId("trace-none")).toHaveTextContent("이 턴에는 트레이스가 없습니다.");
+  });
+
+  it("턴이 다른 Agent 를 불렀으면 실행들 아래에 그 호출을 상태, 토큰, 비용, 실행 링크와 함께 적는다", async () => {
+    const calls = [
+      { run_id: "r-1", agent_id: "ag-research", agent_name: "research", status: "succeeded" as const, reason: null, task: false, usage: { input_tokens: 1000, output_tokens: 500 }, cost_usd: 0.02 },
+      { run_id: "r-2", agent_id: "ag-gone", agent_name: null, status: "cancelled" as const, reason: "caller_cancelled", task: true, usage: null, cost_usd: null },
+    ];
+    server.use(http.get("/agents/:id/sessions/:sid/turns", () => HttpResponse.json({ turns: [{ ...agentTurnsFixture[0], calls }] })));
+    renderWithProviders(<TraceDrawer agentId="ag-support" target={{ sessionId: "s-1", turnId: "t-1" }} onClose={() => {}} />);
+    const section = await screen.findByTestId("trace-calls");
+    expect(section).toHaveTextContent("Agent 호출");
+    const first = within(section).getByTestId("trace-call-r-1");
+    expect(first).toHaveTextContent("research");
+    expect(first).toHaveTextContent("토큰 1,500");
+    expect(first).toHaveTextContent("비용");
+    expect(within(first).getByTestId("trace-call-r-1-view")).toHaveAttribute("href", "/agents/ag-research?tab=runs&run=r-1");
+    // 지워진 Agent 는 id 로 적고, 맡긴 작업과 까닭을 말한다
+    const second = within(section).getByTestId("trace-call-r-2");
+    expect(second).toHaveTextContent("ag-gone");
+    expect(second).toHaveTextContent("작업");
+    expect(second).toHaveTextContent("부른 Agent 가 작업을 취소했습니다.");
+    expect(second).not.toHaveTextContent("토큰");
   });
 
   it("배지는 오류·재시도·캐시·게이트웨이를 span 의 칸에서 읽는다", () => {

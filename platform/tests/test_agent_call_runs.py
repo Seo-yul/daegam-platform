@@ -501,6 +501,22 @@ def test_an_ended_or_due_grant_and_a_person_without_chat_are_refused(settings, q
 # -- 호출은 실행이다 (6.3절) ----------------------------------------
 
 
+def test_a_granted_call_records_the_turn_the_pod_names(settings):
+    """위임은 세션을 대고 턴은 대지 않는다. 파드가 머리로 댄 턴을 실행 기록에 적어 부른 세션의 턴
+    목록이 그 호출을 찾는다. 턴의 모양이 아닌 값과 대지 않은 턴은 적지 않는다."""
+
+    async def body(grants, runs) -> None:
+        rig = Rig(_local(settings), grants, runs)
+        for given, kept in (("t-7", "t-7"), ("not a turn id", None), (None, None)):
+            grant = await rig.grant(id=f"g-{kept}-{given is None}", session_id="s-chat")
+            answer = await rig.start(grant, turn_id=given, outside=False)
+            caller = (await rig.stored(answer["run_id"])).caller
+            assert caller is not None and caller.grant_id == grant.id
+            assert (caller.session_id, caller.turn_id) == ("s-chat", kept)
+
+    _go(settings, body)
+
+
 def test_the_start_answers_at_once_with_the_run_id_while_the_run_goes_on(settings):
     """시작은 실행의 끝을 기다리지 않는다. 부른 쪽은 실행 id 를 받아야 제 턴이 멈출 때 취소를 보낼
     수 있다."""

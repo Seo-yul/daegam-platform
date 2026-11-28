@@ -807,6 +807,8 @@ export type MetricsWindow = AgentMetrics["window"];
 /** 세션의 턴 시도 하나와 그 실행들 (P37 12절). 승인 뒤 재개는 같은 턴의 다음 실행이다. */
 export type AgentTurn = Schemas["AgentTurnOut"];
 export type AgentTurnRun = Schemas["TurnRunOut"];
+/** 턴이 다른 Agent 를 Tool 로 불러 생긴 실행 하나 (P46 6.5절). */
+export type AgentTurnCall = Schemas["TurnCallOut"];
 /** 실행 하나의 트레이스. span 과 점 이벤트, 원장 금액이다. */
 export type AgentTrace = Schemas["AgentTraceOut"];
 export type TraceSpan = Schemas["TraceSpanOut"];

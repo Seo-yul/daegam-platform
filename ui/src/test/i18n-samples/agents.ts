@@ -37,6 +37,7 @@ export const samples: SampleFile["samples"] = {
   "agents.trace.approvalWait": [["3m 12s"]],
   "agents.trace.truncated.spans": [["1,000"]],
   "agents.trace.cost": [["$0.0061"]],
+  "agents.trace.calls.tokens": [["1,500"]],
   "agents.sessions.turns": [[3], [1]],
   "agents.sessions.input": [[120]],
   "agents.sessions.output": [[45]],

@@ -41,6 +41,7 @@ from runtime.agent_calls import (
     TURN_HEADER,
     WAITING_MESSAGE,
     AgentCalls,
+    called_run,
 )
 from runtime.compile import compile_agent
 from runtime.config import ConfigError, parse_config
@@ -298,7 +299,14 @@ async def test_a_call_that_ends_in_the_start_answers_at_once() -> None:
     async with calling(routes, given=grant()) as call:
         message = await call("올해 매출은?")
     assert message.status == "success" and message.content == "42"
-    assert message.artifact == {"structured_content": {"run_id": "r1", "status": "succeeded"}}
+    assert message.artifact == {
+        "structured_content": {"run_id": "r1", "status": "succeeded"},
+        "called_run": "r1",
+    }
+    # tool_result 이벤트가 싣는 실행이다. 오류 결과와 MCP 결과의 structured_content 는 싣지 않는다
+    assert called_run(message.status, message.artifact) == "r1"
+    assert called_run("error", message.artifact) is None
+    assert called_run("success", {"structured_content": {"run_id": "r1"}}) is None
     (start,) = routes.seen
     assert start["kind"] == "start" and start["body"] == {"message": "올해 매출은?"}
 
@@ -450,7 +458,9 @@ async def test_a_stopped_turn_cancels_the_run() -> None:
 # -- 누구의 호출인가 ------------------------------------------------------------------
 
 
-async def test_a_granted_turn_sends_only_its_token() -> None:
+async def test_a_granted_turn_sends_its_token_and_names_only_its_turn() -> None:
+    """위임이 세션과 사람을 대므로 그 둘은 보내지 않는다. 턴은 위임에 없어 실행 기록의 이름표로
+    보낸다."""
     routes = Routes(start=[answer("running")])
     async with calling(routes, given=grant()) as call:
         await call()
@@ -458,7 +468,8 @@ async def test_a_granted_turn_sends_only_its_token() -> None:
         headers = request["headers"]
         assert headers["authorization"] == "Bearer tok-alice"
         assert headers[OUTSIDE_HEADER] == "0"
-        for name in (SESSION_HEADER, TURN_HEADER, OWNER_HEADER):
+        assert headers[TURN_HEADER] == TURN.turn_id
+        for name in (SESSION_HEADER, OWNER_HEADER):
             assert name not in headers
 
 
@@ -541,6 +552,8 @@ async def test_a_chat_turn_calls_the_agent_and_marks_the_answer_outside() -> Non
             (result,) = events_named(parse_sse(response.text), "tool_result")
             assert result["status"] == "success" and "답이다" in result["content"]
             assert result["untrusted"] == "outside"
+            # 화면의 "실행 보기"가 그 실행 하나를 연다
+            assert result["run_id"] == "r1"
             (start,) = routes.seen
             headers = start["headers"]
             assert headers["authorization"] == f"Bearer {INSTANCE_TOKEN}"

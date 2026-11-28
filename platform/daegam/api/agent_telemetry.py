@@ -12,13 +12,14 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query, Request
 
 from daegam.api._agent_proxy import get_agent_or_404, is_approver
 from daegam.api._common import error, not_found
-from daegam.api.agents import READ, Agents, Service, Traces
+from daegam.api.agents import READ, Agents, EnabledRuns, Service, Traces
 from daegam.api.audit import parse_ts
 from daegam.api.deps import Tenant, User, require_scope
 from daegam.api.schemas import ERROR_RESPONSES
@@ -31,10 +32,15 @@ from daegam.api.schemas.agent_telemetry import (
 )
 from daegam.api.usage import Tz, checked_zone
 from daegam.auth.principal import Principal
+from daegam.services.runs.service import RunService
 from daegam.services.telemetry.agent_metrics import AgentMetrics
 from daegam.services.telemetry.normalize import FEEDBACK_EVENT
-from daegam.services.telemetry.traces import visible_event
+from daegam.services.telemetry.traces import AgentTraces, visible_event
 from daegam.store.agent_events import MongoAgentEventStore
+from daegam.store.agents import Agent, MongoAgentStore
+
+# 턴 목록이 한 세션에서 읽는 부른 실행. 가장 늦게 만든 것부터 이만큼이다
+MAX_SESSION_CALLS = 500
 
 router = APIRouter(responses=ERROR_RESPONSES, prefix="/agents", tags=["agents"])
 
@@ -114,17 +120,53 @@ async def list_agent_turns(
     user: User,
     store: Agents,
     traces: Traces,
+    runs: EnabledRuns,
     agent_id: str,
     session_id: str,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
 ) -> dict[str, Any]:
-    """세션의 턴 시도(최신부터)와 그 실행, 토큰과 금액. 소유자나 `agent:approve` 만 본다. 소유자를
-    아직 정할 수 없으면 approver 가 아닌 사람에게는 404 다."""
+    """세션의 턴 시도(최신부터)와 그 실행, 토큰과 금액. 턴이 다른 Agent 를 불렀으면 그 실행들이
+    `calls` 다(P46 6.5절). 소유자나 `agent:approve` 만 본다. 소유자를 아직 정할 수 없으면
+    approver 가 아닌 사람에게는 404 다."""
     doc = await get_agent_or_404(store, tenant, agent_id)
     if not is_approver(user, tenant):
         owner = await traces.owner(doc, session_id)
         _check_owner(owner, user, f"session {session_id} has no turns yet")
-    return {"turns": await traces.turns(doc, session_id, limit=limit)}
+    turns = await traces.turns(doc, session_id, limit=limit)
+    calls = await _turn_calls(runs, traces, store, doc, session_id) if runs and turns else {}
+    return {"turns": [{**t, "calls": calls.get(t["turn_id"], [])} for t in turns]}
+
+
+async def _turn_calls(
+    runs: RunService, traces: AgentTraces, store: MongoAgentStore, doc: Agent, session_id: str
+) -> dict[str, list[dict[str, Any]]]:
+    """세션의 턴(id)마다 그 턴이 부른 실행이다. 만든 차례다. 호출받은 Agent 는 부른 Agent 와 같은
+    테넌트에 있다. 부른 턴을 보는 사람은 그 실행의 상태와 원장 몫을 본다."""
+    called = await runs.runs.called_from_session(
+        doc.tenant, doc.acting_id, session_id, limit=MAX_SESSION_CALLS
+    )
+    usage = await traces.call_usage(doc.tenant, called)
+    names: dict[str, str | None] = {}
+    for agent_id in {r.agent_id for r in called}:
+        agent = await store.get(agent_id, tenant=doc.tenant)
+        names[agent_id] = agent.name if agent is not None else None
+    out: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for run in reversed(called):
+        caller = run.caller
+        if caller is None or caller.turn_id is None:
+            continue
+        out[caller.turn_id].append(
+            {
+                "run_id": run.id,
+                "agent_id": run.agent_id,
+                "agent_name": names[run.agent_id],
+                "status": run.status,
+                "reason": run.reason,
+                "task": caller.thread_id is not None,
+                **(usage.get(run.id) or {"usage": None, "cost_usd": None}),
+            }
+        )
+    return out
 
 
 @router.get("/{agent_id}/traces/{trace_id}", response_model=AgentTraceOut, dependencies=[READ])

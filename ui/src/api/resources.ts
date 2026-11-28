@@ -1537,6 +1537,11 @@ export async function getAssistantProposal(id: string): Promise<AssistantProposa
 
 // -- 자동 실행 (P41). 실행을 켜기 전에는 모든 라우트가 404 다 -----------------------------------------------------
 
+/** 실행 기록 하나. 목록의 한 줄과 같은 모양이다. */
+export async function getAgentRun(id: string, runId: string): Promise<AgentRun> {
+  return unwrap(await api.GET("/agents/{agent_id}/runs/{run_id}", { params: { path: { agent_id: id, run_id: runId } } }));
+}
+
 /** 실행 기록. 마지막으로 움직인 것부터이고, 건너뛴 울림은 소스와 까닭마다 `skipped` 줄 하나다. */
 export async function listAgentRuns(id: string): Promise<AgentRun[]> {
   return unwrap(await api.GET("/agents/{agent_id}/runs", { params: { path: { agent_id: id } } })).runs;

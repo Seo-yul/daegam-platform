@@ -29,6 +29,8 @@ export interface ToolResultEvent {
   /** 결과가 외부 내용이면 그 종류다(P39b 14절 3부, P43 2절). 웹 Tool 의 결과는 `web`, 그 밖의 외부 내용은 `outside` 이고
    * 런타임이 성공한 결과에만 싣는다. */
   untrusted?: "web" | "outside";
+  /** 다른 Agent 를 부른 호출이 시작한 실행의 id 다(P46 6.3절). 런타임이 성공한 결과에만 싣고, "실행 보기"가 그 실행 하나를 연다. */
+  run_id?: string;
 }
 /** 도구 호출 카드의 상태. 결과가 오면 그 상태이고, 아직이면 승인 카드가 붙들었는지에 따라 기다리거나 도는 중이다. */
 export type ToolCallStatus = ToolResultEvent["status"] | "waiting" | "running";

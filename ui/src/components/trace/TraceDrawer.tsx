@@ -1,25 +1,31 @@
 /**
  * 턴의 트레이스 창 (P37 12절). 턴 시도(`turn_id`) 하나의 실행들을 차례로 세우고 실행 사이의 틈을 적는다. 승인 뒤 재개는
  * 같은 턴의 다음 실행이라 그 틈이 "승인 대기 3분 12초" 다. turn_id 가 없으면 실행(`trace_id`) 하나만 그린다. 둘 다 없거나
- * 이벤트가 없는 턴(옛 런타임)은 "이 턴은 트레이스가 없습니다" 다.
+ * 이벤트가 없는 턴(옛 런타임)은 "이 턴은 트레이스가 없습니다" 다. 턴이 다른 Agent 를 Tool 로 불렀으면 실행들 아래에 그 호출을
+ * 상태, 토큰, 비용과 함께 적고 호출받은 Agent 의 자동 실행 탭에서 그 실행을 여는 링크를 단다(P46 6.5절).
  *
  * 채팅의 턴 마감 줄과 세션 탭의 턴 표가 연다. 소유자가 아니면 서버가 403 이다. 턴이 막 끝나면 이벤트가 아직 저장소에 없어
  * 404 일 수 있다. 그때는 "모으는 중" 을 보이며 몇 번 다시 읽고, 그래도 없으면 트레이스가 없다고 한다.
  */
 import { useQuery } from "@tanstack/react-query";
+import { Link } from "react-router";
 
 import { ApiError } from "@/api/client";
 import { getAgentTrace, listAgentTurns } from "@/api/resources";
-import type { AgentTurnRun } from "@/api/types";
+import type { AgentTurnCall, AgentTurnRun } from "@/api/types";
+import { agentRunPath } from "@/components/chat/AgentRunLink";
 import { ErrorMessage } from "@/components/ErrorMessage";
 import { queryGate } from "@/components/QueryGate";
 import { Badge } from "@/components/ui/badge";
 import { Modal } from "@/components/ui/modal";
 import { useT, type Messages } from "@/i18n";
 import { runStatusName } from "@/lib/agentEvents";
+import { idpConfirmDays, useAuthState } from "@/lib/auth";
 import { agentTurnsKey } from "@/lib/queryKeys";
+import { runReasonText, runStatusText, runStatusVariant } from "@/lib/runs";
 import { useTenant } from "@/lib/tenant";
-import { formatDate, formatDuration } from "@/lib/utils";
+import { formatUsd, tokensOf } from "@/lib/usage";
+import { formatDate, formatDuration, formatNumber } from "@/lib/utils";
 
 import { TraceTimeline } from "./TraceTimeline";
 
@@ -91,7 +97,39 @@ function TraceRuns({ agentId, target }: { agentId: string; target: TraceTarget }
           <RunSection agentId={agentId} traceId={traceId} run={runs[i]} index={i} />
         </div>
       ))}
+      {/* 롤아웃 중의 옛 플랫폼은 calls 를 싣지 않는다 */}
+      {turn?.calls?.length ? <CallsSection calls={turn.calls} /> : null}
     </div>
+  );
+}
+
+/** 턴이 부른 다른 Agent 의 실행들. 토큰과 비용은 호출받은 Agent 의 원장 몫이라 이 턴의 합에는 들지 않는다. */
+function CallsSection({ calls }: { calls: AgentTurnCall[] }) {
+  const t = useT();
+  const text = t.agents.trace;
+  const auth = useAuthState();
+  return (
+    <section className="flex flex-col gap-2 rounded-tile border border-line-soft p-3" data-testid="trace-calls">
+      <h3 className="text-xs font-medium">{text.calls.title}</h3>
+      <ul className="flex flex-col gap-1">
+        {calls.map((call) => {
+          const reason = runReasonText(t, call.reason, idpConfirmDays(auth.config));
+          return (
+            <li key={call.run_id} className="flex flex-wrap items-center gap-2 text-xs" data-testid={`trace-call-${call.run_id}`}>
+              <span className="font-medium">{call.agent_name ?? call.agent_id}</span>
+              <Badge variant={runStatusVariant(call.status)}>{runStatusText(t, { status: call.status, count: null })}</Badge>
+              {call.task ? <Badge variant="muted">{text.calls.task}</Badge> : null}
+              {reason ? <span className={reason.code ? "font-mono text-muted" : "text-muted"}>{reason.text}</span> : null}
+              {call.usage ? <span className="text-muted">{text.calls.tokens(formatNumber(t, tokensOf(call.usage)))}</span> : null}
+              {call.cost_usd != null ? <span className="text-muted">{text.cost(formatUsd(t, call.cost_usd))}</span> : null}
+              <Link className="underline underline-offset-2" to={agentRunPath(call.agent_id, call.run_id)} data-testid={`trace-call-${call.run_id}-view`}>
+                {t.chat.tool.viewRun}
+              </Link>
+            </li>
+          );
+        })}
+      </ul>
+    </section>
   );
 }
 

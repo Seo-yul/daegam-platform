@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -133,8 +134,9 @@ class InlineStarter(Protocol):
 
 @dataclass(frozen=True)
 class CallCredentials:
-    """요청 하나가 실어 온 것이다. bearer 가 없으면 401 이다. session_id, turn_id, owner 는 위임
-    없는 턴만 대고 header 모드에서만 읽는다. outside 는 부르는 대화가 바깥 내용을 가졌는가다."""
+    """요청 하나가 실어 온 것이다. bearer 가 없으면 401 이다. session_id 와 owner 는 위임 없는
+    턴만 대고 header 모드에서만 읽는다. turn_id 는 위임의 턴도 대고, 그때는 실행 기록의 이름표로만
+    쓴다. outside 는 부르는 대화가 바깥 내용을 가졌는가다."""
 
     bearer: str | None
     session_id: str | None = None
@@ -142,6 +144,9 @@ class CallCredentials:
     owner: str | None = None
     outside: bool = True
 
+
+# 파드가 머리로 댄 턴 id 가 가질 수 있는 모양이다(런타임은 uuid 의 hex 를 쓴다)
+TURN_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
 START = AuditedRoute("agent_call_start")
 POLL = AuditedRoute("agent_call_poll", method="GET")
@@ -341,10 +346,15 @@ class AgentCallRuns:
             raise _refused(409, CALLS_DISABLED, "agent calls are turned off on this platform")
         if not self.settings.token_auth:
             return await self._header_caller(called_id, creds.bearer, creds)
-        return await self._granted_caller(called_id, creds.bearer)
+        return await self._granted_caller(called_id, creds.bearer, creds.turn_id)
 
-    async def _granted_caller(self, called_id: str, bearer: str) -> CallingTurn:
-        """토큰이 댄 위임의 턴이다. 위임이 열려 있고 그 사람과 대상과 부르는 Agent 의 것일 때다."""
+    async def _granted_caller(
+        self, called_id: str, bearer: str, turn_id: str | None
+    ) -> CallingTurn:
+        """토큰이 댄 위임의 턴이다. 위임이 열려 있고 그 사람과 대상과 부르는 Agent 의 것일 때다.
+        turn_id 는 파드가 머리로 댄 턴이고 실행 기록에 적는 이름표일 뿐이다. 세션은 위임의 것이고
+        이 턴이 시작한 호출은 위임으로 가리므로, 틀린 값은 부른 세션의 턴 목록에서 그 호출이 빠지게
+        할 뿐이다. 턴의 모양이 아닌 값은 적지 않는다."""
         try:
             claims = verify_agent_call_token(
                 bearer, self.issuer.signer, issuer=self.issuer.issuer, agent_id=called_id
@@ -373,7 +383,7 @@ class AgentCallRuns:
             acts_as=ActsAs(sub=grant.sub, username=grant.username, tv=grant.tv),
             grant=grant,
             session_id=grant.session_id,
-            turn_id=None,
+            turn_id=turn_id if turn_id and TURN_ID.fullmatch(turn_id) else None,
             run=await self._calling_run(agent, grant.run_id, grant.session_id),
         )
         await self._check_person(caller)
