@@ -113,6 +113,7 @@ def _hub_item(
     kind: str = "internal",
     instance_id: str | None = None,
     gateway_instance_id: str | None = None,
+    agent_id: str | None = None,
     tenant: str = TENANT,
 ) -> HubItem:
     return HubItem(
@@ -121,7 +122,9 @@ def _hub_item(
         name=item_id,
         display_name=item_id,
         kind=kind,
-        source=HubSource(instance_id=instance_id, gateway_instance_id=gateway_instance_id),
+        source=HubSource(
+            instance_id=instance_id, gateway_instance_id=gateway_instance_id, agent_id=agent_id
+        ),
         cluster_id="c1",
         k8s=HubK8s(kind="MCPServer", name=item_id, namespace="daegam-acme"),
     )
@@ -312,9 +315,41 @@ def test_cluster_answers_only_the_request_tenant(settings, mongo):
     ]
 
 
-def test_agent_has_no_users_yet(settings, mongo):
+def test_an_unpublished_agent_has_no_users(settings, mongo):
     insert_docs(mongo, agents=[_agent("ag-1")])
     assert _used_by(settings, "agent", "ag-1") == []
+
+
+def test_a_published_agent_counts_its_item_and_the_agents_that_call_it(settings, mongo):
+    """게시 항목은 배포 쪽이고, 그 항목을 Tool 소스로 쓰는 Agent 는 항목을 거친 간접 참조다. 항목의
+    참조는 같은 Agent 를 직접 참조로 센다. 다른 종류의 소스가 같은 id 를 가리키는 것은 세지
+    않는다."""
+    calls = agent_refs_spec(source=("agent", "hi-billing"))
+    insert_docs(
+        mongo,
+        hub_items=[_hub_item("hi-billing", kind="agent", agent_id="ag-billing")],
+        agents=[
+            _agent("ag-billing", state="deployed"),
+            _agent("ag-both", current=calls, pinned=calls, state="deployed"),
+            _agent("ag-draft", current=calls),
+            _agent("ag-x", current=calls, tenant=OTHER),
+            _agent("ag-gw", current=agent_refs_spec(source=("gateway_instance", "hi-billing"))),
+        ],
+    )
+    used = _used_by(settings, "agent", "ag-billing")
+    assert _pairs(used) == [
+        ("hub-item", "hi-billing", "deployed"),
+        ("agent", "ag-both", "both"),
+        ("agent", "ag-draft", "current"),
+    ]
+    assert [r["via"] for r in used] == [None, "hub-item", "hub-item"]
+    item_users = _used_by(settings, "hub-item", "hi-billing")
+    assert _pairs(item_users) == [("agent", "ag-both", "both"), ("agent", "ag-draft", "current")]
+    assert [r["via"] for r in item_users] == [None, None]
+    assert _pairs(_used_by(settings, "hub-item", "hi-billing", tenant=OTHER)) == [
+        ("agent", "ag-x", "current")
+    ]
+    assert _used_by(settings, "agent", "ag-both") == []
 
 
 def test_tenant_filters_the_answer_but_not_the_guard(settings, mongo):

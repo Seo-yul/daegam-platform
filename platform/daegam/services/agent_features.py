@@ -33,6 +33,7 @@ from daegam.services.agent_graph import (
     CompileError,
     GraphContext,
     Issue,
+    agent_source_items,
     check_schema,
     code_execution_of,
     compiled_model_providers,
@@ -125,6 +126,11 @@ INJECTION_CHECK = "injection_check"
 # 없어도 런타임이 승인을 거절하지 않고 묻는다. 이름만 실리고 칸은 없다. `attached` 라 모르는
 # 이미지에서는 빠지고, 그 미리 보기는 memory 노드가 없는 Agent 처럼 승인이 필요한 호출을 거절한다
 IN_POD_STATE = "in_pod_state"
+# 다른 Agent 를 Tool 로 부르기다(P46 6.2절). 문서의 `tools[]` 에 `source.kind` 가 `agent` 인 항목이
+# 실리고 런타임이 그 항목으로 `ask_*` Tool 을 만든다. 모르는 이미지는 그 항목을 스키마 위반으로
+# 보므로 그래프가 쓰는 기능이라 `required` 다. 이 이름을 알리지 않은 이미지에 그런 그래프를 배포하면
+# 409 `runtime_feature_missing` 이다(`AgentService._feature_check`)
+AGENT_TOOLS = "agent_tools"
 
 # agent-runtime/runtime/features.py 의 두 목록과 같다
 DOCUMENT_FEATURES: tuple[str, ...] = (
@@ -137,6 +143,7 @@ DOCUMENT_FEATURES: tuple[str, ...] = (
     LLM_GATEWAY,
     IN_POD_STATE,
     INJECTION_CHECK,
+    AGENT_TOOLS,
 )
 CAPABILITIES: tuple[str, ...] = (
     CANCEL,
@@ -205,7 +212,8 @@ def agent_features(
     업체 선호가 있는 것이 있으면 `provider_extra_body` 를, 스트림 사용량을 끈 openai 계열이 있으면
     `provider_stream_usage` 를 붙인다(P37). 세는 자리는 붙이는 함수가 칸을 싣는 자리와 같다
     (`compiled_model_providers`). `tool_safety` 는 웹 Tool 이 없는 그래프에도 붙인다(P43 8절).
-    판정 모델을 붙인 그래프는 `injection_check` 와 `tool_safety` 를 요구한다(P43 7절).
+    판정 모델을 붙인 그래프는 `injection_check` 와 `tool_safety` 를 요구한다(P43 7절). 게시한
+    Agent 를 Tool 로 쓰는 그래프는 `agent_tools` 를 요구한다(P46 6.2절).
     `in_pod_state` 는 in_pod_approvals 일 때만 붙인다. 서비스가 미리 보기마다 정한다(P44b 7절,
     `AgentService._preview_asks`)."""
     del doc
@@ -216,6 +224,8 @@ def agent_features(
         required.add(CODE_EXECUTION)
     if uses_injection_check(rev):
         required |= {INJECTION_CHECK, TOOL_SAFETY}
+    if agent_source_items(rev):
+        required.add(AGENT_TOOLS)
     used = [p for n in compiled_model_providers(rev) if (p := providers.get(n)) is not None]
     attached = {
         PROVIDER_EXTRA_BODY: any(p.extra_body for p in used),

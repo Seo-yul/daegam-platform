@@ -43,6 +43,7 @@ from daegam.config import Settings
 from daegam.k8s.client import set_request_hook
 from daegam.secrets import SecretStore
 from daegam.services.access_revocation import AccessRevoker, LostAccessHook
+from daegam.services.agent_call_runs import AgentCallRuns
 from daegam.services.agent_citations import CitationSources
 from daegam.services.agent_feedback import AgentFeedbackService
 from daegam.services.agent_preview import AgentPreviews, AgentPreviewWorker
@@ -469,6 +470,8 @@ class Services:
     web_search: WebSearch
     # 턴 위임과 그 토큰 (P53 4절). 채팅·결정·다시 생성 라우트가 열고 런타임이 갱신한다
     turn_grants: TurnGrantService
+    # 다른 Agent 를 Tool 로 부르는 호출 경로의 판단 (P46 6.3절)
+    agent_calls: AgentCallRuns
     # 백그라운드 실행의 스케줄과 기록 (P41)
     run_service: RunService
     # 웹훅 트리거의 관리와 공개 경로의 판단 (P41 4절)
@@ -913,6 +916,8 @@ def build_services(
         claims=claims,
         exposure_hosts=stores.exposure_hosts,
         tool_effects=tool_effects,
+        # 게시한 Agent 는 허브의 `agent` 항목이다 (P46 6.1절)
+        hub=hub_service,
         run_hooks=run_service,
         choices=approval_choices,
         sandboxes=sandboxes,
@@ -924,6 +929,8 @@ def build_services(
         gate=deploy_gate,
     )
     agent_service.rule_scopes = rule_scopes
+    # 허브의 agent 항목 상태는 그 Agent 의 판단이다 (P46 6.1절, HubService.late_hooks)
+    hub_service.agent_status = agent_service.item_status
     # 미리 보기의 배포와 끝은 Agent 서비스가 한다 (AgentPreviews.late_hooks)
     agent_previews.service = agent_service
     # 중지와 멈춤이 도는 실행의 턴을 런타임에서 멈춘다 (P41 7절, RunService.late_hooks). 프록시는
@@ -1220,6 +1227,39 @@ def build_services(
         issuer=internal_issuer,
         settings=settings,
     )
+    run_delegation = TurnDelegation(turn_grants, stores.agent_session_owners)
+
+    def run_starter(owner: str | None = None) -> RunStartWorker:
+        return RunStartWorker(
+            stores.agents,
+            run_service,
+            agent_service.proxy,
+            run_delegation,
+            choices=approval_choices,
+            owner=owner,
+            interval=settings.runs_interval,
+            lease_seconds=settings.runs_lease_seconds,
+            sandbox_runs=settings.sandbox_runs_per_agent,
+            sleep=agent_service.sleep,
+        )
+
+    # 다른 Agent 를 Tool 로 부르는 호출 (P46 6.3절). 경로가 시작 워커의 한 걸음을 그 자리에서
+    # 돌리므로 틱을 돌지 않는 워커 하나를 따로 쥔다. 위임의 끝이 그 턴의 호출을 끝낸다
+    # (TurnGrantService.late_hooks)
+    agent_calls = AgentCallRuns(
+        agents=stores.agents,
+        hub=stores.hub_items,
+        grants=stores.turn_grants,
+        instance_tokens=stores.agent_instance_tokens,
+        run_service=run_service,
+        publishing=agent_service.publishing,
+        proxy=agent_service.proxy,
+        starter=run_starter(f"agent-calls:{settings.pod_id}"),
+        issuer=internal_issuer,
+        settings=settings,
+        audit=stores.audit,
+    )
+    turn_grants.on_end = agent_calls.caller_ended
     run_workers: tuple[LeaseWorker[Any], ...] = ()
     if settings.runs_enabled and not settings.runs_workers_enabled:
         logger.warning("background runs are enabled but their workers are off: nothing fires")
@@ -1231,23 +1271,14 @@ def build_services(
                 interval=settings.runs_interval,
                 lease_seconds=settings.runs_lease_seconds,
             ),
-            RunStartWorker(
-                stores.agents,
-                run_service,
-                agent_service.proxy,
-                TurnDelegation(turn_grants, stores.agent_session_owners),
-                choices=approval_choices,
-                interval=settings.runs_interval,
-                lease_seconds=settings.runs_lease_seconds,
-                sandbox_runs=settings.sandbox_runs_per_agent,
-                sleep=agent_service.sleep,
-            ),
+            run_starter(),
             RunWatchWorker(
                 stores.agents,
                 stores.agent_runs,
                 agent_service.proxy,
                 interval=settings.runs_interval,
                 lease_seconds=settings.runs_lease_seconds,
+                caller_sweep=agent_calls.sweep,
             ),
         )
     # 평가 실행은 평가 미리 보기에 턴을 보낸다. 프록시와 쉬기의 게이트는 Agent 서비스의 것이다
@@ -1383,6 +1414,7 @@ def build_services(
             interval=settings.evaluation_interval,
         ),
         turn_grants=turn_grants,
+        agent_calls=agent_calls,
         web_search=WebSearch(
             settings_store=stores.platform_settings,
             hub_store=stores.hub_items,
@@ -1583,6 +1615,7 @@ def attach(app: FastAPI, stores: Stores, services: Services) -> None:
     state.observability_settings = stores.observability_settings
     state.web_search = services.web_search
     state.turn_grants = services.turn_grants
+    state.agent_calls = services.agent_calls
     state.run_service = services.run_service
     state.run_triggers = services.run_triggers
     state.webhooks = services.webhooks

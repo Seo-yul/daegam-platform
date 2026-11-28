@@ -46,6 +46,7 @@ export const samples: SampleFile["samples"] = {
   "canvas.tools.allowCount": [[3], [1]],
   "canvas.tools.timeoutLabel": [["get_weather"]],
   "canvas.tools.timeoutShorter": [["get_weather", 60, 90]],
+  "canvas.tools.agentDataFlow": [["openai-main", "on"]],
   "canvas.memory.notAttached": [["main"]],
   "canvas.memory.filesystemOff": [["main"]],
   "canvas.memory.retentionNote": [[30], [1]],

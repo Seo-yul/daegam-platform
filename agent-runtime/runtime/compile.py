@@ -15,10 +15,11 @@
   건다. wrap_model_call 은 목록 앞이 바깥이라 폴백이 재시도를 감싼다. 서브에이전트는 자기
   limits.retries 의 재시도만 건다.
 - 도구는 MCP 도구(tools[] ref)와 knowledge 검색 도구(knowledge[] ref, knowledge.py)를 이어 붙인
-  것이다(D32). 병합 결과에 같은 이름이 둘이면 tool_name_conflict 로 막는다. ToolNode 는 같은
-  이름을 조용히 덮기 때문이다. 소스가 그 에이전트의 내장 도구와 같은 이름의 도구를 주면 그
-  도구를 빼고 경고(builtin_tool_name)한다. 내장 이름은 deepagents 가 그 모델로 쌓는 것에서 읽는다.
-  소스의 목록은 배포 뒤에도 바뀌어서 막지 않는다.
+  것이다(D32). 기능 agent_tools 의 Agent 소스는 런타임이 만든 Tool 하나를 제 ref 에 둔 소스다
+  (agent_calls.py). 승인 규칙, 바깥 표시, 출처 표가 MCP 소스와 같은 길로 다룬다. 병합 결과에 같은
+  이름이 둘이면 tool_name_conflict 로 막는다. ToolNode 는 같은 이름을 조용히 덮기 때문이다. 소스가
+  그 에이전트의 내장 도구와 같은 이름의 도구를 주면 그 도구를 빼고 경고(builtin_tool_name)한다. 내장
+  이름은 deepagents 가 그 모델로 쌓는 것에서 읽는다. 소스의 목록은 배포 뒤에도 바뀌어서 막지 않는다.
 - 파일 백엔드는 CompositeBackend 이고 기본은 세션 안 StateBackend 다. `/uploads/` 는 첨부 글을
   읽기 전용으로 보이는 라우트이고(uploads.py) 쓰기 막기 규칙(permissions.py)이 메인과
   서브에이전트의 파일 도구에 걸린다. 메인 모델 호출에는 첨부 이미지를 채우는 미들웨어가 우리
@@ -78,6 +79,7 @@ from langchain_core.tools import BaseTool
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph.state import CompiledStateGraph
 
+from runtime.agent_calls import AgentCalls
 from runtime.budget import SessionBudget
 from runtime.config import AgentConfig, ConfigError
 from runtime.guards import (
@@ -433,13 +435,31 @@ def _merge_tools(
     return merged
 
 
+def _with_agent_calls(
+    config: AgentConfig,
+    tools_by_ref: dict[str, list[BaseTool]],
+    agent_calls: AgentCalls | None,
+) -> dict[str, list[BaseTool]]:
+    """읽어 둔 MCP 도구에 Agent 소스의 Tool 을 제 ref 로 더한 것이다. Agent 소스가 있는데
+    AgentCalls 가 없으면 있어야 할 도구가 없는 채 도는 것이므로 ConfigError(agent_calls_missing)
+    다."""
+    if not config.agent_sources:
+        return tools_by_ref
+    if agent_calls is None:
+        raise ConfigError(
+            "agent_calls_missing", "tools[] 에 Agent 소스가 있는데 그 Tool 이 만들어지지 않았다"
+        )
+    return {**tools_by_ref, **agent_calls.tools_by_ref}
+
+
 def tool_source_table(
     config: AgentConfig,
     tools_by_ref: dict[str, list[BaseTool]],
     dropped: frozenset[str],
 ) -> dict[str, dict[str, str]]:
-    """도구 이름마다의 출처다. MCP 도구는 그 소스의 `tools[].source`, 검색 도구는 그 Knowledge Base
-    다. 내장 도구와 task 는 표에 없고 트레이서가 builtin·subagent 로 본다. 내장 이름이라 뺀
+    """도구 이름마다의 출처다. MCP 도구와 Agent 소스의 Tool 은 그 소스의 `tools[].source`, 검색
+    도구는 그 Knowledge Base 다. 내장 도구와 task 는 표에 없고 트레이서가 builtin·subagent 로 본다.
+    내장 이름이라 뺀
     도구(dropped)도 그래서 넣지 않는다. 소스끼리 같은 이름은 뒤의 것이다. ToolNode 가 같은 이름을
     뒤의 것으로 덮기 때문이다."""
     table: dict[str, dict[str, str]] = {}
@@ -552,13 +572,16 @@ def compile_agent(
     model: BaseChatModel | None = None,
     long_term: LongTermMemory | None = None,
     sandboxes: Sandboxes | None = None,
+    agent_calls: AgentCalls | None = None,
 ) -> CompiledAgent:
     """agent.json 과 이미 읽어 둔 MCP 도구·knowledge 검색 도구로 그래프를 만든다.
 
     model 을 주면 main.model 대신 그것을 쓴다(테스트가 스크립트 모델을 끼운다). long_term 을
     주면 /memories/ 가 그 저장소로 가고, 임시 턴용 그래프를 한 벌 더 만든다. 안 주면 백엔드도
-    프롬프트도 예전과 같다. 코드 실행 문서는 sandboxes 가 있어야 한다(boot.py 가 연다).
+    프롬프트도 예전과 같다. 코드 실행 문서는 sandboxes 가 있어야 한다(boot.py 가 연다). Agent
+    소스가 든 문서는 agent_calls 가 있어야 한다.
     """
+    tools_by_ref = _with_agent_calls(config, tools_by_ref, agent_calls)
     main = config.main
     filesystem = config.filesystem
     skills = load_skills(config)

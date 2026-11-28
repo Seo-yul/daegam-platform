@@ -48,7 +48,7 @@ from daegam.services.turn_gates import owner_cedar
 from daegam.store.agents import Agent, MongoAgentStore
 from daegam.store.clusters import Cluster
 from daegam.store.gateways import Gateway, GatewayRevision, GatewaySpec, MongoGatewayStore
-from daegam.store.hub import PLATFORM_KIND, PUBLISHED_KIND, HubItem
+from daegam.store.hub import AGENT_KIND, PLATFORM_KIND, PUBLISHED_KIND, HubItem
 
 MAX_BACKENDS = 20  # 넘으면 경고 (vMCP 는 세션마다 백엔드 전부에 tools/list 를 보낸다)
 # 상태 warnings[] 의 코드. 노출한 Gateway 가 바깥 클라이언트를 허용하지 않은 웹 Tool 에 닿는다
@@ -122,8 +122,9 @@ class GatewayValidator:
         """backends 의 허브 항목을 principal 이 tenant 에서 볼 수 있고(view) 고를 수 있는지
         (consume), 같은 클러스터인지(클러스터 없는 플랫폼 항목은 빼고), tools ⊆ tool_names 인지.
         view 가 없는 항목은 없는 항목과 같은 422 unknown_hub_item 이고 consume 이 없으면 422
-        hub_item_not_consumable 이다 (D23). 이미지가 거부된 image 항목은 422 hub_backend_refused
-        다 (P55 6절). tool_names 가 비어 있으면 검증을 건너뛰고 경고를
+        hub_item_not_consumable 이다 (D23). 게시한 Agent 의 항목은 백엔드가 되지 못한다 (422
+        agent_item_gateway_unsupported, P46 6.1절). 이미지가 거부된 image 항목은 422
+        hub_backend_refused 다 (P55 6절). tool_names 가 비어 있으면 검증을 건너뛰고 경고를
         돌려준다. 토큰 인증의 published 항목은 `check_published` 가 본다 (P57 6.1·6.2절).
         authz_policy 의 문장 하나라도 파싱되지 않으면 422 authz_invalid 다 (T63). (items,
         warnings)"""
@@ -150,6 +151,16 @@ class GatewayValidator:
             item = items.get(b.hub_item_id)
             if item is None or not can(principal, tenant, item, "view"):
                 raise self.error_cls(422, "unknown_hub_item", f"hub item {b.hub_item_id} not found")
+            if item.kind == AGENT_KIND:
+                # 저장도 배포도 여기를 지난다. Gateway 에서 Agent 로 가는 호출에는 사람이 실리지
+                # 않는다
+                raise self.error_cls(
+                    422,
+                    "agent_item_gateway_unsupported",
+                    f"{item.name}: an agent item cannot be a gateway backend; attach it as a "
+                    "tool on an agent's canvas",
+                    hub_item_id=item.id,
+                )
             if not can(principal, tenant, item, "consume"):
                 raise self.error_cls(
                     422,

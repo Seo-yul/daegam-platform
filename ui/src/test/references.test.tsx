@@ -101,7 +101,7 @@ describe("리소스 사이 링크", () => {
   });
 
   it("캔버스 인스펙터도 고른 것을 이름으로 부르고 못 찾으면 삭제된 항목이다", () => {
-    const options = { providers: [], gateways: [], mcpServers: [mcpServerFixture()], dataServices: [dsPostgres], knowledgeBases: [], skills: [], ready: true };
+    const options = { providers: [], gateways: [], mcpServers: [mcpServerFixture()], agentItems: [], dataServices: [dsPostgres], knowledgeBases: [], skills: [], ready: true };
     expect(sourceLabel(ko, { kind: "mcp_instance", id: "ms-calc" }, options)).toBe("calc");
     expect(sourceLabel(ko, { kind: "mcp_instance", id: "ms-gone" }, options)).toBe(ko.ui.names.deleted);
     expect(sourceLabel(ko, { kind: "mcp_instance", id: "" }, options)).toBe("미선택");
@@ -113,7 +113,7 @@ describe("리소스 사이 링크", () => {
   it("목록을 아직 못 받았으면 지워졌다고 하지 않는다", () => {
     // 빈 목록과 "아직 안 온 목록" 은 같은 모양이다. 둘을 같은 말로 그리면 화면이 열리는 동안
     // 멀쩡한 참조가 지워진 것처럼 보인다 (캔버스 노드 제목이 실제로 그랬다)
-    const loading = { providers: [], gateways: [], mcpServers: [], dataServices: [], knowledgeBases: [], skills: [], ready: false };
+    const loading = { providers: [], gateways: [], mcpServers: [], agentItems: [], dataServices: [], knowledgeBases: [], skills: [], ready: false };
     expect(sourceLabel(ko, { kind: "mcp_instance", id: "ms-calc" }, loading)).toBe(LOADING_LABEL);
     expect(dataServiceLabel(ko, "ds-pg", loading)).toBe(LOADING_LABEL);
     // 아직 고르지 않은 것은 로딩과 상관없이 그대로다

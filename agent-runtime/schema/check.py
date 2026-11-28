@@ -75,6 +75,23 @@ WEB = "web-agent.json"
 # 기능 skills 의 핀 하나다(D64). 표본 문서의 것을 그대로 쓴다
 SKILL_PIN = json.loads((FIXTURES_DIR / SK).read_text(encoding="utf-8"))["skills"][0]
 
+# 기능 agent_tools 의 Agent 소스 하나다. 표본 문서가 없어 최소 문서에 심는다
+AGENT_SOURCE = {
+    "ref": "tools-research",
+    "source": {"kind": "agent", "id": "ag-research-0001", "name": "research"},
+    "url": "http://platform.daegam-system.svc:8000/api/internal/agent-calls/ag-research-0001",
+    "allow": ["ask_research"],
+    "approval": {},
+    "timeouts": {},
+    "description": "Answers research questions.",
+    "timeout_seconds": 630,
+}
+AGENT_DOC = [
+    ("features", ["agent_tools"]),
+    ("tools", [AGENT_SOURCE]),
+    ("main.tools", ["tools-research"]),
+]
+
 # (이름, fixture 파일, 점 경로, 값) 계약 위반 예시. 하나라도 통과하면 계약이 느슨한 것이다.
 BAD_CASES: list[tuple[str, str, str, Any]] = [
     ("top_level_unknown_key", MIN, "extra", 1),
@@ -137,6 +154,11 @@ BAD_CASES: list[tuple[str, str, str, Any]] = [
     ("web_domain_unicode", WEB, "tools.1.web.allow_domains", ["한국.kr"]),
     ("web_per_user_zero", WEB, "tools.1.web.per_user.fetch_per_day", 0),
     ("web_unknown_key", WEB, "tools.1.web.proxy", "http://p"),
+    # Agent 소스의 칸은 MCP 소스에 실리지 않는다
+    ("mcp_source_with_description", SUP, "tools.0.description", "x"),
+    ("mcp_source_with_timeout_seconds", SUP, "tools.0.timeout_seconds", 30),
+    ("mcp_source_without_transport", SUP, "tools.0.transport", DELETE),
+    ("mcp_source_without_auth", SUP, "tools.0.auth", DELETE),
 ]
 
 # 여러 곳을 함께 바꿔야 하는 경우다. (이름, fixture, 변경 목록) 이고 pass 가 통과 기대다.
@@ -214,6 +236,58 @@ LADDER_CASES: list[tuple[str, str, list[tuple[str, Any]], bool]] = [
         WEB,
         [("tools.1.web.fetch", None), ("tools.1.allow", ["web_search"])],
         True,
+    ),
+    # Agent 소스는 features 에 agent_tools 가 있을 때만 받는다. Tool 은 이름 하나이고 설명과 제한
+    # 시간이 박혀 있으며 MCP 의 칸과 표시 칸은 받지 않는다
+    ("agent_source", MIN, AGENT_DOC, True),
+    (
+        "agent_source_with_approval",
+        MIN,
+        [*AGENT_DOC, ("tools.0.approval", {"ask_research": ["approve", "reject"]})],
+        True,
+    ),
+    ("agent_source_without_feature", MIN, AGENT_DOC[1:], False),
+    ("agent_source_without_description", MIN, [*AGENT_DOC, ("tools.0.description", DELETE)], False),
+    (
+        "agent_source_without_timeout",
+        MIN,
+        [*AGENT_DOC, ("tools.0.timeout_seconds", DELETE)],
+        False,
+    ),
+    ("agent_source_two_tools", MIN, [*AGENT_DOC, ("tools.0.allow", ["ask_a", "ask_b"])], False),
+    ("agent_source_other_tool_name", MIN, [*AGENT_DOC, ("tools.0.allow", ["research"])], False),
+    (
+        "agent_source_with_timeouts",
+        MIN,
+        [*AGENT_DOC, ("tools.0.timeouts", {"ask_research": 9})],
+        False,
+    ),
+    (
+        "agent_source_with_transport",
+        MIN,
+        [*AGENT_DOC, ("tools.0.transport", "streamable_http")],
+        False,
+    ),
+    ("agent_source_with_auth", MIN, [*AGENT_DOC, ("tools.0.auth", {"kind": "none"})], False),
+    (
+        "agent_source_with_read",
+        MIN,
+        [
+            *AGENT_DOC,
+            ("features", ["agent_tools", "tool_safety"]),
+            ("tools.0.read", ["ask_research"]),
+        ],
+        False,
+    ),
+    (
+        "agent_source_with_inside",
+        MIN,
+        [
+            *AGENT_DOC,
+            ("features", ["agent_tools", "tool_safety"]),
+            ("tools.0.inside", ["ask_research"]),
+        ],
+        False,
     ),
 ]
 

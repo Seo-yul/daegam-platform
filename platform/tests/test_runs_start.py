@@ -15,13 +15,18 @@ from daegam.services.agent_runtime import ClosingBody, ProxyResponse
 from daegam.services.lease_worker import LeaseWorker
 from daegam.services.runs.events import RunEvents
 from daegam.services.runs.fire import ScheduleFireWorker
-from daegam.services.runs.person import BoundPersonCheck
-from daegam.services.runs.service import MAX_RUNNING
-from daegam.services.runs.start import MAX_PARALLEL, RETRY_BASE, RunStartWorker
+from daegam.services.runs.person import ACTS_AS_UNAVAILABLE, BoundPersonCheck
+from daegam.services.runs.service import MAX_CALLS_RUNNING, MAX_RUNNING
+from daegam.services.runs.start import (
+    AGENT_CALL_TIMEOUT,
+    MAX_PARALLEL,
+    RETRY_BASE,
+    RunStartWorker,
+)
 from daegam.services.runs.watch import RunWatchWorker
 from daegam.services.turn_grants import TurnTokensUnavailable
 from daegam.services.turn_person import TurnDelegation
-from daegam.store.agent_runs import ActsAs, AgentRun
+from daegam.store.agent_runs import ActsAs, AgentRun, RunCaller
 from tests.helpers.agents import template_spec
 from tests.helpers.runs import (
     BOUND,
@@ -687,6 +692,150 @@ def test_a_refused_answer_ends_the_grant_and_an_unavailable_grant_retries():
 
 
 # -- 한 바퀴와 수명 ----------------------------------------------------------------------------
+
+
+# -- 다른 Agent 가 부른 실행 (P46 6.3·6.4절) -------------------------
+
+
+def _call(rig: Rig, *, long_bound: bool = False, **fields: Any) -> AgentRun:
+    """다른 Agent 가 Tool 로 부른 실행 기록이다. 사람은 부른 턴의 사람이다."""
+    caller = RunCaller(
+        agent_id="ag-calling",
+        grant_id="g-calling",
+        chain=["ag-calling"],
+        long_bound=long_bound,
+        untrusted=fields.pop("untrusted", True),
+        timeout_at=fields.pop("timeout_at", NOW + timedelta(minutes=11)),
+    )
+    return rig.add(source="agent", acts_as=BOUND, caller=caller, **fields)
+
+
+def _viewer_rig(settings: Settings = LOCAL, **kw: Any) -> Rig:
+    """부른 사람은 그 테넌트에서 대화만 할 수 있는 사람이다."""
+    person = kw.pop("person", None) or person_check(
+        settings, FakeUsers(alice()), ("alice", "default", "viewer")
+    )
+    return Rig(settings, person=person, **kw)
+
+
+def test_a_call_opens_an_agent_grant_with_the_roots_bound_as_the_calling_person():
+    rig = _viewer_rig()
+    run = _call(rig, long_bound=True, untrusted=False)
+    rig.proxy.answers.append(rig.accepted(run, **{"x-daegam-turn-grant": "g1"}))
+    stored = rig.start(run)
+    opened = rig.grants.opened[0]
+    assert (opened["trigger"], opened["long_bound"], opened["run_id"]) == ("agent", True, run.id)
+    assert (opened["person"].sub, opened["person"].tv) == ("alice", 3)
+    assert (stored.status, stored.grant_id, stored.acts_as.kind) == ("running", "g1", "person")
+    assert rig.proxy.calls[0]["untrusted"] is False
+
+
+def test_a_scheduled_run_keeps_the_run_trigger_and_names_its_run():
+    rig = _local_rig()
+    run = rig.add(acts_as=BOUND)
+    rig.proxy.answers.append(rig.accepted(run, **{"x-daegam-turn-grant": "g1"}))
+    rig.start(run)
+    opened = rig.grants.opened[0]
+    assert (opened["trigger"], opened["long_bound"], opened["run_id"]) == ("run", None, run.id)
+
+
+def test_an_untrusted_call_reaches_the_runtime_as_untrusted():
+    rig = _viewer_rig()
+    run = _call(rig)
+    rig.proxy.answers.append(rig.accepted(run, **{"x-daegam-turn-grant": "g1"}))
+    rig.start(run)
+    assert rig.proxy.calls[0]["untrusted"] is True
+
+
+@pytest.mark.parametrize(
+    "grants", [FakeGrants(refuse={"alice"}), FakeGrants(off=True)], ids=["refused", "not minted"]
+)
+def test_a_call_whose_grant_is_refused_or_not_minted_fails_without_calling_the_runtime(grants):
+    rig = _viewer_rig(grants=grants)
+    stored = rig.start(_call(rig))
+    assert (stored.status, stored.reason) == ("failed", ACTS_AS_UNAVAILABLE)
+    assert rig.proxy.calls == []
+
+
+def test_a_call_to_an_agent_without_token_targets_goes_on_without_a_grant():
+    rig = _viewer_rig(grants=FakeGrants(no_targets=True))
+    run = _call(rig)
+    rig.proxy.answers.append(rig.accepted(run))
+    stored = rig.start(run)
+    assert (stored.status, stored.grant_id) == ("running", None)
+    assert (stored.acts_as.kind, stored.acts_as.cause) == ("agent", "no_turn_token")
+
+
+def test_a_call_for_a_person_without_an_idp_record_fails_in_oidc_mode():
+    rig = _viewer_rig(OIDC, person=person_check(OIDC, None, ("alice", "default", "viewer")))
+    stored = rig.start(_call(rig))
+    assert (stored.status, stored.reason) == ("failed", ACTS_AS_UNAVAILABLE)
+    assert rig.grants.opened == [] and rig.proxy.calls == []
+
+
+def test_a_call_the_pod_took_without_its_grant_fails_and_that_turn_is_stopped():
+    rig = _viewer_rig()
+    run = _call(rig)
+    rig.proxy.answers.append(rig.accepted(run))
+    stored = rig.start(run)
+    assert (stored.status, stored.reason) == ("failed", ACTS_AS_UNAVAILABLE)
+    assert rig.grants.ended == [("g1", "not_accepted")]
+    assert [(r.id, r.session_id, r.turn_id) for r in rig.turns.stopped] == [(run.id, "s1", "t1")]
+
+
+def test_a_call_whose_earlier_turn_left_no_identity_fails_and_that_turn_is_stopped():
+    rig = _viewer_rig()
+    run = _call(rig)
+    rig.proxy.answers.append(_run_exists(rig, "t7"))
+    stored = rig.start(run)
+    assert (stored.status, stored.reason) == ("failed", ACTS_AS_UNAVAILABLE)
+    assert [(r.session_id, r.turn_id) for r in rig.turns.stopped] == [("s9", "t7")]
+
+
+def test_a_call_in_header_mode_runs_as_the_agent():
+    rig = Rig()
+    run = _call(rig)
+    rig.proxy.answers.append(rig.accepted(run))
+    stored = rig.start(run)
+    assert (stored.status, stored.acts_as.kind, stored.acts_as.cause) == (
+        "running",
+        "agent",
+        "header_mode",
+    )
+
+
+def test_a_calling_person_who_lost_chat_ends_the_call_and_pauses_nothing():
+    """부른 사람은 소스에 묶인 사람이 아니다. 접근을 잃어도 그 사람의 스케줄을 멈추지 않는다."""
+    schedule = schedule_of(acts_as=BOUND, revision=3)
+    person = person_check(LOCAL, FakeUsers(alice()), ("alice", "default", "operator"))
+    rig = Rig(LOCAL, person=person, schedules=(schedule,))
+    stored = rig.start(_call(rig))
+    assert (stored.status, stored.reason) == ("cancelled", "acts_as_lost_access")
+    assert rig.schedules.docs[schedule.id].paused is False and rig.proxy.calls == []
+
+
+def test_a_call_counts_against_the_call_cap_not_the_run_cap():
+    rig = _viewer_rig()
+    for _ in range(MAX_RUNNING):
+        rig.runs.add(run_of(status="running"))
+    run = _call(rig)
+    rig.proxy.answers.append(rig.accepted(run, **{"x-daegam-turn-grant": "g1"}))
+    assert rig.start(run).status == "running"
+    for _ in range(MAX_CALLS_RUNNING):
+        rig.runs.add(run_of(status="running", source="agent"))
+    late = rig.start(_call(rig))
+    assert (late.status, late.reason) == ("cancelled", "agent_call_busy")
+
+
+def test_a_retry_past_the_calls_timeout_is_dropped():
+    rig = _viewer_rig()
+    run = _call(rig, timeout_at=NOW + RETRY_BASE - timedelta(seconds=1))
+    rig.proxy.answers.append(rig.proxy.answer(503))
+    stored = rig.start(run)
+    assert (stored.status, stored.reason, stored.attempts) == ("failed", AGENT_CALL_TIMEOUT, 1)
+    patient = _call(rig)
+    rig.proxy.answers.append(rig.proxy.answer(503))
+    assert rig.start(patient).status == "starting"
 
 
 def test_a_tick_starts_one_run_per_agent_and_refills_a_slot_as_soon_as_it_frees():

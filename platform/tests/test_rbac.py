@@ -10,6 +10,7 @@ import pytest
 from daegam.auth import rbac
 from daegam.auth.principal import Membership, Principal, header_principal
 from daegam.urls import (
+    AGENT_CALL_ROUTES,
     HOOK_ROUTE,
     SANDBOX_ROUTES,
     TEAMS_MESSAGES_ROUTE,
@@ -441,8 +442,10 @@ def test_every_write_route_declares_a_scope(offline_settings, fake_clusters, fak
     # 정한다(런타임 이벤트 수집과 게이트웨이 사용량 수집, P37 3절·8절, 턴 위임의 갱신과 끝, P53
     # 4절). 웹훅 호출은 트리거의 서명이 자격이다 (P41 4절). 샌드박스의 열기·쓰기 표시·닫기도
     # 인스턴스 토큰이 자격이다 (P40 5절). Teams 의 활동은 Bot Connector 의 토큰이 자격이다
-    # (P47 6.2절)
+    # (P47 6.2절). Agent 호출은 부르는 턴의 호출 토큰이나 header 모드의 인스턴스 토큰이
+    # 자격이다 (P46 6.3절)
     machine = {
+        *AGENT_CALL_ROUTES.values(),
         TELEMETRY_EVENTS_PATH,
         *TELEMETRY_OTLP_PATHS.values(),
         *TURN_GRANT_ROUTES.values(),

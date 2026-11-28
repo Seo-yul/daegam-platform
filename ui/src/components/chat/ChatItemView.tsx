@@ -27,11 +27,13 @@ import { useT } from "@/i18n";
 import type { AttachmentFacts } from "@/lib/attachments";
 import type { ToolCallStatus } from "@/lib/chatStream";
 import { describeCode } from "@/lib/errorText";
+import { isAgentCallTool } from "@/lib/hub";
 import { guardrailMessage } from "@/lib/serverLiterals";
 import { writtenFile } from "@/lib/sessionFiles";
 import { tokensOf } from "@/lib/usage";
 import { cn } from "@/lib/utils";
 
+import { AgentRunLink } from "./AgentRunLink";
 import { AskCard } from "./AskCard";
 import { AttachmentChips, sentChips } from "./AttachmentChips";
 import { CitationSources, useCitationMarkdown } from "./Citations";
@@ -307,6 +309,8 @@ export function ToolCallView({ item, testId }: { item: Extract<ChatItem, { kind:
         <span className="ml-auto pl-3 text-muted">{open ? text.collapse : text.expand}</span>
       </button>
       {written ? <WrittenFileDownload path={written} testId={`${testId}-download`} /> : null}
+      {/* 다른 Agent 를 부른 호출은 그 Agent 의 실행이다 (P46 6.3절). 답이 왔거나 거절된 뒤에 그 기록을 연다 */}
+      {item.result && isAgentCallTool(item.call.name) ? <AgentRunLink tool={item.call.name} testId={`${testId}-view-run`} /> : null}
       {open ? (
         <div className="mt-2 flex flex-col gap-1.5" data-testid={`${testId}-detail`}>
           <div className="text-[11px] font-semibold text-muted">{text.args}</div>

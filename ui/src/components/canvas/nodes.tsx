@@ -8,7 +8,7 @@ import { BookOpen, Bot, Database, LogIn, ShieldCheck, Sparkles, Wrench } from "l
 import type { CSSProperties, ComponentType, ReactNode } from "react";
 
 import { useT } from "@/i18n";
-import { DEFAULT_EFFORT, DEFAULT_KNOWLEDGE_TOOL_NAME, EDGE_KINDS, SOURCE_KINDS, attachedModelIds, connectionText, issueText, longTermEnabled, nodePorts, type Issue, type NodePort, type NodeType } from "@/lib/agentGraph";
+import { AGENT_SOURCE, DEFAULT_EFFORT, DEFAULT_KNOWLEDGE_TOOL_NAME, EDGE_KINDS, SOURCE_KINDS, attachedModelIds, connectionText, issueText, longTermEnabled, nodePorts, type Issue, type NodePort, type NodeType } from "@/lib/agentGraph";
 import { isPinBehind, pinText, pinsOf } from "@/lib/agentSkills";
 import { unresolvedLabel } from "@/lib/names";
 import { kindColor, kindTint } from "@/lib/kindColor";
@@ -306,7 +306,7 @@ function ToolsNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const name = d.source?.id ? (ctx.lookup.sourceName(d.source.kind, d.source.id) ?? unresolvedLabel(t, ctx.lookup.ready)) : null;
   const approvals = Object.keys(d.approval ?? {}).length;
   return (
-    <NodeCard id={id} type="tools" title={name ?? text.sourceUnset} subtitle={SOURCE_KINDS[d.source?.kind ?? "gateway_instance"].label} selected={selected}>
+    <NodeCard id={id} type="tools" title={name ?? text.sourceUnset} subtitle={d.source?.kind === AGENT_SOURCE ? t.canvas.tools.sources.agent.subtitle : SOURCE_KINDS[d.source?.kind ?? "gateway_instance"].label} selected={selected}>
       <Chip testId={`node-tools-${id}`}>{d.allow_tools?.length ? text.allowed(d.allow_tools.length) : text.allTools}</Chip>
       {approvals ? (
         <Chip tone="warn" testId={`node-hitl-${id}`}>

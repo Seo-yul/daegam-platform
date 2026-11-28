@@ -22,13 +22,33 @@ STRICT = False
 
 STATUS: dict[str, int] = {
     "account_disabled": 401,
+    # 다른 Agent 가 부른 실행을 부른 턴의 사람으로 돌릴 수 없다 (P46 6.4절)
+    "acts_as_unavailable": 403,
     # 잠든 Agent 에 런타임을 읽는 요청이다. 읽기는 깨우지 않는다 (P44 8절)
     "agent_asleep": 409,
     # 잠들게 하려는데 턴이 리스를 쥐고 있다 (P44 7절)
     "agent_busy": 409,
+    # 호출받는 Agent 가 호출의 상한에 닿았거나 배포 중이다 (P46 6.3절)
+    "agent_call_busy": 429,
+    # 호출받는 Agent 가 이미 그 호출의 사슬에 있다 (P46 6.5절)
+    "agent_call_cycle": 409,
+    # 부르는 턴 하나가 시작할 수 있는 호출 수를 넘었다 (P46 6.5절)
+    "agent_call_fanout": 429,
+    # 사람이 그 Agent 에 보내는 호출이 분당 한도를 넘었다 (P46 6.3절)
+    "agent_call_rate_limited": 429,
+    # 호출의 사슬이 Agent 셋을 넘게 된다 (P46 6.5절)
+    "agent_call_too_deep": 409,
+    # Agent 호출이 꺼진 플랫폼에서 Agent 를 허브에 게시하거나 다른 Agent 를 부르려 했다 (P46 6.5절)
+    "agent_calls_disabled": 409,
     "agent_client_id_is_ui_client": 422,
+    # 게시한 Agent 의 허브 항목은 Gateway 의 백엔드가 되지 못한다 (P46 6.1절)
+    "agent_item_gateway_unsupported": 422,
     "agent_oauth_missing": 422,
     "agent_run_limit": 429,
+    # 다른 Agent 가 Tool 로 부를 Agent 에 memory 노드나 세션 예산이 없다 (P46 6.1절)
+    "agent_source_runs_unmet": 409,
+    # 부르려는 Agent 가 허브에 게시돼 있지 않다 (P46 6.1절)
+    "agent_source_unpublished": 409,
     # 잠들 수 없는 Agent 다. 까닭은 `ineligible` 칸이다 (P44 6절)
     "agent_sleep_ineligible": 409,
     # 파드를 다시 띄우는 중이다. Retry-After 뒤에 다시 보낸다 (P44 8절)

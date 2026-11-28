@@ -299,3 +299,33 @@ def test_a_quiet_marked_run_or_one_whose_agent_is_gone_is_cancelled(fields, agen
     proxy = watch(runs, run, at=NOW + QUIET, agents=agents)
     assert (run.status, run.reason) == ("cancelled", reason)
     assert proxy.reads == []
+
+
+def test_each_tick_sweeps_the_calls_of_ended_turns_first_and_survives_its_failure():
+    """틱은 부른 턴이 끝난 Agent 호출을 먼저 취소한다 (P46 6.5절). 쓸기가 실패해도 지켜보기는
+    돈다."""
+    swept: list[str] = []
+
+    async def sweep() -> int:
+        swept.append("swept")
+        if len(swept) == 2:
+            raise RuntimeError("the grant store is down")
+        return 0
+
+    worker = RunWatchWorker(
+        FakeAgents(),  # type: ignore[arg-type]
+        FakeRuns(),  # type: ignore[arg-type]
+        None,  # type: ignore[arg-type]
+        owner="w1",
+        interval=15,
+        lease_seconds=60,
+        caller_sweep=sweep,
+    )
+
+    async def acquire() -> None:
+        swept.append("acquired")
+        return None
+
+    worker.acquire = acquire  # type: ignore[method-assign]
+    assert asyncio.run(worker.tick()) == 0 and asyncio.run(worker.tick()) == 0
+    assert swept == ["swept", "acquired", "swept", "acquired"]

@@ -81,6 +81,14 @@ export const agents = {
       endEvaluation: "미리 보기를 끝내면 이 평가 실행도 취소합니다.",
       end: "끝내기",
     },
+    /** 허브 게시 (P46 6.1절). 단추, 대화상자의 첫 줄, Tool 설명 칸, 호출을 믿는 선택, 답이 가는 곳의 안내다. 게시와 해제 단추의 말은 detail.publishSection 이다. */
+    publish: {
+      action: "허브에 게시",
+      hint: "같은 테넌트의 다른 Agent 가 이 Agent 를 Tool 로 부를 수 있게 허브에 게시합니다. 호출마다 부른 사람의 권한으로 이 Agent 를 실행하고 이 Agent 의 예산과 자동 실행 한도를 사용합니다.",
+      description: { label: "Tool 설명", hint: "부르는 Agent 의 모델이 이 설명을 읽고 언제 부를지 정합니다. 이 Agent 가 하는 일과 받을 요청을 작성해 주세요." },
+      trusted: { label: "호출 내용을 사람이 쓴 것으로 다루기", hint: "끄면 호출마다 외부 내용으로 다루므로 이 Agent 의 쓰기 Tool 은 승인을 기다립니다." },
+      answerNotice: "답은 부른 Agent 의 모델과 대화 기록으로 넘어갑니다. 그 Agent 는 다른 LLM provider 를 사용할 수 있습니다.",
+    },
   },
   /** 잠든 Agent 의 세션 탭, 홈 챗 대화 목록, 기억 서랍. 런타임을 읽지 않고 이 줄과 깨우기 단추를 보인다 (P44 8절). */
   sleepingList: "이 Agent 는 사용하지 않아 파드를 내려 두었습니다. 깨우면 목록을 불러옵니다.",

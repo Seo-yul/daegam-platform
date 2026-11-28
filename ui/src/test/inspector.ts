@@ -2,5 +2,5 @@
 import type { InspectorOptions } from "@/components/canvas/Inspector";
 
 export function inspectorOptions(over: Partial<InspectorOptions> = {}): InspectorOptions {
-  return { providers: [], gateways: [], mcpServers: [], dataServices: [], knowledgeBases: [], skills: [], ready: true, ...over };
+  return { providers: [], gateways: [], mcpServers: [], agentItems: [], dataServices: [], knowledgeBases: [], skills: [], ready: true, ...over };
 }

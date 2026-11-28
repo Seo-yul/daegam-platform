@@ -14,7 +14,15 @@ from pymongo import ASCENDING
 from pymongo.asynchronous.database import AsyncDatabase
 
 from daegam.errors import unauthorized
-from daegam.store.base import Document, UtcDatetime, match_token, new_id, revoke_once, utcnow
+from daegam.store.base import (
+    Document,
+    UtcDatetime,
+    hash_token,
+    match_token,
+    new_id,
+    revoke_once,
+    utcnow,
+)
 
 if TYPE_CHECKING:
     from daegam.store.agents import Agent, MongoAgentStore
@@ -142,4 +150,19 @@ async def pinned_agent(
     await authenticate_instance_token(
         tokens, doc.id, presented, scope=scope_for(doc.id, doc.deployed_revision)
     )
+    return doc
+
+
+async def agent_of_token(
+    agents: MongoAgentStore, tokens: MongoAgentInstanceTokenStore, presented: str
+) -> Agent:
+    """인스턴스 토큰만으로 정한 그 Agent 의 문서다. 토큰이 회수되지 않았고 문서가 배포돼 있을
+    때이며, 자격이 끝난 미리 보기는 `pinned_agent` 처럼 거절한다. 못 찾으면 401 이다. 경로가 부르는
+    Agent 의 id 를 싣지 않는 호출 경로의 header 모드가 쓴다. agents 는 미리 보기도 읽는 보기다."""
+    found = await tokens.get_by_hash(hash_token(presented))
+    doc = await agents.get(found.agent_instance_id) if found is not None and found.active else None
+    if doc is None or doc.deployed_revision is None:
+        raise unauthorized("invalid or revoked token")
+    if doc.preview is not None and utcnow() >= doc.preview.credentials_end:
+        raise unauthorized("invalid or revoked token")
     return doc

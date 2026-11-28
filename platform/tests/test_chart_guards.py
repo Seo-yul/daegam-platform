@@ -41,7 +41,7 @@ OUTSIDE_CONFIGMAP = {
 HEADER_ALLOWED = {"auth": {"mode": "header", "allowHeaderMode": True}}
 # ConfigMap 으로만 받지만 차트가 기본 키를 쓰지 않는 이름. 개발용 스위치 둘과 0 으로 줄이기의 설정
 # 다섯이다(P44 14절). 다섯의 기본은 플랫폼의 것이라 차트를 고치지 않고 A4 가 창의 기본을 바꾼다.
-# 평가의 설정 넷도 기본이 플랫폼의 것이다(P45 13절)
+# 평가의 설정 넷과 Agent 호출의 스위치도 기본이 플랫폼의 것이다(P45 13절, P46 6.5절)
 NO_CHART_DEFAULT = {
     "DAEGAM_ALLOW_STUB_PROVIDER",
     "DAEGAM_SANDBOX_ALLOW_UNCHECKED",
@@ -55,6 +55,7 @@ NO_CHART_DEFAULT = {
     "DAEGAM_EVALUATION_RUNS_PER_DAY",
     "DAEGAM_EVALUATION_RESULT_DAYS",
     "DAEGAM_EVALUATION_GATE_CRITERIA",
+    "DAEGAM_AGENT_CALLS_ENABLED",
 }
 
 

@@ -16,9 +16,10 @@ import jwt
 import pytest
 from pymongo.errors import PyMongoError
 
+from daegam.auth.oidc import AuthError
 from daegam.auth.rbac import ALL_TENANTS
-from daegam.auth.service_token import InternalIssuer
-from daegam.auth.signer import PlatformSigner, server_audience
+from daegam.auth.service_token import InternalIssuer, verify_agent_call_token
+from daegam.auth.signer import PlatformSigner, agent_call_audience, server_audience
 from daegam.config import Settings, settings_from_env
 from daegam.errors import ServiceError
 from daegam.k8s.gates import pack_epoch
@@ -39,7 +40,7 @@ from daegam.services.turn_grants import (
     turn_limits,
 )
 from daegam.store.agent_instance_tokens import AgentInstanceToken, scope_for
-from daegam.store.agents import AgentRuntime
+from daegam.store.agents import AgentCallPin, AgentRuntime, ToolPin
 from daegam.store.auth_reapply import AudienceSwitch, ClusterTurnGates
 from daegam.store.base import hash_token, utcnow
 from daegam.store.memberships import Membership
@@ -772,6 +773,166 @@ def test_a_grant_opened_outside_an_agent_call_holds_no_bound_class(world, mongo)
     """Agent 호출 밖에서 연 위임에는 `long_bound` 칸이 없다. 비어 있으면 저장하지 않는다."""
     _run(world.settings, lambda store: _open(world.build(store)))
     assert "long_bound" not in mongo[TURN_GRANTS].find_one({})
+
+
+# -- 다른 Agent 를 Tool 로 부르는 대상 (P46 6.4절) ----------------------
+
+CALLED = "ag-billing"
+CALL = ("agent", CALLED)
+
+
+def _calling(world: World, **kw: Any) -> None:
+    """ag-1 의 배포된 리비전이 게시한 Agent `ag-billing` 을 Tool 로 쓴다."""
+    pin = AgentCallPin(agent_id=CALLED, agent_name="billing", description="d", timeout_seconds=630)
+    pins = {"tools-billing": ToolPin(names=["ask_billing"], call=pin)}
+    world.agents = [_agent(tool_pins=pins, **kw), _agent(CALLED)]
+
+
+def test_an_agent_source_gets_a_token_only_the_call_routes_take(world, mongo):
+    _calling(world)
+    grant = _run(world.settings, lambda store: _open(world.build(store))).grant.turn_grant
+    tokens = _tokens(grant)
+    assert set(tokens) == ALL | {CALL}
+    call = tokens[CALL]
+    assert (call["iss"], call["aud"]) == (ISSUER, agent_call_audience(TENANT, CALLED))
+    assert (call["bound_to"], call["grant_id"]) == (f"agent-call:{CALLED}", grant["id"])
+    assert (call["sub"], call["act"]["agent_id"]) == (PERSON, AGENT_ID)
+    assert not {"groups", "cid", "tv", "scope"} & set(call)
+    # 다른 대상의 토큰은 위임 id 를 싣지 않고 호출 경로의 검증을 지나지 못한다
+    raw = {(t["kind"], t["id"]): t["token"] for t in grant["tokens"]}
+    for target, token in raw.items():
+        if target == CALL:
+            claims = verify_agent_call_token(token, SIGNER, issuer=ISSUER, agent_id=CALLED)
+            assert claims.grant_id == grant["id"]
+            continue
+        assert "grant_id" not in tokens[target]
+        with pytest.raises(AuthError):
+            verify_agent_call_token(token, SIGNER, issuer=ISSUER, agent_id=CALLED)
+    assert {"kind": "agent", "id": CALLED} in mongo[TURN_GRANTS].find_one({})["targets"]
+
+
+def test_the_agent_target_does_not_depend_on_the_data_plane_issuer_or_the_gate(world):
+    """IdP 를 믿는 oidc 모드와 판정이 없는 게이트에서도 호출 토큰은 나간다. 플랫폼이 검증한다."""
+    world.settings = _oidc(world.settings)
+    world.servers, world.gateways, world.verdict = [], [], None
+    _calling(world)
+    assert _targets(world) == {CALL}
+
+
+@pytest.mark.parametrize("change", ["calls off", "runs off", "agent gone", "other tenant"])
+def test_an_agent_target_needs_calls_on_and_the_called_agent_in_the_tenant(world, change):
+    _calling(world)
+    if change == "calls off":
+        world.settings = dataclasses.replace(world.settings, agent_calls_enabled=False)
+    elif change == "runs off":
+        world.settings = dataclasses.replace(world.settings, runs_enabled=False)
+    elif change == "agent gone":
+        world.agents = world.agents[:1]
+    else:
+        world.agents[1] = _agent(CALLED, tenant="other")
+    assert _targets(world) == ALL
+
+
+def test_a_renewal_mints_the_agent_target_again_and_drops_it_once_the_agent_is_gone(world, mongo):
+    _calling(world)
+    assert set(_tokens(_renew_after(world))) == ALL | {CALL}
+    mongo[TURN_GRANTS].delete_many({})
+    gone = _renew_after(world, lambda w: setattr(w, "agents", w.agents[:1]))
+    assert set(_tokens(gone)) == ALL
+    assert {"kind": "agent", "id": CALLED} not in mongo[TURN_GRANTS].find_one({})["targets"]
+
+
+def test_an_agent_only_grant_reports_no_targets_apart_from_a_refusal(world):
+    """대상이 없는 Agent 와 위임을 열 수 없는 플랫폼, 확인을 지나지 못한 사람을 가른다. 다른
+    Agent 가 부른 실행은 첫째만 위임 없이 돈다."""
+    world.servers, world.gateways = [], []
+    opened = _run(world.settings, lambda store: _open(world.build(store)))
+    assert (opened.grant, opened.refused, opened.no_targets) == (None, None, True)
+    world.users = []
+    lost = _run(world.settings, lambda store: _open(world.build(store)))
+    assert lost.refused == "deleted" and lost.no_targets is False
+    world.settings = dataclasses.replace(world.settings, turn_tokens_enabled=False)
+    off = _run(world.settings, lambda store: _open(world.build(store)))
+    assert (off.grant, off.refused, off.no_targets) == (None, None, False)
+
+
+def test_a_call_grant_stores_the_roots_bound_and_its_run(world, mongo):
+    _run(
+        world.settings,
+        lambda store: _open(
+            world.build(store), trigger="agent", session_id=None, long_bound=True, run_id="r1"
+        ),
+    )
+    stored = mongo[TURN_GRANTS].find_one({})
+    assert (stored["trigger"], stored["long_bound"], stored["run_id"]) == ("agent", True, "r1")
+    assert "calls" not in stored
+
+
+def test_in_oidc_mode_a_call_opens_and_renews_with_the_roots_bound(world):
+    """채팅이 뿌리인 호출은 사람이 그 요청에 없으므로 열 때도 대화형 한도를 본다. 실행이 뿌리인
+    호출과 그 실행을 재개하는 결정은 긴 한도다. 갱신도 계기가 아니라 적힌 한도 종류를 따른다."""
+    world.settings = _oidc(world.settings)
+    bound = timedelta(seconds=world.settings.turn_owner_confirm_seconds)
+    world.people = [idp_person(PERSON, age=bound)]
+
+    def opened(**kw: Any) -> Any:
+        return _run(world.settings, lambda store: _open(world.build(store), **kw))
+
+    assert opened(trigger="agent", long_bound=False).refused == CONFIRM_BOUND
+    assert opened(trigger="agent", long_bound=True).grant is not None
+    # 자기 결정은 그 요청이 사람을 보였으므로 열 때 보지 않고, 승인자의 재개는 적힌 한도를 본다
+    assert opened(trigger="decide", long_bound=False).grant is not None
+    assert opened(trigger="decide", long_bound=False, decided_by="bob").refused == CONFIRM_BOUND
+    assert opened(trigger="decide", long_bound=True, decided_by="bob").grant is not None
+
+    def aged(w: World) -> None:
+        w.people = [idp_person(PERSON, age=bound)]
+
+    world.people = [idp_person(PERSON)]
+    kept = _renew_after(world, aged, trigger="agent", stored={"$set": {"long_bound": True}})
+    assert set(_tokens(kept)) == {("mcp_instance", "mcp-1")}
+    world.people = [idp_person(PERSON)]
+    late = _renew_after(world, aged, trigger="agent", stored={"$set": {"long_bound": False}})
+    assert _status(late) == (410, "turn_grant_ended")
+
+
+def test_the_first_end_of_a_grant_tells_the_call_hook_once(world):
+    async def go(store: MongoTurnGrantStore) -> list[str]:
+        service = world.build(store)
+        told: list[str] = []
+
+        async def on_end(grant_id: str) -> None:
+            told.append(grant_id)
+            raise RuntimeError("the hook failed")
+
+        service.on_end = on_end
+        grant = (await _open(service)).grant.turn_grant
+        presented = f"{INSTANCE_TOKEN}:{AGENT_ID}"
+        for _ in range(2):
+            await service.end_by_runtime(
+                AGENT_ID, grant["id"], secret=grant["secret"], presented=presented, reason="done"
+            )
+        await service.end(grant["id"], END_REFUSED)
+        return [g for g in told if g == grant["id"]]
+
+    assert len(_run(world.settings, go)) == 1
+
+
+def test_a_grant_counts_five_calls_and_no_more_once_it_ended(world):
+    async def go(store: MongoTurnGrantStore) -> tuple[list[bool], bool, list[bool]]:
+        service = world.build(store)
+        grant_id = (await _open(service)).grant.id
+        now = utcnow()
+        counted = [await store.count_call(grant_id, limit=5, now=now) for _ in range(6)]
+        other = (await _open(service)).grant.id
+        await service.end(other, END_REFUSED)
+        ended = await store.count_call(other, limit=5, now=now)
+        turns = [await store.count_turn_call("ag:s:t", limit=2, now=now) for _ in range(3)]
+        return counted, ended, turns
+
+    counted, ended, turns = _run(world.settings, go)
+    assert counted == [True] * 5 + [False] and ended is False
+    assert turns == [True, True, False]
 
 
 def test_the_first_end_recorded_stays(world, mongo):

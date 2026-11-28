@@ -12,6 +12,9 @@
 #   그대로 넘긴다. 헤더나 multipart 필드(-F)를 더 붙일 때 쓰고, 본문 없이 넘기려면 JSON 자리에 빈 문자열을 준다
 # api_as TOKEN METHOD PATH [JSON [CURL_ARG...]]
 #   같은 호출을 TOKEN 으로 한다. 사람 본인의 라우트(/me/tokens)를 그 사람의 토큰으로 부른다
+# as_person TOKEN CMD...
+#   CMD 를 TOKEN 의 사람으로 부른다. api 하나는 api_as 로 부르고, 이것은 api 를 안에서 부르는 함수(chat·run_now)에
+#   쓴다. TOKEN 이 비면(header 모드) AUTH 를 그대로 두고 부른다
 # jq_ EXPR
 #   $WORK/body 를 json_of 로 읽는다
 # find_id NAME
@@ -124,6 +127,18 @@ api_as() { # TOKEN METHOD PATH [JSON [CURL_ARG...]]
   local AUTH=(-H "Authorization: Bearer $1")
   shift
   api "$@"
+}
+
+as_person() { # TOKEN CMD...
+  # CMD 가 안에서 읽는 AUTH 를 이 호출 동안만 바꾼다
+  local token="$1"
+  shift
+  if [ -n "$token" ]; then
+    local AUTH=(-H "Authorization: Bearer $token")
+    "$@"
+  else
+    "$@"
+  fi
 }
 
 jq_() { json_of "$WORK/body" "$1"; }

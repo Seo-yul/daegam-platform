@@ -26,7 +26,7 @@ import logging
 from typing import Annotated, Any, Literal
 
 import anyio
-from fastapi import APIRouter, Depends, Query, Request, status
+from fastapi import APIRouter, Depends, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -49,7 +49,8 @@ from daegam.api._agent_proxy import (
 )
 from daegam.api._common import error, forbidden, not_found, references_out
 from daegam.api.deps import Tenant, User, bearer_token, require_scope
-from daegam.api.schemas import ERROR_RESPONSES
+from daegam.api.hub import item_out_live, unpublish_item
+from daegam.api.schemas import ERROR_RESPONSES, DeleteResponse
 from daegam.api.schemas.agents import (
     SESSION_TITLE_MAX_CHARS,
     AgentCancelBody,
@@ -75,6 +76,7 @@ from daegam.api.schemas.agents import (
     RollbackRequest,
     SkipEvaluation,
 )
+from daegam.api.schemas.hub import HubItemWithStatus
 from daegam.api.schemas.mcp_servers import (
     DriftAbsorbResponse,
     ManifestResponse,
@@ -82,6 +84,7 @@ from daegam.api.schemas.mcp_servers import (
 )
 from daegam.api.schemas.references import ReferencesResponse
 from daegam.api.schemas.skills import SkillBundleOut
+from daegam.auth.hub_access import Access
 from daegam.auth.principal import Principal
 from daegam.k8s.preflight import preflight_warnings
 from daegam.names import check_name_unchanged, validate_display_name, validate_name
@@ -107,6 +110,7 @@ from daegam.store.agents import (
     ServiceSettings,
 )
 from daegam.store.base import iso_utc
+from daegam.store.hub import AGENT_DESCRIPTION_MAX
 
 logger = logging.getLogger("daegam.api.agents")
 
@@ -163,6 +167,7 @@ WRITE = Depends(require_scope("agent:write"))
 DEPLOY = Depends(require_scope("agent:deploy"))
 CHAT = Depends(require_scope("agent:chat"))
 APPROVE = Depends(require_scope(APPROVE_SCOPE))
+HUB_WRITE = Depends(require_scope("hub:write"))
 
 
 class AgentGraphBody(BaseModel):
@@ -273,6 +278,7 @@ def review_out(review: GraphReview) -> dict[str, Any]:
         "tool_origins": review.tools.origins,
         "tool_marked": review.tools.marked,
         "tool_safety": True,
+        "agent_calls": review.calls,
     }
 
 
@@ -313,10 +319,13 @@ async def validate_agent_graph(
 ) -> dict[str, Any]:
     """저장 없이 그래프를 검사한다. 저장·배포도 같은 규칙이다. 보이는데 consume 이 없는 Skill 을
     붙였으면 422 `skill_not_consumable` 이다(D64). `agent_id` 는 캔버스가 고치는 Agent 이고, 없는
-    Agent 면 404 다. 검사는 그것에 따라 바뀌지 않는다."""
+    Agent 면 404 다. 게시한 Agent 를 Tool 로 쓰는 노드의 검사가 그것을 읽는다. 그 Agent 자신의
+    항목은 오류(`agent_source_self`)이고, 그 Agent 를 다시 부르는 Agent 는 경고
+    (`agent_call_cycle`)다."""
     if agent_id:
         await get_agent_or_404(store, tenant, agent_id)
-    return review_out(await service.review(tenant, body.spec(), principal=user))
+    review = await service.review(tenant, body.spec(), principal=user, agent_id=agent_id)
+    return review_out(review)
 
 
 @router.get("/summary", response_model=list[AgentSummary], dependencies=[READ])
@@ -380,8 +389,8 @@ async def get_agent(
 async def agent_references(
     tenant: Tenant, store: Agents, agent_id: str, request: Request
 ) -> dict[str, Any]:
-    """이 Agent 의 참조 (D43). 아직 Agent 를 쓰는 리소스는 없어 늘 빈 목록이지만, 상세 여덟이
-    같은 카드를 가지므로 라우트도 여덟이다."""
+    """이 Agent 의 참조 (D43). 이 Agent 를 게시한 허브 항목과, 그 항목을 거쳐 이 Agent 를 Tool 로
+    쓰는 Agent 다 (P46 6.1절)."""
     doc = await get_agent_or_404(store, tenant, agent_id)
     return await references_out(request, "agent", doc.id, tenant=tenant)
 
@@ -631,6 +640,80 @@ async def wake_agent(
     service.proxy.require_deployed(doc, action="wake")
     await service.sleep.wake(doc)
     return _out(doc, await service.status(doc))
+
+
+# -- 허브 게시 (P46 6.1절) ----------------------------------------------------------------------
+
+
+class AgentPublishBody(BaseModel):
+    """허브 게시 본문. name 기본값은 문서 name, display_name 기본값은 문서 display_name 이다
+    (D24). description 은 이 Agent 를 Tool 로 부르는 Agent 의 모델이 읽는 Tool 설명이다.
+    calls_trusted 가 참이면 호출의 메시지를 사람이 쓴 것으로 다룬다. access 는 생략하면 빈 정책이고,
+    agent 항목은 다른 테넌트에 열 수 없다 (422 cross_tenant_unsupported)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = None
+    display_name: str | None = None
+    description: str = Field(min_length=1, max_length=AGENT_DESCRIPTION_MAX)
+    calls_trusted: bool = False
+    access: Access | None = None
+
+
+@router.post(
+    "/{agent_id}/publish",
+    status_code=status.HTTP_201_CREATED,
+    response_model=HubItemWithStatus,
+    response_model_exclude_unset=True,
+    dependencies=[WRITE, HUB_WRITE],
+)
+async def publish_agent(
+    tenant: Tenant,
+    store: Agents,
+    service: Service,
+    agent_id: str,
+    body: AgentPublishBody,
+    response: Response,
+    user: User,
+) -> dict[str, Any]:
+    """허브에 `agent` 항목으로 게시한다. 같은 테넌트의 다른 Agent 가 캔버스에서 이 항목을 Tool 로
+    붙인다. 이미 게시돼 있으면 200 으로 그 항목을 돌려준다. 턴을 받는 Agent 만 되고(409
+    not_deployed·in_progress·deleting), 배포된 리비전에 memory 노드와 세션 예산이 있어야 하며(409
+    agent_source_runs_unmet), 이벤트 수집이 켜져 있고(409 runs_need_events) 런타임 이미지가
+    `runs` 와 `turn_tokens` 를 알려야 한다(409 runtime_feature_missing). Agent 호출이 꺼져 있으면
+    409 agent_calls_disabled 다."""
+    doc = await get_agent_or_404(store, tenant, agent_id)
+    name = validate_name(body.name) if body.name is not None else None
+    display_name = validate_display_name(body.display_name, default=doc.display_name)
+    description = body.description.strip()
+    if not description:
+        raise error(422, "invalid_value", "description must not be blank")
+    item, created = await service.publishing.publish(
+        doc,
+        name=name,
+        display_name=display_name,
+        description=description,
+        calls_trusted=body.calls_trusted,
+        access=body.access,
+        principal=user,
+    )
+    if not created:
+        response.status_code = status.HTTP_200_OK
+    return await item_out_live(service.publishing.hub, item, principal=user, tenant=tenant)
+
+
+@router.delete(
+    "/{agent_id}/publish", response_model=DeleteResponse, dependencies=[WRITE, HUB_WRITE]
+)
+async def unpublish_agent(
+    tenant: Tenant, store: Agents, service: Service, agent_id: str, user: User
+) -> dict[str, Any]:
+    """게시 해제. `DELETE /hub/{id}` 와 같은 판정이다. 항목의 manage 가 없으면 403, 게시돼 있지
+    않으면 404 not_published 다. 이 항목을 Tool 로 쓰는 Agent 가 있어도 해제되고, 그 Agent 의 저장과
+    배포와 호출이 그때부터 거절된다."""
+    doc = await get_agent_or_404(store, tenant, agent_id)
+    hub = service.publishing.hub
+    return await unpublish_item(hub, user, tenant, await hub.agent_item(doc))
 
 
 # -- Advanced 편집 (F7a 공통) -------------------------------------------------------------------
@@ -917,7 +1000,15 @@ async def decide_with(
         return pending
 
     try:
-        plan = await turns.decide(doc, user, session_id, body.decisions, approver=approver)
+        plan = await turns.decide(
+            doc,
+            user,
+            session_id,
+            body.decisions,
+            approver=approver,
+            # 다른 Agent 가 부른 실행의 재개는 뿌리 턴의 한도 종류를 그대로 싣는다 (P46 6.4절)
+            long_bound=run.long_bound if run is not None else None,
+        )
         async with turns.preparing(plan):
             to_save = await choices.to_remember(plan, body.decisions, read_pending)
             delivered = await choices.for_turn(plan, run=run is not None)

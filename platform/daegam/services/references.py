@@ -26,7 +26,11 @@ from typing import Literal, Protocol
 from pydantic import BaseModel, ConfigDict
 
 from daegam.errors import ServiceError
-from daegam.services.agent_graph import references_knowledge_base, references_tool_source
+from daegam.services.agent_graph import (
+    AGENT_SOURCE,
+    references_knowledge_base,
+    references_tool_source,
+)
 from daegam.services.agent_skills import skill_pins
 from daegam.store.agents import MongoAgentStore
 from daegam.store.backend_apis import BackendAPIStore
@@ -195,6 +199,7 @@ TOKEN_GUARD = GuardField(
     "token",
     detail="backend api has active read tokens; revoke them or pass ?force=true",
 )
+# 게시한 Agent 의 항목을 Tool 로 쓰는 Agent 는 막지 않는다. 주인은 언제든 게시를 거둔다 (P46 6.1절)
 HUB_ITEM_DELETE: tuple[GuardField, ...] = (GuardField("gateway_ids", "gateway"),)
 # Knowledge Base 와 Skill 은 두 칸을 늘 함께 싣는다
 KNOWLEDGE_BASE_DELETE: tuple[GuardField, ...] = (
@@ -244,7 +249,8 @@ class ReferenceService:
             await self._cluster(out, id, tenant)
         elif kind == "skill":
             await self._skill(out, id, tenant)
-        # agent 를 쓰는 리소스는 아직 없다. 빈 목록이 옳은 답이다
+        elif kind == "agent":
+            await self._agent(out, id, tenant)
         return out.all()
 
     # -- 가드 ---------------------------------------------------------------------------
@@ -341,6 +347,18 @@ class ReferenceService:
             if _skip(gw.tenant, tenant):
                 continue
             out.add(_ref("gateway", gw, _gateway_revision(gw, item_id)))
+        # 게시한 Agent 의 항목을 Tool 로 쓰는 Agent (P46 6.1절). 다른 종류의 항목에는 없다
+        await self._tool_source(out, AGENT_SOURCE, item_id, tenant)
+
+    async def _agent(self, out: _Collected, agent_id: str, tenant: str | None) -> None:
+        """이 Agent 를 게시한 허브 항목과, 그 항목을 거쳐 이 Agent 를 Tool 로 쓰는 Agent (간접
+        참조). 게시는 배포가 있어야 하므로 배포 쪽이다."""
+        item = await self.hub_items.get_by_agent(agent_id)
+        if item is None:
+            return
+        if not _skip(item.tenant, tenant):
+            out.add(_ref("hub-item", item, "deployed"))
+        await self._tool_source(out, AGENT_SOURCE, item.id, tenant, via="hub-item")
 
     async def _data_service(self, out: _Collected, ds_id: str, tenant: str | None) -> None:
         for doc in await self.mcp_servers.bound_to_data_service(ds_id):
@@ -413,16 +431,23 @@ class ReferenceService:
                 )
 
     async def _tool_source(
-        self, out: _Collected, source_kind: str, source_id: str, tenant: str | None
+        self,
+        out: _Collected,
+        source_kind: str,
+        source_id: str,
+        tenant: str | None,
+        *,
+        via: str | None = None,
     ) -> None:
         """도구 소스로 이것을 쓰는 Agent. 질의는 현재 리비전을 보므로 배포 쪽은 그 문서가 핀한
-        리비전에서 다시 읽는다 (지금의 `in_use` 가드와 같은 범위다)."""
+        리비전에서 다시 읽는다 (지금의 `in_use` 가드와 같은 범위다). via 는 간접 참조가 거친
+        것이다."""
         for agent in await self.agents.referencing_tool_source(source_kind, source_id):
             if _skip(agent.tenant, tenant):
                 continue
             pinned = agent.deployed
             deployed = pinned is not None and references_tool_source(pinned, source_kind, source_id)
-            out.add(_ref("agent", agent, "both" if deployed else "current"))
+            out.add(_ref("agent", agent, "both" if deployed else "current", via=via))
 
 
 def _skip(doc_tenant: str, tenant: str | None) -> bool:

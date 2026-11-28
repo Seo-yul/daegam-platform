@@ -57,6 +57,13 @@ export const agents: Messages["agents"] = {
     sleep: "Stop pod now",
     sleeping: "Stopping pod…",
     clonePlaceholders: { display: "Customer support agent copy", name: "support-agent-copy" },
+    publish: {
+      action: "Publish to hub",
+      hint: "Publishes this Agent to the hub so other Agents of this tenant can call it as a Tool. Each call runs this Agent with the calling person's access and uses this Agent's budget and run limits.",
+      description: { label: "Tool description", hint: "The calling Agent's model reads this to decide when to call. Describe what this Agent does and the requests it takes." },
+      trusted: { label: "Treat calls as written by the person", hint: "Off, every call counts as outside content, so this Agent's write Tools wait for approval." },
+      answerNotice: "Answers go to the calling Agent's model and conversation, which may use another LLM provider.",
+    },
     previews: {
       title: "Open previews",
       row: (name: string, revision: number, time: string): string => `Preview r${revision} by ${name}, ends at ${time}`,

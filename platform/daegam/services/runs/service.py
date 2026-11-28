@@ -32,8 +32,9 @@ from daegam.services.turn_grants import revision_limits
 from daegam.services.turn_person import person_of
 from daegam.services.usage.reports import ReportError, check_zone
 from daegam.store.agent_runs import (
+    CALL_SOURCE,
     MOVING_STATUSES,
-    RUN_SOURCES,
+    RUN_CAP_SOURCES,
     STOP_NOW_STATUSES,
     STOPPED,
     ActsAs,
@@ -62,6 +63,13 @@ MAX_SOURCES = 20
 MAX_RUNNING = 5
 MAX_WAITING = 20
 MAX_RUNS_PER_DAY = 500
+# 다른 Agent 가 Tool 로 부른 실행의 상한 (P46 6.3절). 호출받는 Agent 마다 스케줄·웹훅·지금 실행과
+# 따로 센다
+MAX_CALLS_RUNNING = 10
+MAX_CALLS_WAITING = 20
+MAX_CALLS_PER_DAY = 1000
+AGENT_RUN_LIMIT = "agent_run_limit"
+AGENT_CALL_BUSY = "agent_call_busy"
 # 상한에 걸린 지금 실행의 Retry-After
 CAP_RETRY_AFTER = "60"
 # Agent 를 내리거나 지우거나 소스를 지워 끝난 실행의 까닭
@@ -87,6 +95,49 @@ class SourceKind:
     store: MongoRunSourceStore[Any]
     resource: str
     needs_rule: bool = False
+
+
+@dataclass(frozen=True)
+class RunCaps:
+    """한 갈래의 실행이 Agent 하나에서 함께 지키는 상한이다. sources 의 실행만 세고, 걸리면 code 로
+    거절한다. noun 은 거절 문장이 그 실행을 부르는 말이다."""
+
+    sources: tuple[str, ...]
+    running: int
+    waiting: int
+    per_day: int
+    code: str
+    noun: str
+
+    def error(self, running: int, waiting: int, today: int) -> RunError | None:
+        detail: str | None = None
+        if running >= self.running:
+            detail = f"an agent runs at most {self.running} {self.noun} at once"
+        elif waiting >= self.waiting:
+            detail = f"an agent holds at most {self.waiting} {self.noun} waiting for approval"
+        elif today >= self.per_day:
+            detail = f"an agent starts at most {self.per_day} {self.noun} a day"
+        if detail is None:
+            return None
+        return RunError(429, self.code, detail, headers={"Retry-After": CAP_RETRY_AFTER})
+
+
+RUN_CAPS = RunCaps(
+    RUN_CAP_SOURCES, MAX_RUNNING, MAX_WAITING, MAX_RUNS_PER_DAY, AGENT_RUN_LIMIT, "runs"
+)
+CALL_CAPS = RunCaps(
+    (CALL_SOURCE,),
+    MAX_CALLS_RUNNING,
+    MAX_CALLS_WAITING,
+    MAX_CALLS_PER_DAY,
+    AGENT_CALL_BUSY,
+    "calls from other agents",
+)
+
+
+def caps_of(source: str) -> RunCaps:
+    """그 출처의 실행이 지키는 상한이다."""
+    return CALL_CAPS if source == CALL_SOURCE else RUN_CAPS
 
 
 @dataclass(frozen=True)
@@ -144,19 +195,6 @@ def expiry(days: int, now: datetime) -> datetime:
     return now + timedelta(days=days)
 
 
-def _cap_error(running: int, waiting: int, today: int) -> RunError | None:
-    detail: str | None = None
-    if running >= MAX_RUNNING:
-        detail = f"an agent runs at most {MAX_RUNNING} runs at once"
-    elif waiting >= MAX_WAITING:
-        detail = f"an agent holds at most {MAX_WAITING} runs waiting for approval"
-    elif today >= MAX_RUNS_PER_DAY:
-        detail = f"an agent starts at most {MAX_RUNS_PER_DAY} runs a day"
-    if detail is None:
-        return None
-    return RunError(429, "agent_run_limit", detail, headers={"Retry-After": CAP_RETRY_AFTER})
-
-
 class RunService:
     # 런타임 프록시는 AgentService 가 만들고, AgentService 는 이 서비스의 삭제 훅을 받으므로 만든
     # 뒤에 붙인다 (wiring.py `_check_wiring`)
@@ -192,10 +230,17 @@ class RunService:
         self.kinds = (self.schedule_kind, self.trigger_kind)
 
     def kind_of(self, run: AgentRun) -> SourceKind | None:
-        """실행의 소스 종류. 지금 실행은 소스가 없다."""
+        """실행의 소스 종류. 지금 실행과 다른 Agent 가 부른 실행은 소스가 없다."""
         if run.source_id is None:
             return None
         return next((k for k in self.kinds if k.source == run.source), None)
+
+    def untrusted(self, run: AgentRun) -> bool:
+        """런타임이 입력을 믿지 않는 실행으로 다룰 것인가. 웹훅 본문은 밖에서 온 글이고(4절), 다른
+        Agent 가 부른 실행은 호출이 정해 기록에 둔다(P46 6.6절)."""
+        if run.caller is not None:
+            return run.caller.untrusted
+        return self.kind_of(run) is self.trigger_kind
 
     # -- 묶인 사람 (6절) ---------------------------------------------------------------
 
@@ -356,9 +401,10 @@ class RunService:
 
     async def end_open_for_source(self, source_id: str, reason: str, now: datetime) -> None:
         """소스를 멈추거나 지울 때 그 열린 실행을 중지처럼 끝내고 도는 턴은 런타임에서 멈춘다."""
-        await self._stop_turns(await self.runs.cancel_open_for_source(source_id, reason, now))
+        await self.stop_turns(await self.runs.cancel_open_for_source(source_id, reason, now))
 
-    async def _stop_turns(self, runs: list[AgentRun]) -> None:
+    async def stop_turns(self, runs: list[AgentRun]) -> None:
+        """중지 표시만 남은 도는 실행의 턴을 런타임에서 멈춘다."""
         if self.turns is None:
             return
         for run in runs:
@@ -372,7 +418,7 @@ class RunService:
             return False
         if turn_id is not None:
             current = current.model_copy(update={"turn_id": turn_id})
-        await self._stop_turns([current])
+        await self.stop_turns([current])
         return True
 
     # -- 전제 조건 (10절) -------------------------------------------------------------
@@ -587,50 +633,60 @@ class RunService:
         await self.runs.insert(run)
         return run
 
-    async def cap_error(self, tenant: str, agent_id: str, now: datetime) -> RunError | None:
-        """Agent 하나의 상한에 걸렸으면 그 거절 (10절). 기록을 만들 때 본다. 이 판이 아는 출처의
-        실행만 센다. 뒤 판이 더한 출처의 실행이 이 판의 워커가 잡지 않은 채 남아도 스케줄, 웹훅,
-        지금 실행의 자리를 차지하지 않는다 (P46 A0)."""
+    async def cap_error(
+        self, tenant: str, agent_id: str, now: datetime, caps: RunCaps = RUN_CAPS
+    ) -> RunError | None:
+        """Agent 하나의 상한에 걸렸으면 그 거절 (10절). 기록을 만들 때 본다. caps 의 출처만 센다.
+        스케줄·웹훅·지금 실행과 다른 Agent 가 부른 실행은 서로의 자리를 차지하지 않고, 뒤 판이 더한
+        출처의 실행도 세지 않는다 (P46 6.3절, A0)."""
         day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        return _cap_error(
-            await self._count(tenant, agent_id, MOVING_STATUSES),
-            await self._count(tenant, agent_id, ("waiting_approval",)),
-            await self.runs.count_created_since(tenant, agent_id, day_start, sources=RUN_SOURCES),
+        return caps.error(
+            await self._count(tenant, agent_id, MOVING_STATUSES, caps),
+            await self._count(tenant, agent_id, ("waiting_approval",), caps),
+            await self.runs.count_created_since(tenant, agent_id, day_start, sources=caps.sources),
         )
 
-    async def start_cap_error(self, tenant: str, agent_id: str) -> RunError | None:
+    async def start_cap_error(
+        self, tenant: str, agent_id: str, caps: RunCaps = RUN_CAPS
+    ) -> RunError | None:
         """시작할 때의 상한. `starting` 기록은 만들 때 상한을 지났으므로 도는 것과 기다리는 것만
         센다. 하루 상한도 만들 때 셌다."""
-        return _cap_error(
-            await self._count(tenant, agent_id, ("running",)),
-            await self._count(tenant, agent_id, ("waiting_approval",)),
+        return caps.error(
+            await self._count(tenant, agent_id, ("running",), caps),
+            await self._count(tenant, agent_id, ("waiting_approval",), caps),
             0,
         )
 
-    async def _count(self, tenant: str, agent_id: str, statuses: tuple[RunStatus, ...]) -> int:
-        """상한이 세는 실행 수. 이 판이 아는 출처의 것이다(`RUN_SOURCES`)."""
-        return await self.runs.count_in_statuses(tenant, agent_id, statuses, sources=RUN_SOURCES)
+    async def _count(
+        self, tenant: str, agent_id: str, statuses: tuple[RunStatus, ...], caps: RunCaps
+    ) -> int:
+        """상한이 세는 실행 수. caps 의 출처의 것이다."""
+        return await self.runs.count_in_statuses(tenant, agent_id, statuses, sources=caps.sources)
 
-    async def stop(self, run: AgentRun) -> AgentRun:
+    async def stop(self, run: AgentRun, reason: str = STOPPED) -> AgentRun:
         """중지 (7절). 먼저 표시를 남기고, 아직 시작하지 않았거나 승인을 기다리는 실행은 바로
         끝낸다. 도는 실행은 런타임에 그 턴을 멈추라고 하고, 턴의 `turn_end` 가 기록을 끝낸다. 시작
-        중인 턴은 시작 워커가 표시를 보고 멈춘다."""
+        중인 턴은 시작 워커가 표시를 보고 멈춘다. reason 은 사람의 중지가 아닌 까닭(부른 Agent 의
+        취소)이다."""
         now = utcnow()
-        await self.runs.mark_stop(run, now, STOPPED)
+        await self.runs.mark_stop(run, now, reason)
         await self.runs.move(
-            run.id, from_status=STOP_NOW_STATUSES, to_status="cancelled", now=now, reason=STOPPED
+            run.id, from_status=STOP_NOW_STATUSES, to_status="cancelled", now=now, reason=reason
         )
         updated = await self.runs.get(run.tenant, run.agent_id, run.id)
         assert updated is not None
         if updated.status == "running":
-            await self._stop_turns([updated])
+            await self.stop_turns([updated])
         return updated
 
 
 __all__ = [
+    "AGENT_CALL_BUSY",
     "AGENT_CHANGED",
     "AGENT_DELETED",
+    "AGENT_RUN_LIMIT",
     "AGENT_UNDEPLOYED",
+    "CALL_CAPS",
     "EXPIRY_DEFAULT_DAYS",
     "EXPIRY_MAX_DAYS",
     "MAX_RUNNING",
@@ -641,11 +697,14 @@ __all__ = [
     "PREREQUISITES_FAILED",
     "RUNS_PAUSED_BY_DEPLOY",
     "RUNTIME_INPUT_CAP",
+    "RUN_CAPS",
     "SOURCE_DELETED",
+    "RunCaps",
     "RunError",
     "RunService",
     "ScheduleInput",
     "acts_as_of",
+    "caps_of",
     "expiry",
     "input_limit",
 ]

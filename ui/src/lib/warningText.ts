@@ -55,6 +55,10 @@ const DETAIL_OF: Record<string, (raw: string) => string | null> = {
   published_names_unknown: trailingNames,
   // `tools_source_newer: … (tools-billing: agent)` 의 노드와 종류다(platform/daegam/services/agent_status.py newer_source_warning)
   tools_source_newer: trailingNames,
+  // 게시한 Agent 를 Tool 로 쓰는 tools 노드다(platform/daegam/services/agent_calls.py status_warnings)
+  agent_source_unpublished: trailingNames,
+  agent_source_not_serving: trailingNames,
+  agent_call_timeout_short: trailingNames,
   // `code_mode_closed: … (cause: tools; tools: a, b)` 의 Tool 이름이나 `(cause: unknown_names; backends: x)` 의 허브 항목 이름이다
   // (platform/daegam/services/gateway_code_mode.py closed_warning)
   code_mode_closed: (raw) => /(?:tools|backends): ([^)]+)\)/.exec(raw)?.[1] ?? null,

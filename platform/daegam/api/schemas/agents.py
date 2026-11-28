@@ -46,9 +46,9 @@ UPLOAD_ID_MAX_CHARS = 64
 # Tool 효과 (P39b 14절 4부, `services/tool_effects.py`)
 ToolEffect = Literal["read", "write", "web"]
 # Tool 을 내는 백엔드의 종류 (P43 2절, `services/tool_effects.py`). internal 은 우리 mcp-runtime,
-# platform 은 웹 Tool, script 는 code mode Gateway 의 execute_tool_script(P56 6.5절), 나머지는
-# 서버가 읽기 전용 여부를 알려 주지 않는 Tool 이다
-ToolOrigin = Literal["internal", "platform", "image", "remote", "entry", "script"]
+# platform 은 웹 Tool, script 는 code mode Gateway 의 execute_tool_script(P56 6.5절), agent 는
+# 게시한 Agent 를 부르는 ask_*(P46 6.6절), 나머지는 서버가 읽기 전용 여부를 알려 주지 않는 Tool 이다
+ToolOrigin = Literal["internal", "platform", "image", "remote", "entry", "script", "agent"]
 
 
 class AgentIssueOut(BaseModel):
@@ -63,6 +63,21 @@ class AgentIssueOut(BaseModel):
     edge_id: str | None
     # 문장에 끼울 값. `builtin_tool_name` 은 {"clashes": [{"agent": 에이전트 이름, "names": [...]}]}
     data: dict[str, Any] | None = None
+
+
+class AgentCallOut(BaseModel):
+    """tools 노드 하나가 Tool 로 쓰는 게시한 Agent 다 (P46 6.2절). provider 와 record_bodies 는 그
+    Agent 의 메인 모델 provider 와 본문 기록 설정이다. 부르는 대화의 글이 거기로 간다.
+    timeout_seconds 는 호출 하나가 답을 기다리는 시간의 기본값이다."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tool: str
+    agent_id: str
+    agent_name: str
+    provider: str
+    record_bodies: bool
+    timeout_seconds: int
 
 
 class AgentValidateResponse(BaseModel):
@@ -85,6 +100,9 @@ class AgentValidateResponse(BaseModel):
     # 검사가 바깥 내용 뒤의 승인 규칙(P43)으로 봤는가. 늘 참이다. 캔버스가 그 규칙의 표시를 이것으로
     # 가른다
     tool_safety: bool = True
+    # tools 노드 id → 그 노드가 Tool 로 쓰는 게시한 Agent (P46 6.2절). 허브 항목과 그 Agent 를 읽은
+    # 노드만 있다
+    agent_calls: dict[str, AgentCallOut] = Field(default_factory=dict)
 
 
 class GraphOut(Graph):

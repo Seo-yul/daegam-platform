@@ -224,15 +224,24 @@ export interface ModelData {
  */
 export const LEGACY_MODEL_FIELDS = ["provider", "model", "max_output_tokens", "reasoning", "temperature", "fallback"] as const;
 
-export type SourceKind = "gateway_instance" | "mcp_instance";
+export type SourceKind = "gateway_instance" | "mcp_instance" | "agent";
+/** 게시한 Agent 를 Tool 로 부르는 소스 (P46 6.2절). 소스 id 는 그 Agent 의 허브 항목 id 다. 서버 `AGENT_SOURCE`. */
+export const AGENT_SOURCE = "agent" satisfies SourceKind;
+/** MCP 를 말하는 소스 종류. 검증 문맥(ValidationContext)에 목록이 있다. */
+export type McpSourceKind = Exclude<SourceKind, "agent">;
+export const SOURCE_KIND_VALUES: readonly SourceKind[] = ["gateway_instance", "mcp_instance", "agent"];
 
 /**
- * 도구 소스 종류별 화면 이름·화면 경로·목록 이름. `listKey` 는 InspectorOptions 와 ValidationContext 가 함께 쓰는
- * 목록 이름이다. 두 종류를 가르는 삼항을 곳곳에 두지 않고 이 표를 찾는다.
+ * 도구 소스 종류별 화면 이름·화면 경로·목록 이름. `listKey` 는 InspectorOptions 의 목록 이름이고, MCP 를 말하는 두 종류의 것은
+ * ValidationContext 도 함께 쓴다. 종류를 가르는 삼항을 곳곳에 두지 않고 이 표를 찾는다. Agent 소스의 목록은 허브의 `agent` 항목이고
+ * 여는 화면은 그 항목이 가리키는 Agent 의 상세다.
  */
-export const SOURCE_KINDS: Record<SourceKind, { label: "Gateway" | "MCP Server"; route: "gateways" | "mcp-servers"; listKey: "gateways" | "mcpServers" }> = {
+export const SOURCE_KINDS: {
+  [K in SourceKind]: { label: "Gateway" | "MCP Server" | "Agent"; route: "gateways" | "mcp-servers" | "agents"; listKey: K extends McpSourceKind ? "gateways" | "mcpServers" : "agentItems" };
+} = {
   gateway_instance: { label: "Gateway", route: "gateways", listKey: "gateways" },
   mcp_instance: { label: "MCP Server", route: "mcp-servers", listKey: "mcpServers" },
+  agent: { label: "Agent", route: "agents", listKey: "agentItems" },
 };
 
 export type Decision = "approve" | "edit" | "reject" | "respond";
@@ -963,7 +972,8 @@ export function checkNodeData(type: NodeType, data: unknown): string | null {
       // 필드 검사 먼저다
       if (d.source === undefined || d.source === null) return "source: Field required";
       if (!isRecord(d.source)) return notDict("source", "ToolsSource");
-      if (d.source.kind !== "gateway_instance" && d.source.kind !== "mcp_instance") return oneOf("source.kind", ["gateway_instance", "mcp_instance"]);
+      const sourceKind = d.source.kind;
+      if (!SOURCE_KIND_VALUES.some((kind) => kind === sourceKind)) return oneOf("source.kind", SOURCE_KIND_VALUES);
       const allow = (d.allow_tools ?? []) as unknown;
       if (!Array.isArray(allow)) return "allow_tools: Input should be a valid list";
       const badEntry = allow.findIndex((t) => typeof t !== "string");
@@ -1230,14 +1240,21 @@ function detailText(t: Messages, d: IssueDetail): string {
   return keyedText<GraphDetailTable, keyof GraphDetailTable>(t.canvas.issues.detail, d);
 }
 
+/** 경고 표(warnings.codes)의 그 code 문장. 문장이 값을 받아 만들어지는 code 와 표에 없는 code 는 undefined 다. */
+function warningSentence(t: Messages, code: string): string | undefined {
+  const entry = ownValue<object>(t.warnings.codes, code);
+  return entry && "text" in entry && typeof entry.text === "string" ? entry.text : undefined;
+}
+
 /**
  * 이슈 한 건의 화면 문장. code 로 사전의 `canvas.issues.text` 를 찾고, 캔버스 검증기가 낸 이슈면 뒤에 상세를 붙인다. 서버
- * `POST /validate`·저장 응답이 준 영어 이슈도 같은 code 로 찾아 화면 언어로 보인다. 표에 없는 code(서버가 규칙을 더한 때)면
+ * `POST /validate`·저장 응답이 준 영어 이슈도 같은 code 로 찾아 화면 언어로 보인다. 그 표에 없는 code 는 오류 표(errors.codes)와
+ * 경고 표(warnings.codes)의 문장이다. 서버만 보는 Agent 소스의 이슈가 거기 있다(P46 6.2절). 어디에도 없으면(서버가 규칙을 더한 때)
  * 서버 문장을 그대로 보인다. `code` 자체는 화면 문장에 넣지 않는다. 배지·목록이 title 이나 작은 글씨로 따로 보인다.
  */
 export function issueText(t: Messages, issue: Issue): string {
   const entry = ownValue<string | ((at: IssueAt) => string)>(t.canvas.issues.text, issue.code);
-  if (entry === undefined) return issue.message ?? issue.code;
+  if (entry === undefined) return ownValue(t.errors.codes, issue.code) ?? warningSentence(t, issue.code) ?? issue.message ?? issue.code;
   const text = typeof entry === "function" ? entry(issue) : entry;
   return issue.detail ? `${text} ${detailText(t, issue.detail)}` : text;
 }
@@ -1506,9 +1523,13 @@ function checkProviders(a: Analysis, providers: Providers): void {
   }
 }
 
-/** MCP 노드의 도구 소스. 테넌트에 있는가, 배포됐는가, oidc 모드면 agent_oauth 가 있는가. 서버 `_check_sources`. */
+/**
+ * MCP 노드의 도구 소스. 테넌트에 있는가, 배포됐는가, oidc 모드면 agent_oauth 가 있는가. 서버 `_check_sources`. 게시한 Agent 를
+ * 부르는 소스는 서버만 본다. 항목의 접근 정책과 호출받는 Agent 의 배포를 읽어야 해서다(서버 `agent_calls.call_issues`).
+ */
 function checkSources(a: Analysis, ctx: ValidationContext): void {
   for (const [id, d] of nodesOf(a, "tools")) {
+    if (d.source.kind === AGENT_SOURCE) continue;
     const kind = SOURCE_KINDS[d.source.kind];
     const source = ctx[kind.listKey].find((x) => x.id === d.source.id);
     if (!source) {

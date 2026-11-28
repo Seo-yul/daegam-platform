@@ -93,6 +93,29 @@ export const hubRemote: HubItem = {
 };
 
 /**
+ * 게시한 Agent 의 항목 (P46 6.1절). 출처는 그 Agent 의 id 하나이고 CR 이 없으며 저장된 Tool 목록도 없다. 캔버스에서 Tool
+ * `ask_research_agent` 가 된다.
+ */
+export function hubAgentFixture(over: Partial<HubItem> = {}): HubItem {
+  const base = hubItemFixture();
+  return {
+    ...base,
+    id: "hub-research-agent",
+    name: "research-agent",
+    display_name: "리서치 에이전트",
+    kind: "agent",
+    source: { ...base.source, instance_id: null, mcp_profile_id: null, agent_id: "ag-research" },
+    k8s: { kind: null, name: "agent-research", namespace: "daegam-default", group: null, tool_config: null },
+    tool_names: [],
+    tool_names_at: null,
+    status: { phase: "Ready", ready: true, url: null, message: null, observed_at: NOW, error: null },
+    description: "Researches a topic and answers with sources.",
+    calls_trusted: false,
+    ...over,
+  };
+}
+
+/**
  * 직접 연결 항목(remote) 하나. 주소의 갈래와 내보내는 주소는 서버 규칙대로다. outside·private 만 `external_url` 에 등록한 주소가
  * 실린다(P55a 1절). id 는 `hub-<name>` 이다.
  */

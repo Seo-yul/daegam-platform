@@ -198,6 +198,30 @@ export const warnings: Messages["warnings"] = {
       label: "Some features left out",
       text: "The runtime image does not support some features, so they were left out of this deployment. To use them, upgrade the cluster's Agent image and deploy again.",
     },
+    agent_call_cycle: {
+      label: "Agent call loop",
+      text: "An Agent that this Agent calls also calls this Agent. That call is refused when it runs. To break the loop, remove the Agent Tool from one of the two Agents.",
+    },
+    agent_source_not_serving: {
+      label: "Called Agent not serving",
+      text: "An Agent connected as a Tool does not take conversations now, so calls are refused.",
+    },
+    agent_source_unpublished: {
+      label: "Called Agent unpublished",
+      text: "An Agent connected as a Tool is no longer published to the hub, so calls are refused.",
+    },
+    agent_calls_disabled: {
+      label: "Agent calls off",
+      text: "Agent calls are turned off on this platform, so calls are refused.",
+    },
+    agent_call_timeout_short: {
+      label: "Wait too short",
+      text: "This Agent's turn time is not long enough beyond the called Agent's, so a call may stop before the answer comes.",
+    },
+    agent_calls_broken_by_deploy: {
+      label: "Calls refused",
+      text: "This deploy dropped the memory node or the session token budget, so Agents that call this Agent as a Tool are refused.",
+    },
     tools_source_newer: {
       label: "Unknown Tool source",
       text: "Some tools nodes use a source kind from a newer platform version, so this Agent runs without them. Upgrade the platform to that version or later to use those Tools again.",

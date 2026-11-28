@@ -46,6 +46,8 @@ export const runs = {
     },
   },
   source: { webhook: "웹훅", manual: "직접 실행", agent: "Agent 호출" },
+  /** 다른 Agent 가 Tool 로 부른 실행의 부른 쪽 (P46 6.5절). 출처 칸의 둘째 줄이다. */
+  calledBy: (name: string): string => `부른 Agent: ${name}`,
   status: {
     starting: "시작 중",
     refused: "마감으로 거절됨",
@@ -69,6 +71,9 @@ export const runs = {
     unavailable: "Agent 가 응답하지 않았거나 배포되어 있지 않았습니다.",
     aborted: "파드가 내려가 실행이 끝까지 가지 못했습니다.",
     accessLost: "실행 이름의 사용자가 실행 도중 권한을 잃었습니다.",
+    /** 다른 Agent 가 부른 실행을 부른 쪽이 끝냈다 (P46 6.3·6.5절). */
+    callerEnded: "부른 Agent 의 턴이 끝나 실행을 취소했습니다.",
+    callerTimeout: "부른 Agent 가 기다리는 시간을 넘겨 실행을 취소했습니다.",
   },
   /** 일정과 트리거가 멈춘 까닭. 손으로 멈춘 것은 상태만 보인다. */
   pausedReason: {

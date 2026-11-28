@@ -290,6 +290,13 @@ export const canvas: Messages["canvas"] = {
     timeoutsHelp: "The longest wait for each Tool call, in seconds. Leave empty for the runtime default.",
     timeoutLabel: (tool: string): string => `${tool} timeout (seconds)`,
     timeoutDefault: "Default",
+    sources: { agent: { group: "Agents", subtitle: "Agent call" } },
+    agentMarks:
+      "This Tool always counts as a write, and its result is marked as outside content: the called Agent may change data with its own Tools, and its answer may hold outside content.",
+    agentDataFlow: (provider: string, recording: string): string =>
+      `This conversation's text goes to the called Agent's LLM provider (${provider}) and follows that Agent's body recording (${recording}).`,
+    agentRecording: { on: "on", off: "off" },
+    agentTimeout: "Past the wait the call stops and the called Agent's run is cancelled.",
     timeoutShorter: (tool: string, agent: number, gateway: number): string =>
       `The timeout of ${tool} (${agent} s) is shorter than the Gateway's wait for this Tool (${gateway} s). The Agent cuts slow calls first.`,
   },

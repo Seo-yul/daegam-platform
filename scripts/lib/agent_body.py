@@ -1,4 +1,4 @@
-"""e2e 의 Agent 저장 본문. e2e_agent·e2e_chat·e2e_evaluation·e2e_install·e2e_runs·e2e_sandbox·e2e_telemetry 가 함께 쓴다.
+"""e2e 의 Agent 저장 본문. e2e_agent·e2e_agent_calls·e2e_chat·e2e_evaluation·e2e_install·e2e_runs·e2e_sandbox·e2e_telemetry 가 함께 쓴다.
 
 `GET /agents/templates` 의 첫 템플릿에서 시작해 모델 노드에 provider 를 넣는다. 나머지는 플래그다.
 
@@ -9,7 +9,8 @@
   `--tools KIND:ID:TOOL` 은 거듭 주는 만큼 Tool 노드를 템플릿의 것 대신 두고, 노드마다 그 소스의 Tool 하나를 승인 없이
   허용한다(e2e_evaluation 의 쓰기 Tool 과 읽기 Tool 소스 둘). 셋 다 없으면 Tool 노드를 뺀다. `--outside A,B` 는 그 Tool 의 결과를 바깥 내용으로 표시하고, `--rememberable A,B` 는
   그 Tool 의 승인을 사람이 기억할 수 있게 한다(P43 2·5절). `--approval-for A,B` 는 그 Tool 의 승인 규칙을 승인과 거절로
-  둔다. 셋은 Tool 노드가 있을 때만 쓴다.
+  둔다. 셋은 Tool 노드가 있을 때만 쓴다. `--agent-source ITEM:TOOL` 은 거듭 주는 만큼 게시한 Agent 의 허브 항목 ITEM 을
+  Tool TOOL 로 부르는 Tool 노드를 위의 것에 더해 메인에 잇는다. 그 노드는 승인 규칙이 없다.
 - memory 노드: `--ds-id ID` 면 그 Data Service 를 체크포인터로 쓰고 `--long-term-days N` 이면 장기 기억(D34)을 켠다.
   없으면 memory 노드와 그것을 필요로 하는 승인을 뺀다(인메모리 경로). `--files` 는 파일 도구를, `--approve-edit` 는
   승인에 고치기를 더한다.
@@ -117,6 +118,12 @@ def build(template: dict, args: argparse.Namespace) -> dict:
             tools["rememberable"] = args.rememberable.split(",")
         if args.approval_for:
             tools["approval"] = {name: ["approve", "reject"] for name in args.approval_for.split(",")}
+    for i, spec in enumerate(args.agent_source, start=1):
+        node_id = f"tools-agent-{i}"
+        data = tool_node("agent", *spec.split(":", 1), approval=[])
+        graph["nodes"].append({"id": node_id, "type": "tools", "data": data})
+        attach(main["id"], node_id, "tools")
+        layout[node_id] = {"x": 620 + 140 * i, "y": 260}
     if args.ds_id:
         long_term = {"retention_days": args.long_term_days} if args.long_term_days else None
         node("memory")["data"].update(checkpointer={"data_service_id": args.ds_id}, long_term=long_term)
@@ -218,6 +225,12 @@ def parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         help="KIND:ID:TOOL. 거듭 주는 만큼 그 소스의 Tool 하나를 허용하는 Tool 노드를 둔다",
+    )
+    ap.add_argument(
+        "--agent-source",
+        action="append",
+        default=[],
+        help="ITEM:TOOL. 거듭 주는 만큼 게시한 Agent 의 허브 항목을 그 Tool 로 부르는 Tool 노드를 더한다",
     )
     ap.add_argument("--allow", default="", help="--source 의 Tool 목록을 이 이름들(쉼표로 가른다)만 남긴다")
     ap.add_argument(

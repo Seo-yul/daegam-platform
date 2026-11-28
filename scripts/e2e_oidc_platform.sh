@@ -33,6 +33,10 @@
 #   STEP 9  Agent: 규칙 Gateway 의 규칙을 이 Agent 만으로 바꿔 다시 배포하고, 그 Gateway 를 도구 소스로 쓰는 Agent 를
 #           노출 배포한다. alice 의 채팅 Add(3,4)=7 의 Gateway 감사 기록이 sub=alice, act=svc:agent:<k8s 이름> 이다.
 #           실행을 켠 배포본이면 alice 의 지금 실행도 그렇다(실행은 사람의 이름으로 돈다)
+#   STEP 9c (P46) 그 Agent 를 호출의 메시지를 사람이 쓴 것으로 다루게 허브에 게시하고 그것을 Tool 로 붙인 Agent 를 배포한다. alice 가 부르는 Agent 와 대화해
+#           ask_* 로 Add(3,4)를 시키면 호출받은 Agent 의 실행이 alice 의 이름으로 돌고, 그 Add 의 Gateway 감사 기록이
+#           sub=alice, act=svc:agent:<호출받은 Agent 의 k8s 이름> 이다. 끝나면 부르는 Agent 를 지우고 게시를 해제한다.
+#           실행을 끈 배포본이면 조건부로 건너뛴다
 #   STEP 10 노출 Agent 는 두 발급자를 알린 이미지로 돌고, 멤버 bob 의 플랫폼 토큰과 IdP 토큰을 모두 받는다
 #   STEP 11 alice 의 일정을 만든 뒤 mongosh 로 alice 의 사람 기록을 긴 한도 밖으로 옮기면 접근 정리가 alice 의 개인
 #           토큰과 로그인 연결을 회수하고(unconfirmed), 그 일정이 울리면 실행이 시작하며 일정을 멈춘다
@@ -78,6 +82,8 @@ G_MEMBERS="oidcp-members"; G_DEVS="oidcp-devs"; G_CAROL="oidcp-carol"; G_ENG="oi
 ALICE="oidcp-alice"; BOB="oidcp-bob"; CAROL="oidcp-carol"; XAVIER="oidcp-xavier"; ADMIN_SUB="boot-admin"
 BP_NAME="oidcp-calc"; MS_NAME="oidcp-ms"; GW_NAME="oidcp-gw"; RULES_NAME="oidcp-rules"; AG_NAME="oidcp-agent"
 GW3_NAME="oidcp-gw3"; AG2_NAME="oidcp-agent2"; DS_NAME="oidcp-redis"
+# STEP 9c 의 부르는 Agent 와 게시한 AG_NAME 이 캔버스에서 내는 Tool 이름(ask_ 뒤에 항목 이름의 - 를 _ 로 바꿔 붙인다)
+CALLER_NAME="oidcp-caller"; ASK_TOOL="ask_oidcp_agent"
 # 플랫폼을 믿는 동안 T 가 저장하는 사용자 정의 mcp_group. 렌더는 그것을 쓰지 않는다
 CUSTOM_GROUP="oidcp-team"
 MS_HOST="${E2E_OIDCP_MS_HOST:-oidcp-ms.e2e.local}"; GW_HOST="${E2E_OIDCP_GW_HOST:-oidcp-gw.e2e.local}"
@@ -95,7 +101,7 @@ K=(kubectl --context "$CTX")
 AUTH=()                 # 관리자 Bearer 헤더. STEP 1 이 넣는다 (lib/e2e_api.sh 의 api 가 싣는다)
 ADMIN_TOKEN=""; PF_API=""; PF_OIDC=""; PF_VMCP=""
 NS=""; GW_URL=""; GW_PIN=""; MS_URL=""; MS_PIN=""; VMCP_SEL=""; FRONT_SEL=""
-RULES_ID=""; AG_ID=""; DS_ID=""; HOME_ID=""; SA_DEV_ID=""; SA_VIEW_ID=""; SCHEDULE_ID=""; GW3_ID=""; AG2_ID=""
+RULES_ID=""; AG_ID=""; DS_ID=""; HOME_ID=""; SA_DEV_ID=""; SA_VIEW_ID=""; SCHEDULE_ID=""; GW3_ID=""; AG2_ID=""; CALLER_ID=""
 TS_CHANGED=0; TARGETS_MADE=0
 
 . "$HERE/lib/e2e_pf.sh"
@@ -104,6 +110,7 @@ kill_stale_pf "$API_PORT" "$OIDC_PORT" "$VMCP_PORT"
 . "$HERE/lib/e2e_control_plane.sh"
 . "$HERE/lib/e2e_auth_mode.sh"
 . "$HERE/lib/e2e_report.sh"
+# as_person 은 여기에 있다
 . "$HERE/lib/e2e_api.sh"
 . "$HERE/lib/e2e_calc.sh"
 # lab Redis 를 Database 로 등록하는 lab_database 는 여기에 있다 (STEP 9 의 Agent 의 memory)
@@ -125,6 +132,8 @@ RESOLVE=()
 teardown() {
   [ ${#AUTH[@]} -gt 0 ] || return 0
   [ -z "$SCHEDULE_ID" ] || [ -z "$AG_ID" ] || api_delete "/agents/$AG_ID/schedules/$SCHEDULE_ID"
+  # 부르는 Agent 를 먼저 지운다. AG_ID 를 지우면 그 게시 항목도 지워진다
+  [ -z "$CALLER_ID" ] || api_delete "/agents/$CALLER_ID"
   [ -z "$AG_ID" ] || api_delete "/agents/$AG_ID"
   [ -z "$AG2_ID" ] || api_delete "/agents/$AG2_ID"
   [ -z "$DS_ID" ] || api_delete "/data-services/$DS_ID"
@@ -167,13 +176,6 @@ claims_ok() {
   c="$(jwt_json "$2" 1)"
   [ "$(python3 -c 'import json, sys; c = json.loads(sys.argv[1]); print(bool(eval(sys.argv[2])))' "$c" "$3")" = True ] \
     || die "$1" "token claims $c do not hold: $3"
-}
-
-# as_person TOKEN COMMAND... -> COMMAND 를 그 사람의 Bearer 로 부른다. api·chat·run_now 는 AUTH 를 싣는다
-as_person() {
-  local AUTH=(-H "Authorization: Bearer $1")
-  shift
-  "$@"
 }
 
 # revoked COLLECTION ID -> 그 문서가 회수됐으면 "<rc1 이 아는 까닭> <새 까닭>" 을 찍는다(새 까닭이 없으면 None).
@@ -492,6 +494,39 @@ else
   cond_skip 9r "$RUN_NOTE"
 fi
 pass 9 "rules Gateway admits Agent $AG_ID only; alice's chat Add=$TOOL_EXPECT carried sub=$ALICE, act=svc:agent:$AG_K8S; $RUN_NOTE"
+
+# ---------- 9c. 다른 Agent 가 Tool 로 부른 호출의 사람 (P46) ----------
+# 호출 하나는 호출받은 Agent 의 실행이다. 실행을 끈 배포본에는 호출도 없다
+if runs_on; then
+  code="$(api POST "/agents/$AG_ID/publish" '{"description": "Adds two numbers.", "calls_trusted": true}')"
+  case "$code" in 200 | 201) AG_ITEM="$(jq_ 'd["id"]')" ;; *) die 9c "publishing $AG_NAME -> $code" ;; esac
+  python3 "$HERE/lib/agent_body.py" "$WORK/templates.json" "$WORK/caller.json" --name "$CALLER_NAME" --display "발급자 전환 호출 에이전트" \
+    --provider "$STUB" --agent-source "$AG_ITEM:$ASK_TOOL"
+  save_doc 9c /agents "$CALLER_NAME" "$(cat "$WORK/caller.json")"
+  CALLER_ID="$SAVED_ID"
+  deploy_ready 9c /agents "$CALLER_ID" '{}'
+  require_features 9c agent_tools
+  CALL_BEFORE="$(cluster_now)"
+  code="$(as_person "$ALICE_CP" chat "/agents/$CALLER_ID/chat" "$(msg "$(ask_call "$ASK_TOOL" "$(stub_call "$TOOL" "$TOOL_ARGS")")")")"
+  CALL_AFTER="$(cluster_now)"
+  [ "$code" = 200 ] && [ "$(sse_ 'names[-1]')" = "done" ] || die 9c "alice's chat with $CALLER_NAME -> $code $(cat "$WORK/sse")"
+  [ "$(sse_ '(lambda r: (r["name"], r["status"]))(first("tool_result"))')" = "$ASK_TOOL success" ] \
+    || die 9c "$ASK_TOOL did not return the answer of $AG_NAME: $(cat "$WORK/sse")"
+  call_run 9c "$AG_ID" "$(sse_ 'first("done")["session_id"]')"
+  CALL_RUN="$RUN_ID"
+  run_wait 9c "$AG_ID" "$CALL_RUN" "$RUN_TERMINAL"
+  [ "$RUN_STATUS $(run_field 'd["source"], d["acts_as"]["sub"], d["caller"]["agent_id"]')" = "succeeded agent $ALICE $CALLER_ID" ] \
+    || die 9c "the called run $CALL_RUN: $(cat "$WORK/run.json") (want succeeded, source agent, as $ALICE, caller $CALLER_ID)"
+  audit_expect 9c "$CALL_BEFORE" "call|$CALL_BEFORE|$CALL_AFTER|$RULES_ID|$TOOL|$ALICE|svc:agent:$AG_K8S|1"
+  # 뒤 단계가 그 Agent 를 그대로 쓰게 부르는 Agent 를 지우고 게시를 해제한다
+  api_delete "/agents/$CALLER_ID"
+  wait_gone "/agents/$CALLER_ID" 120 || die 9c "Agent $CALLER_NAME ($CALLER_ID) was not deleted"
+  CALLER_ID=""
+  [ "$(api DELETE "/agents/$AG_ID/publish")" = 200 ] || die 9c "unpublishing $AG_NAME failed"
+  pass 9c "$CALLER_NAME called published $AG_NAME for alice; run $CALL_RUN ran as $ALICE and its Add carried sub=$ALICE, act=svc:agent:$AG_K8S"
+else
+  cond_skip 9c "$RUN_NOTE, and a call is a run"
+fi
 
 # ---------- 10. 노출 Agent 의 두 발급자 ----------
 [ "$(api GET "/agents/$AG_ID")" = 200 ] || die 10 "GET /agents/$AG_ID failed"

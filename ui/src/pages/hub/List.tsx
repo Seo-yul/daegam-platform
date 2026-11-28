@@ -28,7 +28,7 @@ import { ActionTD, ActionTH, ListTR, NameTD, Table, TBody, TD, TH, THead } from 
 import { type Messages, useT } from "@/i18n";
 import type { DeleteTarget } from "@/lib/deletion";
 import type { StateTone } from "@/lib/deployment";
-import { hubKindLabel, hubKindVariant, hubStatusNote, isExternalHubItem } from "@/lib/hub";
+import { hubKindLabel, hubKindVariant, hubStatusNote, hubToolNames, isExternalHubItem } from "@/lib/hub";
 import { nameSearchText } from "@/lib/names";
 import { useTenant } from "@/lib/tenant";
 import { hubItemsKey } from "@/lib/queryKeys";
@@ -58,7 +58,7 @@ function hubFacts(t: Messages, item: HubItem) {
     kind: <Badge variant={hubKindVariant(item.kind)}>{hubKindLabel(t, item.kind)}</Badge>,
     status: <HubStatusBadge item={item} testId={`hub-status-${item.name}`} />,
     // 0 개와 "아직 물어보지 않았다" 는 다르다. 뒤엣것을 "-" 로 적으면 Tool 이 없는 것으로 읽힌다
-    tools: item.tool_names.length || (item.tool_names_at ? "0" : t.hub.list.toolsUnknown),
+    tools: hubToolNames(item).length || (item.tool_names_at ? "0" : t.hub.list.toolsUnknown),
     scope: item.scope,
     // 흐림과 title 만으로는 키보드·터치로 다니는 사람에게 아무 신호도 없다. 뜻을 글자로 적는다
     notConsumable: item.permissions.consume ? null : (
@@ -77,7 +77,8 @@ const TOOL_PREVIEW = 3;
  * 모양이다. 이름이 없으면(받은 적이 없거나 비었으면) 그리지 않는다. 그 사정은 바닥의 Tool 수가 이미 말한다.
  */
 function ToolPreview({ item }: { item: HubItem }) {
-  return item.tool_names.length ? <ToolList names={item.tool_names} limit={TOOL_PREVIEW} testId={`hub-tool-preview-${item.name}`} /> : null;
+  const names = hubToolNames(item);
+  return names.length ? <ToolList names={names} limit={TOOL_PREVIEW} testId={`hub-tool-preview-${item.name}`} /> : null;
 }
 
 export function HubListPage() {

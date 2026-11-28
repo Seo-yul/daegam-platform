@@ -287,6 +287,24 @@ def test_an_owner_who_fails_the_checks_gives_way_to_the_approvers_grant(settings
     assert record == _record()
 
 
+def test_every_resume_of_a_called_run_carries_the_roots_bound(settings, mongo):
+    """다른 Agent 가 부른 실행의 재개는 누구의 위임으로 열든 그 실행의 뿌리 턴의 한도 종류를 싣는다
+    (P46 6.4절). 그 밖의 세션은 싣지 않는다."""
+
+    async def scenario(turns, grants, store):
+        await turns.decide(DOC, _user("carol"), "s1", APPROVE, approver=True, long_bound=True)
+        await store.confirm(_record())
+        respond = [{"type": "respond", "message": "x"}]
+        for sub, decisions in (("alice", APPROVE), ("carol", APPROVE), ("carol", respond)):
+            await turns.decide(DOC, _user(sub), "s1", decisions, approver=True, long_bound=False)
+        await turns.decide(DOC, _user("alice"), "s1", APPROVE, approver=True)
+        return grants
+
+    grants = _run(settings, scenario)
+    assert [o.get("long_bound") for o in grants.opened] == [True, False, False, False, None]
+    assert [o.get("decided_by") for o in grants.opened] == [None, None, "carol", None, None]
+
+
 def test_without_an_owner_record_every_decider_takes_their_own_grant(settings, mongo):
     async def scenario(turns, grants, store):
         for sub, approver in (("carol", True), ("dave", False)):

@@ -296,7 +296,8 @@ class ToolSources:
         session_retry_pause: float = SESSION_RETRY_PAUSE_SECONDS,
         grants: TurnGrants | None = None,
     ) -> None:
-        self._sources = {source["ref"]: source for source in config.tools}
+        # Agent 소스는 목록을 읽지 않으므로 여기 없다(agent_calls.py)
+        self._sources = {source["ref"]: source for source in config.mcp_sources}
         # 소스마다의 위임 대상이다. 위임 토큰은 ref 가 아니라 이것에 붙는다 (P53 2절)
         self._targets: dict[str, Target] = {
             ref: (source["source"]["kind"], source["source"]["id"])

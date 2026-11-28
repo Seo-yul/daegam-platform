@@ -40,9 +40,19 @@ class RunUsageOut(BaseModel):
     output_tokens: int
 
 
+class RunCallerOut(BaseModel):
+    """다른 Agent 가 Tool 로 부른 실행의 부른 쪽 (P46 6.5절). `chain` 은 뿌리부터 부른 Agent 까지의
+    Agent id 다."""
+
+    agent_id: str
+    session_id: str | None
+    chain: list[str]
+
+
 class AgentRunOut(BaseModel):
     """실행 기록 하나. 입력은 본문 대신 크기와 sha256 만 낸다. `source` 는 `schedule`·`webhook`·
-    `manual` 이고, 뒤 판이 더한 출처(P46 의 `agent`)의 기록도 글자 그대로 낸다 (P46 A0)."""
+    `manual`·`agent` 이고, 뒤 판이 더한 출처의 기록도 글자 그대로 낸다 (P46 A0). `caller` 는 출처가
+    `agent` 인 실행만 채운다."""
 
     id: str
     agent_id: str
@@ -70,6 +80,7 @@ class AgentRunOut(BaseModel):
     # 세션의 원장 몫. 목록과 읽기만 채우고 원장에 행이 없으면 null 이다
     usage: RunUsageOut | None = None
     cost_usd: float | None = None
+    caller: RunCallerOut | None = None
 
 
 class AgentRunsOut(BaseModel):

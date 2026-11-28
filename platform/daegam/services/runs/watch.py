@@ -14,11 +14,16 @@
   이벤트가 오면 이벤트가 이긴다(`last_event_at` 조건). 중지 표시가 남은 실행은 그 까닭으로, Agent 가
   없거나 내려간 실행은 `agent_deleted`·`agent_undeployed` 로 `cancelled` 다. 배포 중인 Agent 는
   롤아웃이 끝난 뒤에 본다.
+
+틱마다 먼저, 부른 턴이 끝난 Agent 호출을 취소한다(`caller_sweep`, P46 6.5절). 위임의 끝이 호출을 그
+자리에서 끝내지만, 이벤트 없이 지나는 위임의 마감과 그 끝을 받은 레플리카가 호출을 끝내지 못한
+때를 이 쓸기가 덮는다.
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -59,11 +64,22 @@ class RunWatchWorker(LeaseWorker[AgentRun]):
         owner: str | None = None,
         interval: float,
         lease_seconds: float,
+        caller_sweep: Callable[[], Awaitable[int]] | None = None,
     ):
         super().__init__(owner=owner, interval=interval, lease_seconds=lease_seconds)
         self.agents = agents
         self.runs = runs
         self.proxy = proxy
+        # 부른 턴이 끝난 Agent 호출을 끝낸다. 없으면(호출을 끈 플랫폼, 시험) 건너뛴다
+        self.caller_sweep = caller_sweep
+
+    async def tick(self) -> int:
+        if self.caller_sweep is not None:
+            try:
+                await self.caller_sweep()
+            except Exception:  # noqa: BLE001 - 쓸기의 실패가 지켜보기를 막지 않는다
+                self.log.exception("run watch: the caller sweep failed")
+        return await super().tick()
 
     async def acquire(self) -> AgentRun | None:
         now = utcnow()

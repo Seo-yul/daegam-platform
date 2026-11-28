@@ -1,6 +1,7 @@
 /**
  * Agent 픽스처와 핸들러 (D26, D42). 정의와 배포가 한 리소스다.
- *   /agents (templates·validate·summary·revisions·deploy·redeploy·rollback·evaluation-gate·undeploy·clone·manifest·overrides·drift).
+ *   /agents (templates·validate·summary·revisions·deploy·redeploy·rollback·evaluation-gate·undeploy·publish·clone·manifest·overrides·drift).
+ * 허브 게시(P46 6.1절)는 hub.ts 의 `hubState` 에 `agent` 항목을 더하고 뺀다.
  * 배포, 재배포, 되돌리기는 배포 기록 줄을 더하고 배포 게이트(agent-evaluation.ts `gateRefusal`)를 지난다 (P45 6절, 12절).
  * 채팅·세션·승인·메트릭·이벤트 프록시는 agent-chat.ts, 그 SSE 대본과 런타임 세션 색인은 agent-sse.ts, 템플릿과
  * 검증 문맥은 agent-templates.ts 에 있다.
@@ -20,6 +21,7 @@ import { agentSessionState, resetAgentSessionState } from "./agent-sse";
 import { agentTemplateSupport, filledTemplateGraph, mockValidationContext } from "./agent-templates";
 import { NOW, apiError, docStore, http, record } from "./core";
 import { agentExposureOf } from "./exposure";
+import { hubAgentFixture, hubState } from "./hub";
 
 /** 배포까지 끝난 Agent. 대부분의 테스트가 이 모양에서 출발한다. */
 export function agentFixture(over: Partial<Agent> = {}): Agent {
@@ -445,6 +447,27 @@ export const agentHandlers: HttpHandler[] = [
     const a = agentStore.findOr404(params.id);
     if (a instanceof Response) return a;
     return HttpResponse.json(agentStore.replace({ ...a, state: "draft", deployed_revision: null, cluster_id: null, k8s: null, effective_config: null, token_id: null, llm_secrets: [], status: null }));
+  }),
+  // 허브 게시와 해제 (P46 6.1절). 이미 게시돼 있으면 200 으로 그 항목이고, 게시돼 있지 않은 것의 해제는 404 다
+  http.post("/agents/:id/publish", async ({ request, params }) => {
+    const r = await record(request);
+    const a = agentStore.findOr404(params.id);
+    if (a instanceof Response) return a;
+    const existing = hubState.items.find((i) => i.source.agent_id === a.id);
+    if (existing) return HttpResponse.json(existing);
+    const body = r.body as { name?: string | null; display_name?: string; description: string; calls_trusted?: boolean };
+    const name = body.name ?? a.name;
+    const item = hubAgentFixture({ id: `hub-${name}`, name, display_name: body.display_name ?? a.display_name, description: body.description, calls_trusted: body.calls_trusted ?? false });
+    item.source = { ...item.source, agent_id: a.id };
+    hubState.items = [...hubState.items, item];
+    return HttpResponse.json(item, { status: 201 });
+  }),
+  http.delete("/agents/:id/publish", async ({ request, params }) => {
+    await record(request);
+    const item = hubState.items.find((i) => i.source.agent_id === params.id);
+    if (!item) return apiError(404, "not_published", `agent ${String(params.id)} is not published`);
+    hubState.items = hubState.items.filter((i) => i !== item);
+    return HttpResponse.json({ id: item.id, deleted: true });
   }),
   // 쓰지 않는 Agent 를 0 으로 줄이기 (P44 7절, 8절). 지금 재우면 Sleeping 이고, 깨우면 Waking 이다(깨어 있으면 그대로다)
   http.post("/agents/:id/sleep", async ({ request, params }) => {

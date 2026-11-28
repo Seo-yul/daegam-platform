@@ -60,6 +60,7 @@
 # | 19042  | E2E_VMCP_PORT         | e2e-exchange    | 소비자 Gateway C 의 vMCP port-forward (P57) |
 # | 19043  | E2E_AUX_PORT          | e2e-exchange    | 사슬의 C2, 게시된 P1·P 의 vMCP port-forward (P57) |
 # | 19044  | E2E_API_PORT          | e2e-evaluation  | 플랫폼 port-forward (P45) |
+# | 19045  | E2E_API_PORT          | e2e-agent-calls | 플랫폼 port-forward (로컬 클러스터. 설치본은 공개 주소다, P46) |
 #
 # 같은 변수 이름 E2E_VMCP_PORT 가 게이트마다 다른 뜻인 것도 여기에 적어 둔다
 # (e2e-gateway 는 여섯을 쓰는 base, e2e-mcp-auth·e2e-agent 는 하나). E2E_PROXY_PORT 도 게이트마다 다른 포트다.
@@ -117,3 +118,4 @@ PORT_EXCHANGE_API=19041
 PORT_EXCHANGE_VMCP=19042
 PORT_EXCHANGE_AUX=19043
 PORT_EVALUATION_API=19044
+PORT_AGENT_CALLS_API=19045

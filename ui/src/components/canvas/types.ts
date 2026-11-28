@@ -6,7 +6,7 @@
 import { MarkerType, type Edge, type Node } from "@xyflow/react";
 import type { LLMProvider } from "@/api/types";
 
-import { EDGE_KINDS, NODE_TYPES, type ConnectionProblem, type EdgeKind, type Issue, type NodeData, type NodeDataByType, type NodeType, type PlacedEdge, type PlacedNode } from "@/lib/agentGraph";
+import { EDGE_KINDS, NODE_TYPES, type ConnectionProblem, type EdgeKind, type Issue, type NodeData, type NodeDataByType, type NodeType, type PlacedEdge, type PlacedNode, type SourceKind } from "@/lib/agentGraph";
 import type { SkillInfo } from "@/lib/agentSkills";
 import { kindColor } from "@/lib/kindColor";
 
@@ -99,7 +99,7 @@ export interface CanvasLookup {
   ready: boolean;
   providerKind: (name: string) => LLMProvider["kind"] | null;
   providerModel: (name: string) => string | null;
-  sourceName: (kind: "gateway_instance" | "mcp_instance", id: string) => string | null;
+  sourceName: (kind: SourceKind, id: string) => string | null;
   dataServiceName: (id: string) => string | null;
   /** Database 의 kind. 메모리 카드가 체크포인터가 postgres 인지 redis 인지 보이는 데 쓴다 (D33). */
   dataServiceKind: (id: string) => string | null;

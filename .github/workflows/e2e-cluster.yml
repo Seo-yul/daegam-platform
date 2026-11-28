@@ -7,7 +7,7 @@
 #          지우고 e2e-netpol(kind 와 Calico)
 #   agent  막는 게이트 e2e-chat·e2e-agent(header 모드, stub provider, lab Postgres. STEP 10m 의 두 파드도 이 노드에
 #          뜬다). 고르면 e2e-agent-redis·e2e-chat-redis·e2e-knowledge·e2e-assistant(e2e-assistant-oidc 를 함께 고르면 돌지
-#          않는다)·e2e-ui-full(Playwright, ingress)
+#          않는다)·e2e-agent-calls(header 모드 그대로, lab Redis)·e2e-ui-full(Playwright, ingress)
 #   auth   인증 모드를 바꾸는 게이트만 두고, 그 가운데 하나라도 고를 때만 뜬다. e2e-mcp-auth·e2e-agent-oidc·
 #          e2e-assistant-oidc·e2e-oidc-platform(mock-oidc 파드)·e2e-agent-local. 게이트마다 모드를 바꾸고 EXIT trap 으로
 #          되돌리므로 header 모드 게이트와 한 클러스터를 나누지 않는다

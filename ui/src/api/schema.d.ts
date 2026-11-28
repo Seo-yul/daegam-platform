@@ -1094,7 +1094,8 @@ export interface paths {
         post?: never;
         /**
          * Delete Item
-         * @description 삭제 = 게시 해제. manage 가 없으면 403, 참조 중이면 409 in_use.
+         * @description 삭제 = 게시 해제. manage 가 없으면 403, 참조 중이면 409 in_use. 게시한 Agent 의 항목이면
+         *     감사 action 이 Agent 쪽 해제와 같은 `unpublish_agent` 다 (P46 6.8절).
          */
         delete: operations["delete_item_api_hub__item_id__delete"];
         options?: never;
@@ -1111,7 +1112,8 @@ export interface paths {
         };
         /**
          * Item References
-         * @description 이 허브 항목 의 참조 (D43). 이 항목을 백엔드로 묶은 Gateway 다.
+         * @description 이 허브 항목 의 참조 (D43). 이 항목을 백엔드로 묶은 Gateway 와, 게시한 Agent 의 항목이면
+         *     그것을 Tool 로 쓰는 Agent 다 (P46 6.1절).
          */
         get: operations["item_references_api_hub__item_id__references_get"];
         put?: never;
@@ -1613,7 +1615,9 @@ export interface paths {
          * Validate Agent Graph
          * @description 저장 없이 그래프를 검사한다. 저장·배포도 같은 규칙이다. 보이는데 consume 이 없는 Skill 을
          *     붙였으면 422 `skill_not_consumable` 이다(D64). `agent_id` 는 캔버스가 고치는 Agent 이고, 없는
-         *     Agent 면 404 다. 검사는 그것에 따라 바뀌지 않는다.
+         *     Agent 면 404 다. 게시한 Agent 를 Tool 로 쓰는 노드의 검사가 그것을 읽는다. 그 Agent 자신의
+         *     항목은 오류(`agent_source_self`)이고, 그 Agent 를 다시 부르는 Agent 는 경고
+         *     (`agent_call_cycle`)다.
          */
         post: operations["validate_agent_graph_api_agents_validate_post"];
         delete?: never;
@@ -1708,8 +1712,8 @@ export interface paths {
         };
         /**
          * Agent References
-         * @description 이 Agent 의 참조 (D43). 아직 Agent 를 쓰는 리소스는 없어 늘 빈 목록이지만, 상세 여덟이
-         *     같은 카드를 가지므로 라우트도 여덟이다.
+         * @description 이 Agent 의 참조 (D43). 이 Agent 를 게시한 허브 항목과, 그 항목을 거쳐 이 Agent 를 Tool 로
+         *     쓰는 Agent 다 (P46 6.1절).
          */
         get: operations["agent_references_api_agents__agent_id__references_get"];
         put?: never;
@@ -1900,6 +1904,37 @@ export interface paths {
          */
         post: operations["wake_agent_api_agents__agent_id__wake_post"];
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agents/{agent_id}/publish": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Publish Agent
+         * @description 허브에 `agent` 항목으로 게시한다. 같은 테넌트의 다른 Agent 가 캔버스에서 이 항목을 Tool 로
+         *     붙인다. 이미 게시돼 있으면 200 으로 그 항목을 돌려준다. 턴을 받는 Agent 만 되고(409
+         *     not_deployed·in_progress·deleting), 배포된 리비전에 memory 노드와 세션 예산이 있어야 하며(409
+         *     agent_source_runs_unmet), 이벤트 수집이 켜져 있고(409 runs_need_events) 런타임 이미지가
+         *     `runs` 와 `turn_tokens` 를 알려야 한다(409 runtime_feature_missing). Agent 호출이 꺼져 있으면
+         *     409 agent_calls_disabled 다.
+         */
+        post: operations["publish_agent_api_agents__agent_id__publish_post"];
+        /**
+         * Unpublish Agent
+         * @description 게시 해제. `DELETE /hub/{id}` 와 같은 판정이다. 항목의 manage 가 없으면 403, 게시돼 있지
+         *     않으면 404 not_published 다. 이 항목을 Tool 로 쓰는 Agent 가 있어도 해제되고, 그 Agent 의 저장과
+         *     배포와 호출이 그때부터 거절된다.
+         */
+        delete: operations["unpublish_agent_api_agents__agent_id__publish_delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -5034,6 +5069,26 @@ export interface components {
             };
         };
         /**
+         * AgentCallOut
+         * @description tools 노드 하나가 Tool 로 쓰는 게시한 Agent 다 (P46 6.2절). provider 와 record_bodies 는 그
+         *     Agent 의 메인 모델 provider 와 본문 기록 설정이다. 부르는 대화의 글이 거기로 간다.
+         *     timeout_seconds 는 호출 하나가 답을 기다리는 시간의 기본값이다.
+         */
+        AgentCallOut: {
+            /** Tool */
+            tool: string;
+            /** Agent Id */
+            agent_id: string;
+            /** Agent Name */
+            agent_name: string;
+            /** Provider */
+            provider: string;
+            /** Record Bodies */
+            record_bodies: boolean;
+            /** Timeout Seconds */
+            timeout_seconds: number;
+        };
+        /**
          * AgentCancelBody
          * @description `POST /agents/{id}/sessions/{sid}/cancel` 의 본문이다. 없어도 된다. turn_id 를 주면 그 시도일
          *     때만 멈춘다(P78 2절). 묵은 화면에서 누른 중단이 다음 턴을 멈추지 않게 한다.
@@ -5871,6 +5926,27 @@ export interface components {
             previews: components["schemas"]["AgentPreviewOut"][];
         };
         /**
+         * AgentPublishBody
+         * @description 허브 게시 본문. name 기본값은 문서 name, display_name 기본값은 문서 display_name 이다
+         *     (D24). description 은 이 Agent 를 Tool 로 부르는 Agent 의 모델이 읽는 Tool 설명이다.
+         *     calls_trusted 가 참이면 호출의 메시지를 사람이 쓴 것으로 다룬다. access 는 생략하면 빈 정책이고,
+         *     agent 항목은 다른 테넌트에 열 수 없다 (422 cross_tenant_unsupported).
+         */
+        AgentPublishBody: {
+            /** Name */
+            name?: string | null;
+            /** Display Name */
+            display_name?: string | null;
+            /** Description */
+            description: string;
+            /**
+             * Calls Trusted
+             * @default false
+             */
+            calls_trusted: boolean;
+            access?: components["schemas"]["Access"] | null;
+        };
+        /**
          * AgentRegenerateBody
          * @description `POST /agents/{id}/sessions/{sid}/regenerate`. 마지막 턴을 다시 만든다. `message` 가 있으면
          *     마지막 질문을 그 글로 바꿔 보낸다(고쳐 보내기). `ephemeral` 은 `/chat` 과 같다.
@@ -5905,7 +5981,8 @@ export interface components {
         /**
          * AgentRunOut
          * @description 실행 기록 하나. 입력은 본문 대신 크기와 sha256 만 낸다. `source` 는 `schedule`·`webhook`·
-         *     `manual` 이고, 뒤 판이 더한 출처(P46 의 `agent`)의 기록도 글자 그대로 낸다 (P46 A0).
+         *     `manual`·`agent` 이고, 뒤 판이 더한 출처의 기록도 글자 그대로 낸다 (P46 A0). `caller` 는 출처가
+         *     `agent` 인 실행만 채운다.
          */
         AgentRunOut: {
             /** Id */
@@ -5963,6 +6040,7 @@ export interface components {
             usage?: components["schemas"]["RunUsageOut"] | null;
             /** Cost Usd */
             cost_usd?: number | null;
+            caller?: components["schemas"]["RunCallerOut"] | null;
         };
         /** AgentRunsOut */
         AgentRunsOut: {
@@ -6496,7 +6574,7 @@ export interface components {
             /** Tool Origins */
             tool_origins?: {
                 [key: string]: {
-                    [key: string]: "internal" | "platform" | "image" | "remote" | "entry" | "script";
+                    [key: string]: "internal" | "platform" | "image" | "remote" | "entry" | "script" | "agent";
                 };
             };
             /** Tool Marked */
@@ -6508,6 +6586,10 @@ export interface components {
              * @default true
              */
             tool_safety: boolean;
+            /** Agent Calls */
+            agent_calls?: {
+                [key: string]: components["schemas"]["AgentCallOut"];
+            };
         };
         /**
          * ApiKeyIn
@@ -10402,7 +10484,7 @@ export interface components {
              * Kind
              * @enum {string}
              */
-            kind: "internal" | "remote" | "entry" | "image" | "published" | "platform";
+            kind: "internal" | "remote" | "entry" | "image" | "published" | "platform" | "agent";
             source: components["schemas"]["HubSourceOut"];
             /** Cluster Id */
             cluster_id: string;
@@ -10454,6 +10536,10 @@ export interface components {
             secret_env_updated_by?: string | null;
             /** Secret Env Updated At */
             secret_env_updated_at?: string | null;
+            /** Description */
+            description?: string | null;
+            /** Calls Trusted */
+            calls_trusted?: boolean | null;
             permissions: components["schemas"]["HubItemPermissionsOut"];
             /**
              * Scope
@@ -10549,6 +10635,8 @@ export interface components {
             tools_filter: string[] | null;
             /** Gateway Instance Id */
             gateway_instance_id: string | null;
+            /** Agent Id */
+            agent_id?: string | null;
             /** Stdio */
             stdio?: boolean | null;
             /** Args */
@@ -10634,7 +10722,7 @@ export interface components {
              * Kind
              * @enum {string}
              */
-            kind: "internal" | "remote" | "entry" | "image" | "published" | "platform";
+            kind: "internal" | "remote" | "entry" | "image" | "published" | "platform" | "agent";
             source: components["schemas"]["HubSourceOut"];
             /** Cluster Id */
             cluster_id: string;
@@ -10686,6 +10774,10 @@ export interface components {
             secret_env_updated_by?: string | null;
             /** Secret Env Updated At */
             secret_env_updated_at?: string | null;
+            /** Description */
+            description?: string | null;
+            /** Calls Trusted */
+            calls_trusted?: boolean | null;
             permissions: components["schemas"]["HubItemPermissionsOut"];
             /**
              * Scope
@@ -12958,6 +13050,19 @@ export interface components {
             worse: string[];
             /** Missing */
             missing: string[];
+        };
+        /**
+         * RunCallerOut
+         * @description 다른 Agent 가 Tool 로 부른 실행의 부른 쪽 (P46 6.5절). `chain` 은 뿌리부터 부른 Agent 까지의
+         *     Agent id 다.
+         */
+        RunCallerOut: {
+            /** Agent Id */
+            agent_id: string;
+            /** Session Id */
+            session_id: string | null;
+            /** Chain */
+            chain: string[];
         };
         /** RunNowIn */
         RunNowIn: {
@@ -26653,6 +26758,198 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AgentOut"];
+                };
+            };
+            /** @description 잘못된 테넌트 이름 또는 테넌트 미선택(tenant_required) */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 토큰 없음·검증 실패 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 소속 아님(not_member) 또는 scope 부족(forbidden) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 없는 리소스 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 이름 충돌·참조 중·상태 충돌 */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 입력 검증 실패 {code, detail} 또는 본문 스키마 오류(목록) */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 클러스터 접속 실패 */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description IdP·home 클러스터 사용 불가 */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    publish_agent_api_agents__agent_id__publish_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                agent_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AgentPublishBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HubItemWithStatus"];
+                };
+            };
+            /** @description 잘못된 테넌트 이름 또는 테넌트 미선택(tenant_required) */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 토큰 없음·검증 실패 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 소속 아님(not_member) 또는 scope 부족(forbidden) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 없는 리소스 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 이름 충돌·참조 중·상태 충돌 */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 입력 검증 실패 {code, detail} 또는 본문 스키마 오류(목록) */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 클러스터 접속 실패 */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description IdP·home 클러스터 사용 불가 */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    unpublish_agent_api_agents__agent_id__publish_delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                agent_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeleteResponse"];
                 };
             };
             /** @description 잘못된 테넌트 이름 또는 테넌트 미선택(tenant_required) */

@@ -32,6 +32,8 @@ from runtime.features import (
 SCHEMA_PATH = Path(__file__).resolve().parent.parent / "schema" / "agent.schema.json"
 DEFAULT_CONFIG_PATH = "/config/agent.json"
 ENV_CONFIG_PATH = "DAEGAM_AGENT_CONFIG"
+AGENT_SOURCE_KIND = "agent"
+"""다른 Agent 를 Tool 로 부르는 소스의 `tools[].source.kind` 다(기능 agent_tools)."""
 KNOWLEDGE_VERSIONS = ("2", "3")
 """knowledge 키 셋을 가진 schema_version 이다. "1" 에는 그 키가 없다(D32, D34 의 사다리)."""
 
@@ -48,7 +50,8 @@ class ConfigError(Exception):
         duplicate_knowledge_ref · unknown_knowledge_ref · duplicate_skill · unknown_skill_ref ·
         runtime_image_too_old · web_guard_unpinned_source
     모델(models.py): provider_key_missing · unknown_provider_kind · harness_key
-    컴파일(compile.py): harness_profile_not_applied · tool_name_conflict · knowledge_missing
+    컴파일(compile.py): harness_profile_not_applied · tool_name_conflict · knowledge_missing ·
+        agent_calls_missing
         (한 에이전트의 두 웹 소스가 같은 Tool 이름을 주는 것도 tool_name_conflict 다)
     가드레일(guards.py): guardrail_pattern_invalid · guardrail_rule_unknown ·
         guardrail_rule_position
@@ -217,6 +220,17 @@ class AgentConfig:
     @property
     def tools(self) -> list[dict[str, Any]]:
         return self.raw["tools"]
+
+    @property
+    def mcp_sources(self) -> list[dict[str, Any]]:
+        """tools[] 가운데 MCP 소스다. 런타임이 tools/list 로 읽는 것이다(mcp.py)."""
+        return [t for t in self.tools if t["source"]["kind"] != AGENT_SOURCE_KIND]
+
+    @property
+    def agent_sources(self) -> list[dict[str, Any]]:
+        """tools[] 가운데 Agent 소스다. 목록을 읽지 않고 항목으로 Tool 을 만든다(agent_calls.py).
+        기능 agent_tools 가 없는 문서에는 없다(스키마가 막는다)."""
+        return [t for t in self.tools if t["source"]["kind"] == AGENT_SOURCE_KIND]
 
     @property
     def knowledge(self) -> list[dict[str, Any]]:

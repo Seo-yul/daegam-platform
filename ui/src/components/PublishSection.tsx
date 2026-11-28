@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Link } from "react-router";
 
 import { ApiError } from "@/api/client";
@@ -75,8 +75,12 @@ export function McpServerDeleteWarning({ server }: { server: Pick<MCPServer, "hu
 
 /** 게시 배지와 허브 링크. 목록 행에서는 suffix 로 testid 를 나눈다. */
 export function PublishedBadge({ server, suffix = "" }: { server: Pick<MCPServer, "hub_item">; suffix?: string }) {
+  return <HubItemBadge item={server.hub_item} suffix={suffix} />;
+}
+
+/** 게시한 허브 항목의 배지와 링크. MCP Server 와 Agent 의 머리가 같이 쓴다. 게시하지 않았으면 아무것도 그리지 않는다. */
+export function HubItemBadge({ item, suffix = "" }: { item: { id: string; name: string } | null | undefined; suffix?: string }) {
   const t = useT();
-  const item = server.hub_item;
   if (!item) return null;
   return (
     <span className="inline-flex items-center gap-1.5">
@@ -90,11 +94,44 @@ export function PublishedBadge({ server, suffix = "" }: { server: Pick<MCPServer
   );
 }
 
+/** 게시 대화상자가 보내는 이름과 정책. 이름을 비우면 원본의 이름을 쓴다. */
+export interface PublishInput {
+  name: string | null;
+  display_name?: string;
+  access: ReturnType<typeof accessForPublish>;
+}
+
 /**
- * 게시 다이얼로그. 이름 두 개는 MCP Server 의 것이 기본이고(허브 항목 CR 은 `hub-<name>`), 정책 편집기는 접혀 있다.
- * internal 이라 다른 테넌트에는 열 수 없다.
+ * 게시 대화상자의 뼈대. 이름 두 개는 원본의 것이 기본이고 정책 편집기는 접혀 있다. 원본에서 파생한 항목이라 다른 테넌트에는 열 수
+ * 없다. MCP Server 와 Agent 의 게시가 같이 쓰고, 원본마다 다른 칸은 children 으로 이름 아래에 끼운다.
  */
-export function PublishMcpServerDialog({ server, open, onClose }: { server: Pick<MCPServer, "id" | "name" | "display_name"> | null; open: boolean; onClose: () => void }) {
+export function PublishDialog({
+  source,
+  open,
+  onClose,
+  lead,
+  namePreview,
+  placeholders,
+  nameHint,
+  publish,
+  invalidate,
+  children,
+}: {
+  source: { id: string; name: string; display_name?: string | null } | null;
+  open: boolean;
+  onClose: () => void;
+  /** 대화상자의 첫 줄. */
+  lead: ReactNode;
+  /** 이름 칸 아래에 보이는 클러스터 리소스 이름의 머리. 항목이 CR 을 갖지 않으면 없다. */
+  namePreview?: { prefix: string };
+  /** 빈 이름 칸의 예시와 이름 칸 아래의 풀이. 원본의 종류를 말하므로 부르는 쪽이 준다. */
+  placeholders: { display: string; name: string };
+  nameHint?: string;
+  publish: (input: PublishInput) => Promise<unknown>;
+  /** 게시가 끝나면 무효화하는 쿼리 키의 머리. */
+  invalidate: readonly string[];
+  children?: ReactNode;
+}) {
   const t = useT();
   const text = t.detail.publishSection;
   const tenant = useTenant();
@@ -104,57 +141,75 @@ export function PublishMcpServerDialog({ server, open, onClose }: { server: Pick
   const [access, setAccess] = useState<HubAccess>(emptyAccess());
   useEffect(() => {
     if (open) {
-      setNames(server ? { displayName: displayName(server), name: server.name } : { displayName: "", name: "" });
+      setNames(source ? { displayName: displayName(source), name: source.name } : { displayName: "", name: "" });
       setAccess(emptyAccess());
     }
-    // 폴링으로 server 객체가 바뀌어도 열려 있는 동안 입력을 지우지 않게 이름만 본다
+    // 폴링으로 source 객체가 바뀌어도 열려 있는 동안 입력을 지우지 않게 이름만 본다
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, server?.id, server?.name, server?.display_name]);
+  }, [open, source?.id, source?.name, source?.display_name]);
 
-  const publish = useMutation({
+  const mutation = useMutation({
     mutationFn: () =>
-      publishMcpServer(server!.id, {
+      publish({
         name: names.name.trim() || null,
         ...(names.displayName.trim() ? { display_name: names.displayName.trim() } : {}),
         access: accessForPublish(access),
       }),
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ["mcp-servers"] });
-      await queryClient.invalidateQueries({ queryKey: ["hub"] });
+      for (const key of invalidate) await queryClient.invalidateQueries({ queryKey: [key] });
       onClose();
     },
   });
-  const { reset } = publish;
+  const { reset } = mutation;
   useEffect(() => {
     if (!open) reset();
   }, [open, reset]);
 
-  const name = server ? displayName(server) : "";
   return (
-    <Modal open={open && server !== null} title={text.publishTitle} testId="publish-dialog" closeTestId="publish-dialog-close" onClose={onClose}>
+    <Modal open={open && source !== null} title={text.publishTitle} testId="publish-dialog" closeTestId="publish-dialog-close" onClose={onClose}>
       <form
         className="flex flex-col gap-3 px-5 py-4"
         data-testid="publish-form"
         onSubmit={(e) => {
           e.preventDefault();
-          publish.mutate();
+          mutation.mutate();
         }}
       >
-        <p className="text-sm text-muted">{text.lead(name, <span className="font-medium text-heading">{name}</span>)}</p>
-        <NameFields testId="publish" placeholders={text.placeholders} value={names} onChange={setNames} preview={{ prefix: "hub" }} required={false} inline errors={nameFieldErrors(publish.error)} />
-        <p className="text-xs text-muted">{text.nameHint}</p>
+        <p className="text-sm text-muted">{lead}</p>
+        <NameFields testId="publish" placeholders={placeholders} value={names} onChange={setNames} preview={namePreview} required={false} inline errors={nameFieldErrors(mutation.error)} />
+        {nameHint ? <p className="text-xs text-muted">{nameHint}</p> : null}
+        {children}
         <AccessPolicyEditor value={access} onChange={setAccess} canShare={canShare(me, tenant, "hub:share")} crossTenant={false} collapsible testId="access" />
-        {!isNameFieldError(publish.error) ? <ErrorMessage error={publish.error} testId="publish-error" /> : null}
+        {!isNameFieldError(mutation.error) ? <ErrorMessage error={mutation.error} testId="publish-error" /> : null}
         <div className="flex justify-end gap-2">
-          <Button variant="ghost" onClick={onClose} disabled={publish.isPending}>
+          <Button variant="ghost" onClick={onClose} disabled={mutation.isPending}>
             {t.common.cancel}
           </Button>
-          <Button type="submit" data-testid="publish-submit" disabled={publish.isPending}>
-            {publish.isPending ? text.publishing : text.publish}
+          <Button type="submit" data-testid="publish-submit" disabled={mutation.isPending}>
+            {mutation.isPending ? text.publishing : text.publish}
           </Button>
         </div>
       </form>
     </Modal>
+  );
+}
+
+/** MCP Server 의 게시 대화상자. 허브 항목 CR 은 `hub-<name>` 이다. */
+export function PublishMcpServerDialog({ server, open, onClose }: { server: Pick<MCPServer, "id" | "name" | "display_name"> | null; open: boolean; onClose: () => void }) {
+  const text = useT().detail.publishSection;
+  const name = server ? displayName(server) : "";
+  return (
+    <PublishDialog
+      source={server}
+      open={open}
+      onClose={onClose}
+      lead={text.lead(name, <span className="font-medium text-heading">{name}</span>)}
+      namePreview={{ prefix: "hub" }}
+      placeholders={text.placeholders}
+      nameHint={text.nameHint}
+      publish={(input) => publishMcpServer(server!.id, input)}
+      invalidate={["mcp-servers", "hub"]}
+    />
   );
 }
 

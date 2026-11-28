@@ -463,6 +463,13 @@ export const errors = {
     // 쓰지 않는 Agent 를 0 으로 줄이기 (P44). 깨우는 중(503, 채팅과 승인 카드는 Retry-After 마다 다시 보낸다), 잠든 Agent 의 읽기,
     // 턴이 리스를 쥐어 재울 수 없음, 잠들 수 없는 Agent (까닭은 배포 탭이 보인다)
     agent_waking: "사용하지 않아 내려 두었던 Agent 의 파드를 다시 띄우는 중입니다. 잠시 뒤에 다시 시도해 주세요.",
+    // 게시한 Agent 를 Tool 로 부르는 호출 (P46 6.1·6.2·6.5절)
+    agent_source_unpublished: "이 Agent 는 허브에 게시되어 있지 않아 Tool 로 사용할 수 없습니다. 그 Agent 의 상세에서 허브에 게시한 뒤 다시 선택해 주세요.",
+    agent_source_no_consume: "이 Agent 항목을 Tool 로 사용할 권한이 없습니다. 항목을 관리하는 사람에게 사용 권한을 요청해 주세요.",
+    agent_source_self: "Agent 는 자기 자신을 Tool 로 사용할 수 없습니다. 다른 Agent 를 선택해 주세요.",
+    agent_source_runs_unmet: "호출할 Agent 에 memory 노드와 세션 토큰 예산이 있어야 합니다. 그 Agent 의 캔버스와 설정을 확인해 주세요.",
+    agent_item_gateway_unsupported: "Agent 항목은 아직 Gateway 의 백엔드로 사용할 수 없습니다. Agent 의 캔버스에서 Tool 로 연결해 주세요.",
+    agent_calls_disabled: "이 플랫폼에서 Agent 호출이 꺼져 있습니다. 플랫폼 관리자에게 문의해 주세요.",
     agent_asleep: "이 Agent 는 사용하지 않아 파드를 내려 두었습니다. 깨운 뒤에 다시 시도해 주세요.",
     agent_busy: "Agent 가 답변하는 중이라 지금 파드를 내릴 수 없습니다. 답변이 끝난 뒤 다시 시도해 주세요.",
     agent_sleep_ineligible: "이 Agent 는 0개로 줄일 수 없습니다. 배포 탭에서 그 까닭을 확인해 주세요.",

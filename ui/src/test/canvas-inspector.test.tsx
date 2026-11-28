@@ -27,7 +27,7 @@ const ko = dictionary("ko");
 const DELETED_LABEL = ko.ui.names.deleted;
 
 function options(over: Partial<InspectorOptions> = {}): InspectorOptions {
-  return { providers: [], gateways: [], mcpServers: [], dataServices: [], knowledgeBases: [kbFaq], skills: [], ready: true, ...over };
+  return { providers: [], gateways: [], mcpServers: [], agentItems: [], dataServices: [], knowledgeBases: [kbFaq], skills: [], ready: true, ...over };
 }
 
 function knowledge(kbId: string): KnowledgeData {

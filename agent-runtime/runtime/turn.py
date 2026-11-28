@@ -108,6 +108,7 @@ from runtime.turn_grants import (
     END_SHUTDOWN,
     TURN_GRANT_HEADER,
     TurnGrant,
+    TurnRef,
 )
 from runtime.turn_record import (
     RUN_CHAT,
@@ -845,7 +846,11 @@ async def _run_turn(
     lease.on_lost = partial(watch.notify, LEASE_LOST)
     if lease.fence.standing:
         watch.notify(LEASE_LOST)
-    calls = state.grants.open(grant, on_refused=partial(_grant_refused, state, watch))
+    calls = state.grants.open(
+        grant,
+        on_refused=partial(_grant_refused, state, watch),
+        turn=TurnRef(sid, attempt.turn_id),
+    )
 
     async def settle() -> tuple[str, dict[str, Any]] | None:
         """앞부분 쓰기를 닫고 턴을 마감한다. 마지막 이벤트를 돌려준다. 펜스는 여기와 아래

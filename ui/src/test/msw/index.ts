@@ -27,7 +27,7 @@
  *   oauth-grants.ts  /me/oauth-grants, /users/{id}/oauth-grants (MCP 클라이언트 연결, P33), grantState
  *   approval-choices.ts /me/approval-choices (기억한 승인 선택, P43), approvalChoiceState
  *   audit.ts         /audit, /audit/mcp
- *   hub.ts           /hub (access·refresh-tools·manifest), hubState
+ *   hub.ts           /hub (access·refresh-tools·manifest), hubState, hubAgentFixture (게시한 Agent 의 항목)
  *   skills.ts        /skills (import·validate·access·clone·revisions·archive), skillState (D64)
  *   gateways.ts      /gateways (revisions·preview·deploy·undeploy·clone·publish·manifest·overrides·drift), gatewayState
  *   mcp-metrics.ts   /mcp-servers/{id}/metrics, /gateways/{id}/metrics (P51)

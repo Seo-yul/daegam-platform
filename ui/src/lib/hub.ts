@@ -33,9 +33,50 @@ export function derivedHubSource(t: Messages, kind: HubItem["kind"]): string | n
   return source ? resourceLabel(t, source) : null;
 }
 
-/** 외부에서 등록한 항목만 목록에서 지울 수 있다. internal 은 MCP Server 상세에서, published 는 Gateway 상세에서 해제한다. */
+/**
+ * 외부에서 등록한 항목만 목록에서 지울 수 있다. internal 은 MCP Server 상세에서, published 는 Gateway 상세에서, agent 는 Agent 상세나
+ * 항목 상세에서 해제한다.
+ */
 export function isExternalHubItem(kind: HubItem["kind"]): boolean {
-  return !isDerivedHubItem(kind) && !isPlatformHubItem(kind);
+  return !isDerivedHubItem(kind) && !isPlatformHubItem(kind) && !isAgentHubItem(kind);
+}
+
+/**
+ * 게시한 Agent 의 항목인가 (P46 6.1절, 서버 `store/hub.AGENT_KIND`). 다른 Agent 가 캔버스에서 Tool 로 붙인다. MCP 를 말하지 않아
+ * Tool 새로고침이 없고 Gateway 의 백엔드가 되지 못하며 다른 테넌트에 열 수 없다.
+ */
+export function isAgentHubItem(kind: HubItem["kind"]): boolean {
+  return kind === "agent";
+}
+
+/** 테넌트의 `agent` 항목. 캔버스의 Agent 소스가 선택하는 것이다. */
+export function agentHubItems(items: readonly HubItem[] | undefined): HubItem[] {
+  return (items ?? []).filter((item) => isAgentHubItem(item.kind));
+}
+
+/** 그 Agent 를 게시한 항목. 게시하지 않았거나 볼 수 없으면 undefined 다. */
+export function hubItemOfAgent(items: readonly HubItem[] | undefined, agentId: string): HubItem | undefined {
+  return agentHubItems(items).find((item) => item.source.agent_id === agentId);
+}
+
+/**
+ * 항목이 내는 Tool 이름. 게시한 Agent 의 항목은 저장된 목록이 없고 이름에서 나온 Tool 하나다. 나머지는 저장된 `tool_names` 다.
+ */
+export function hubToolNames(item: Pick<HubItem, "kind" | "name" | "tool_names">): string[] {
+  return isAgentHubItem(item.kind) ? [agentCallToolName(item.name)] : item.tool_names;
+}
+
+/** `agent` 항목이 내는 Tool 이름의 머리 (서버 `services/agent_calls.TOOL_PREFIX`). */
+export const AGENT_CALL_TOOL_PREFIX = "ask_";
+
+/** 게시한 Agent 를 부르는 Tool 의 이름 꼴인가. 채팅의 Tool 카드가 실행 링크를 달지 가른다. */
+export function isAgentCallTool(name: string): boolean {
+  return name.startsWith(AGENT_CALL_TOOL_PREFIX);
+}
+
+/** `agent` 항목이 캔버스에서 내는 Tool 이름. 항목 이름의 `-` 를 `_` 로 바꾼다 (서버 `services/agent_calls.tool_name`). */
+export function agentCallToolName(itemName: string): string {
+  return AGENT_CALL_TOOL_PREFIX + itemName.replaceAll("-", "_");
 }
 
 /** 플랫폼 웹 Tool 항목인가(P39b 13절). 지우기·새로고침이 없고 붙여 넣을 MCP 주소도 없다. */
@@ -43,9 +84,10 @@ export function isPlatformHubItem(kind: HubItem["kind"]): boolean {
   return kind === "platform";
 }
 
-/** 배지에 보일 종류 이름. 플랫폼 항목만 화면 언어의 이름이고 나머지는 종류 그대로다. */
+/** 배지에 보일 종류 이름. 플랫폼 항목과 게시한 Agent 의 항목만 사전의 이름이고 나머지는 종류 그대로다. */
 export function hubKindLabel(t: Messages, kind: HubItem["kind"]): string {
-  return isPlatformHubItem(kind) ? t.hub.detail.platform : kind;
+  if (isPlatformHubItem(kind)) return t.hub.detail.platform;
+  return ownValue(t.hub.kinds, kind) ?? kind;
 }
 
 /** ToolHive code mode 의 가상 Tool 이름. 게시된 Gateway 가 code mode 로 돌면 그 목록에 있다. */
@@ -78,6 +120,7 @@ export function hubPollInterval(item: HubItem | undefined): number | false {
 export function hubKindVariant(kind: HubItem["kind"]): BadgeProps["variant"] {
   switch (kind) {
     case "internal":
+    case "agent":
       return "info";
     case "published":
     case "platform":

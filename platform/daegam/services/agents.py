@@ -67,17 +67,25 @@ from daegam.k8s.templates.common import (
     tls_endpoint,
 )
 from daegam.k8s.templates.svc_token import secret_value
-from daegam.services import agent_features, agent_graph, agent_tool_safety, agent_web
+from daegam.services import (
+    agent_calls,
+    agent_features,
+    agent_graph,
+    agent_tool_safety,
+    agent_web,
+)
 from daegam.services.advanced_edit import AdvancedEditor
 from daegam.services.agent_code_mode import attach_code_mode, code_mode_issues
 from daegam.services.agent_features import (
     DETACHED_TURNS,
     REDIS_TLS,
+    RUNTIME_FEATURE_MISSING,
     RUNTIME_IMAGE_TOO_OLD,
     TWO_ISSUERS,
 )
 from daegam.services.agent_feedback import AgentFeedbackService
 from daegam.services.agent_graph import (
+    AGENT_SOURCE,
     Analysis,
     CompileError,
     GraphContext,
@@ -92,6 +100,7 @@ from daegam.services.agent_graph import (
 from daegam.services.agent_llm import AgentLlm
 from daegam.services.agent_memory import AgentMemories
 from daegam.services.agent_pod_inputs import POD_INPUT_RECORDS, AgentPodInputs
+from daegam.services.agent_publish import CALLS_BROKEN_BY_DEPLOY, AgentPublishing
 from daegam.services.agent_rollback import (
     AgentRollbackMixin,
     deploy_record_push,
@@ -138,6 +147,7 @@ from daegam.services.exposure import (
     expose_object_refs,
     exposure_from_input,
 )
+from daegam.services.hub import HubService
 from daegam.services.instance_base import (
     EDIT_STATES,
     IN_PROGRESS,
@@ -192,6 +202,7 @@ from daegam.store.data_services import DataService, MongoDataServiceStore
 from daegam.store.exposure import AgentExposure
 from daegam.store.exposure_hosts import MongoExposureHostStore
 from daegam.store.gateways import MongoGatewayStore
+from daegam.store.hub import HubItem
 from daegam.store.instances import DeployEnd
 from daegam.store.knowledge import KnowledgeBase, MongoKnowledgeStore
 from daegam.store.mcp_servers import MongoMCPServerStore
@@ -218,6 +229,8 @@ class AgentRunHooks(Protocol):
     async def end_agent_runs(self, tenant: str, agent_id: str, *, deleting: bool) -> object: ...
 
     async def forget_agent(self, tenant: str, agent_id: str) -> object: ...
+
+    def check_revision(self, revision: AgentRevision, message: str | None) -> None: ...
 
 
 class AgentEvaluationHooks(Protocol):
@@ -253,10 +266,12 @@ class AgentError(ServiceError):
 @dataclass(frozen=True)
 class GraphReview:
     """저장 없는 검사(`POST /validate`)의 결과다. tools 는 tools 노드마다 Tool 이름의 효과와 백엔드
-    종류다. 캔버스가 이것으로 효과 배지, 승인 표시, 바깥 표시를 단다."""
+    종류다. 캔버스가 이것으로 효과 배지, 승인 표시, 바깥 표시를 단다. calls 는 게시한 Agent 를
+    Tool 로 쓰는 tools 노드마다 그 Agent 다(`agent_calls.AgentSource.view`, P46 6.2절)."""
 
     issues: list[Issue]
     tools: GraphTools
+    calls: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass
@@ -288,18 +303,22 @@ async def _best_effort(doc: Agent, what: str, step: Awaitable[object]) -> None:
         logger.warning("agent %s: %s: %s", doc.id, what, e)
 
 
-async def _analyze(spec: AgentSpec, ctx: GraphContext) -> tuple[Analysis, list[Issue]]:
+async def _analyze(
+    spec: AgentSpec, ctx: GraphContext, *, calls_enabled: bool = True
+) -> tuple[Analysis, list[Issue]]:
     """그래프 검증에 웹 Tool 의 규칙(`agent_web.web_issues`), 바깥 표시의 경고
     (`agent_tool_safety.safety_issues`), 내장 Tool 과 이름이 같은 Tool 의 경고
     (`tool_pins.builtin_name_issues`), code mode 스크립트의 선택과 중복
-    (`agent_code_mode.code_mode_issues`)을 더한 (분석, 이슈)다. 저장 앞의 검증과 배포·재배포가 같은
-    것을 본다."""
+    (`agent_code_mode.code_mode_issues`), 게시한 Agent 를 Tool 로 쓰는 노드의 규칙
+    (`agent_calls.call_issues`)을 더한 (분석, 이슈)다. 저장 앞의 검증과 배포·재배포가 같은 것을
+    본다. calls_enabled 는 이 플랫폼에서 Agent 호출이 켜져 있는가다."""
     analysis = await run_in_threadpool(agent_graph.analyze, spec, ctx)
     web = await run_in_threadpool(agent_web.web_issues, spec, ctx)
     safety = await run_in_threadpool(agent_tool_safety.safety_issues, spec, ctx)
     builtin = builtin_name_issues(spec, ctx)
     code_mode = await run_in_threadpool(code_mode_issues, spec, ctx)
-    return analysis, [*analysis.issues, *web, *safety, *builtin, *code_mode]
+    calls = agent_calls.call_issues(spec, ctx, enabled=calls_enabled)
+    return analysis, [*analysis.issues, *web, *safety, *builtin, *code_mode, *calls]
 
 
 class AgentService(ExposureValidationMixin, AgentRollbackMixin, BaseInstanceService[Agent]):
@@ -348,6 +367,7 @@ class AgentService(ExposureValidationMixin, AgentRollbackMixin, BaseInstanceServ
         claims: Claims,
         exposure_hosts: MongoExposureHostStore,
         tool_effects: ToolEffectLoader,
+        hub: HubService,
         run_hooks: AgentRunHooks | None = None,
         choices: ApprovalChoiceService | None = None,
         sandboxes: SandboxService | None = None,
@@ -432,6 +452,19 @@ class AgentService(ExposureValidationMixin, AgentRollbackMixin, BaseInstanceServ
             runs=runs,
         )
         self.proxy.sleep = self.sleep
+        # 허브 게시 (P46 6.1절). 게시한 Agent 는 다른 Agent 의 Tool 이 되고, 호출은 실행이라
+        # 전제 조건을 실행 서비스가 본다
+        self.publishing = AgentPublishing(
+            hub=hub,
+            settings=settings,
+            check_revision=run_hooks.check_revision if run_hooks is not None else None,
+            require_serving=lambda doc: self.proxy.require_deployed(doc, action="publish"),
+            error_cls=AgentError,
+        )
+        # 게시한 Agent 를 Tool 로 쓰는 tools 노드가 가리키는 항목을 읽는다 (P46 6.2절)
+        self.agent_sources = agent_calls.AgentSourceLoader(
+            hub=hub, agents=agents, publishing=self.publishing
+        )
         # 인스턴스 토큰과 그 Secret, 파드 입력 (P72 2.1절)
         self.agent_tokens = AgentTokens(
             tokens=tokens,
@@ -475,7 +508,7 @@ class AgentService(ExposureValidationMixin, AgentRollbackMixin, BaseInstanceServ
             proxy=self.proxy,
             client_for_doc=self.client_for_doc,
             with_pod_waiting=self._with_pod_waiting,
-            pin_warnings=self._pin_warnings,
+            pin_warnings=self._tool_warnings,
             sandbox_warnings=self._sandbox_warnings,
             error_cls=AgentError,
             sleep=self.sleep,
@@ -507,12 +540,14 @@ class AgentService(ExposureValidationMixin, AgentRollbackMixin, BaseInstanceServ
         *,
         principal: Principal | None = None,
         in_pod_state: bool = False,
+        agent_id: str | None = None,
     ) -> GraphContext:
         """테넌트의 검증·컴파일 문맥. provider 키 유무는 has_key 가 부를 때 Secret 을 읽는다(동기
         K8s 호출이라 validate·compile 은 스레드풀에서 돈다). Skill 은 spec 이 핀한 리비전의 메타만,
         도구 소스는 지금 광고하는 Tool 과 효과를 미리 읽는다(`AgentSkillStore.pinned`,
         `ToolEffectLoader`). in_pod_state 는 상태를 파드 안에 두는 미리 보기의 문맥이다 (P44b
-        7절)."""
+        7절). agent_id 는 그 정의를 가진 Agent 이고, Tool 로 쓰는 게시한 Agent 가 그것 자신이거나
+        그것을 다시 부르는지를 가린다 (`AgentSourceLoader.load`). 새 Agent 는 None 이다."""
         ps = await self.platform_settings.get()
         ts = await self.tenant_settings.get(tenant)
         # draft 도 사전에 넣는다. 빠지면 "모르는 소스" 라는 틀린 진단이 나온다. 배포 안 된 것은
@@ -520,6 +555,11 @@ class AgentService(ExposureValidationMixin, AgentRollbackMixin, BaseInstanceServ
         gateways = {i.id: i for i in await self.gateway_instances.list(tenant, include_draft=True)}
         servers = {i.id: i for i in await self.mcp_instances.list(tenant, include_draft=True)}
         ids = source_ids(spec)
+        called = await self.agent_sources.load(tenant, spec, principal=principal, agent_id=agent_id)
+        source_tools = await self.tool_effects.load(
+            {k: v for k, v in gateways.items() if k in ids},
+            {k: v for k, v in servers.items() if k in ids},
+        )
         return GraphContext(
             providers=ps.providers_by_name,
             has_key=self.llm.has_key_checker(),
@@ -532,10 +572,8 @@ class AgentService(ExposureValidationMixin, AgentRollbackMixin, BaseInstanceServ
             data_services={d.id: d for d in await self.data_services.list(tenant)},
             knowledge_bases=await self.knowledge_bases(tenant),
             skill_revisions=await self.skills.pinned(tenant, spec, principal),
-            source_tools=await self.tool_effects.load(
-                {k: v for k, v in gateways.items() if k in ids},
-                {k: v for k, v in servers.items() if k in ids},
-            ),
+            source_tools={**source_tools, **agent_calls.source_tools(called)},
+            agent_sources=called,
             web_tools=ps.web_tools,
             in_pod_state=in_pod_state,
         )
@@ -547,7 +585,11 @@ class AgentService(ExposureValidationMixin, AgentRollbackMixin, BaseInstanceServ
         (`in_pod_state`), 그 리비전이 원본에서 메인에 memory 노드를 가졌으면 파드 안에서 승인을
         묻는다(`in_pod_approvals`, P44b 7절)."""
         ctx = await self.context(
-            doc.tenant, rev, principal=principal, in_pod_state=doc.preview is not None
+            doc.tenant,
+            rev,
+            principal=principal,
+            in_pod_state=doc.preview is not None,
+            agent_id=doc.acting_id,
         )
         ctx.in_pod_approvals = await self._preview_asks(doc, rev.revision)
         return ctx
@@ -583,6 +625,11 @@ class AgentService(ExposureValidationMixin, AgentRollbackMixin, BaseInstanceServ
         if self.token_auth:
             out.extend(await self._hidden_tool_warnings(doc, rev, sources))
         return out
+
+    async def _tool_warnings(self, doc: Agent) -> list[str]:
+        """Tool 핀의 상태 경고에 Tool 로 쓰는 게시한 Agent 의 경고를 더한 것이다 (P46 6.8절,
+        `agent_calls.status_warnings`)."""
+        return await self._pin_warnings(doc) + await self.agent_sources.status_warnings(doc)
 
     async def _hidden_tool_warnings(
         self, doc: Agent, rev: AgentSpec, sources: Mapping[str, SourceTools]
@@ -623,20 +670,28 @@ class AgentService(ExposureValidationMixin, AgentRollbackMixin, BaseInstanceServ
                 kb.status = found[kb.id]
         return {kb.id: kb for kb in kbs}
 
-    async def validate(self, tenant: str, spec: AgentSpec, *, principal: Principal) -> list[Issue]:
-        return (await self.review(tenant, spec, principal=principal)).issues
+    async def validate(
+        self, tenant: str, spec: AgentSpec, *, principal: Principal, agent_id: str | None = None
+    ) -> list[Issue]:
+        return (await self.review(tenant, spec, principal=principal, agent_id=agent_id)).issues
 
-    async def review(self, tenant: str, spec: AgentSpec, *, principal: Principal) -> GraphReview:
-        """검증 이슈와 tools 노드마다의 Tool 효과와 백엔드 종류다(`POST /validate`). 효과는 바깥
-        내용 뒤의 승인 규칙이 쓰는 것이다."""
-        ctx = await self.context(tenant, spec, principal=principal)
-        _analysis, issues = await _analyze(spec, ctx)
+    async def review(
+        self, tenant: str, spec: AgentSpec, *, principal: Principal, agent_id: str | None = None
+    ) -> GraphReview:
+        """검증 이슈와 tools 노드마다의 Tool 효과와 백엔드 종류, Tool 로 쓰는 게시한 Agent 다
+        (`POST /validate`). 효과는 바깥 내용 뒤의 승인 규칙이 쓰는 것이다. agent_id 는 그 정의를
+        가진 Agent 다(`context`)."""
+        ctx = await self.context(tenant, spec, principal=principal, agent_id=agent_id)
+        _analysis, issues = await _analyze(spec, ctx, calls_enabled=self.agent_sources.enabled)
         tools = graph_tools(spec, ctx.source_tools, tool_safety=True)
-        return GraphReview(issues=issues, tools=tools)
+        calls = agent_calls.node_views(spec, ctx.agent_sources)
+        return GraphReview(issues=issues, tools=tools, calls=calls)
 
-    async def check(self, tenant: str, spec: AgentSpec, *, principal: Principal) -> list[Issue]:
+    async def check(
+        self, tenant: str, spec: AgentSpec, *, principal: Principal, agent_id: str | None = None
+    ) -> list[Issue]:
         """저장·배포 앞의 검증. 오류가 있으면 AgentError(422 invalid_graph), 아니면 경고 목록."""
-        issues = await self.validate(tenant, spec, principal=principal)
+        issues = await self.validate(tenant, spec, principal=principal, agent_id=agent_id)
         if errors_of(issues):
             raise AgentError.from_graph(GraphError(issues))
         return issues
@@ -710,7 +765,7 @@ class AgentService(ExposureValidationMixin, AgentRollbackMixin, BaseInstanceServ
         issues: list[Issue] = []
         before = doc.revision
         if changed:
-            issues = await self.check(doc.tenant, spec, principal=principal)
+            issues = await self.check(doc.tenant, spec, principal=principal, agent_id=doc.id)
             doc.spec = spec
             doc.revision += 1
             doc.revisions.append(AgentRevision(revision=doc.revision, **spec.model_dump()))
@@ -930,10 +985,12 @@ class AgentService(ExposureValidationMixin, AgentRollbackMixin, BaseInstanceServ
         memory 가 `DAEGAM_DB_0`, 그 뒤 knowledge 노드 순서로 `DAEGAM_DB_<i>` 이고 같은 Database 는
         한 번이다(compile 이 `templates/agent.py` 의 `dsn_env` 로 Database id 를 찾는다). 웹 Tool 의
         규칙도 저장 앞의 검증처럼 다시 본다. 저장 뒤에 소스가 웹 Tool 을 얻었을 수 있다."""
-        analysis, issues = await _analyze(rev, ctx)
+        analysis, issues = await _analyze(rev, ctx, calls_enabled=self.agent_sources.enabled)
         if errors_of(issues):
             raise AgentError.from_graph(GraphError(issues))
         for node_id, data in analysis.nodes_of("tools", ToolsData):
+            if data.source.kind == AGENT_SOURCE:
+                continue  # 호출은 플랫폼을 거치므로 호출받는 Agent 의 클러스터를 묻지 않는다
             source = ctx.source_pool(data.source.kind)[data.source.id]
             if source.cluster_id != cluster.id:
                 raise AgentError(
@@ -1033,7 +1090,7 @@ class AgentService(ExposureValidationMixin, AgentRollbackMixin, BaseInstanceServ
             doc, cluster, bindings, ns_name, replicas, resources, resources_sent
         )
         # 배포 때 소스가 광고하는 이름을 박는다 (P39b 14절 5부)
-        pins = pins_of(rev, ctx.source_tools)
+        pins = pins_of(rev, ctx.source_tools, ctx.agent_sources)
         warnings += await self._feature_check(doc, rev, effective, ctx, pins)
         gate = await self._judge_gate(doc, rev, skip_evaluation)
         warnings += gate.warnings
@@ -1063,6 +1120,7 @@ class AgentService(ExposureValidationMixin, AgentRollbackMixin, BaseInstanceServ
         async with self._host_claimed(doc):
             await self._transition(doc, {"draft"}, action="deploy", extra={"sleep"}, push=history)
         warnings += await self._runs_deployed(doc, principal, previous=None)
+        warnings += await self._calls_deployed(doc)
         await self._prune_choices(doc)
         return doc, warnings
 
@@ -1352,7 +1410,7 @@ class AgentService(ExposureValidationMixin, AgentRollbackMixin, BaseInstanceServ
             want_replicas, want_resources, effective = await self._sized_effective(
                 doc, cluster, bindings, k8s.namespace, replicas, resources, resources_sent
             )
-            pins = pins_of(rev, ctx.source_tools)
+            pins = pins_of(rev, ctx.source_tools, ctx.agent_sources)
             issues += await self._feature_check(doc, rev, effective, ctx, pins)
             issues += gate.warnings
             previous = doc.deployed
@@ -1380,6 +1438,7 @@ class AgentService(ExposureValidationMixin, AgentRollbackMixin, BaseInstanceServ
             async with self._host_claimed(doc, claim=exposure_sent):
                 await self._transition(doc, EDIT_STATES, action="redeploy", push=history)
             issues += await self._runs_deployed(doc, principal, previous=previous)
+            issues += await self._calls_deployed(doc)
             await self._prune_choices(doc)
             self._place_claim(doc)
             return await self.provision(doc), issue_lines(issues)
@@ -1499,6 +1558,14 @@ class AgentService(ExposureValidationMixin, AgentRollbackMixin, BaseInstanceServ
 
     # -- 해제·삭제 ------------------------------------------------------------------
 
+    async def _guard_undeploy(self, doc: Agent) -> None:
+        """허브에 게시돼 있으면 409 published 다 (P46 6.1절). 다시 몰아가는 해제에도 본다."""
+        await self.publishing.refuse_undeploy(doc)
+
+    async def _after_cluster_removed(self, doc: Agent) -> None:
+        """게시한 허브 항목을 정리한다. 삭제는 게시가 막지 않는다."""
+        await self.publishing.forget(doc)
+
     async def _delete_steps(self, doc: Agent, *, forget_memories: bool = False) -> None:
         """Deployment·Service·NetworkPolicy·노출 객체·Secret 을 지운다. `forget_memories` 면
         마지막에 장기 기억도 지운다(삭제만. 해제는 남긴다)."""
@@ -1595,6 +1662,26 @@ class AgentService(ExposureValidationMixin, AgentRollbackMixin, BaseInstanceServ
             logger.warning("agent %s: run sources not checked at deploy: %s", doc.id, e)
             return []
 
+    async def _calls_deployed(self, doc: Agent) -> list[Issue]:
+        """게시한 Agent 의 새 배포가 호출의 전제 조건을 잃었으면 그 경고다 (P46 6.1절). 배포는 이미
+        저장됐으므로 실패는 경고 로그만 남긴다."""
+        try:
+            message = await self.publishing.deploy_warning(doc)
+        except Exception as e:  # noqa: BLE001 - 저장된 배포를 실패로 돌리지 않는다
+            logger.warning("agent %s: its hub item not checked at deploy: %s", doc.id, e)
+            return []
+        if message is None:
+            return []
+        return [Issue(code=CALLS_BROKEN_BY_DEPLOY, message=message, level="warning")]
+
+    async def item_status(self, item: HubItem) -> dict[str, Any] | None:
+        """agent 허브 항목의 상태. 그 Agent 의 상태라 허브 화면이 Agent 화면과 같은 phase 를 본다
+        (P46 6.1절). Agent 가 없거나 draft 면 None 이다. 허브 상태는 phase 만 쓰므로 런타임 수치와
+        노출 상태는 읽지 않는다."""
+        agent_id = item.source.agent_id
+        doc = await self.agents.get(agent_id, item.tenant) if agent_id else None
+        return await self.status(doc, listing=True, with_exposure=False) if doc else None
+
     async def _end_runs(self, doc: Agent) -> None:
         """도는 턴을 멈추기 전에 이 Agent 의 열린 실행에 해제나 삭제의 까닭을 남긴다. 멈춘 턴의
         `turn_end` 가 그 까닭으로 실행을 끝낸다. 실패는 경고로 남긴다. 그때 실행은 `stopped` 로
@@ -1661,6 +1748,7 @@ class AgentService(ExposureValidationMixin, AgentRollbackMixin, BaseInstanceServ
         돌아온 문서에도 장기 기억이 남아 있다. 클러스터에 아무것도 없어도 사람의 기억은 문서보다
         오래 남으면 안 되므로 이 단계는 지난다 (D34)."""
         await self.memories.forget(doc)
+        await _best_effort(doc, "hub item not deleted", self.publishing.forget(doc))
         await self._forget_feedback_of_draft(doc)
         await self._forget_runs_of_draft(doc)
         await self._forget_choices_of_draft(doc)
@@ -1744,6 +1832,7 @@ class AgentService(ExposureValidationMixin, AgentRollbackMixin, BaseInstanceServ
         ctx.mcp_token_envs = token_envs
         ctx.gateway_auth = gateway_auth
         ctx.tool_pins = valid_pins(doc)
+        ctx.agent_sources = agent_calls.addressed(ctx.agent_sources, self._platform_url(doc))
         gateway = doc.llm_route.gateway if gateway is None else gateway
         ctx.llm_gateway_url = self.settings.llm_gateway_url if gateway else None
         if allowed is None:
@@ -1762,6 +1851,14 @@ class AgentService(ExposureValidationMixin, AgentRollbackMixin, BaseInstanceServ
         except CompileError as e:
             logger.error("agent.json for %s violates the schema: %s", doc.id, e.messages)
             raise AgentError(e.status, e.code, str(e), errors=e.messages) from e
+
+    def _platform_url(self, doc: Agent) -> str:
+        """그 Agent 의 파드가 플랫폼을 부르는 주소다. 배포 스냅샷의 것이고, 스냅샷을 읽지 못하면 홈
+        클러스터의 것이다."""
+        effective = stored_effective(doc)
+        if effective is not None:
+            return effective.platform_internal_url
+        return self.settings.home_platform_internal_url()
 
     async def fetch_config(
         self,
@@ -1820,9 +1917,12 @@ class AgentService(ExposureValidationMixin, AgentRollbackMixin, BaseInstanceServ
         """배포·재배포 전 검사다(D65). 배포할 이미지의 기록이 있을 때만 `required` 가 빠지면 409
         이고 그 밖은 경고다. rev·effective 는 이 배포가 핀할 리비전과 스냅샷이고, ctx 는 그 요청이
         읽은 검증 문맥이다. 웹 Tool 은 이번 배포가 박을 핀(pins)으로 세고, 바인딩 Database 는 그
-        문맥이 막 읽은 것을 쓴다."""
+        문맥이 막 읽은 것을 쓴다. 게시한 Agent 를 Tool 로 쓰는데 이미지가 `agent_tools` 를 모르면
+        409 `runtime_feature_missing` 이다 (P46 6.2절)."""
         wanted = await self._wanted_features(doc, ctx, rev=rev, pins=pins, effective=effective)
         check, warnings = agent_features.deploy_check(doc, effective.images.agent_image, wanted)
+        if check is not None and agent_features.AGENT_TOOLS in check.missing:
+            raise _agent_tools_missing()
         if check is not None and check.missing:
             raise _image_too_old(check.missing)
         return warnings
@@ -1861,6 +1961,17 @@ def _redeploy_required(refs: list[str]) -> AgentError:
         "the graph now has web tools, and these tools nodes were deployed without tool pins; "
         "redeploy the agent: " + ", ".join(refs),
         nodes=refs,
+    )
+
+
+def _agent_tools_missing() -> AgentError:
+    """다른 Agent 를 Tool 로 부르지 못하는 이미지에 그런 그래프를 배포할 때의 409 다 (P46 6.2절)."""
+    return AgentError(
+        409,
+        RUNTIME_FEATURE_MISSING,
+        "the runtime image has not reported the 'agent_tools' feature, so it cannot call other "
+        "agents as tools",
+        feature=agent_features.AGENT_TOOLS,
     )
 
 

@@ -327,7 +327,7 @@ export function AgentCanvasPage({ embedded = false }: { embedded?: boolean } = {
     setFitViewKey((k) => k + 1);
   }
 
-  // 마지막 검사의 Tool 효과(P39b 14절 4부), 백엔드 종류와 바깥 내용 뒤의 승인 규칙인가(P43). 인스펙터의 tools 패널이 효과
+  // 마지막 검사의 Tool 효과(P39b 14절 4부), 백엔드 종류와 바깥 내용 뒤의 승인 규칙인가(P43), Agent 소스가 부르는 Agent(P46 6.2절). 인스펙터의 tools 패널이 효과
   // 배지, 승인 표시, 바깥 표시를 단다. 검사한 그래프에만 맞으므로 이슈처럼 그 그래프의 키에 묶고, 그래프가 바뀌면 보이지 않는다
   const [review, setReview] = useState<{ key: string; result: AgentValidateResponse } | null>(null);
   const validate = useMutation({
@@ -339,7 +339,7 @@ export function AgentCanvasPage({ embedded = false }: { embedded?: boolean } = {
   });
   const reviewed = review?.key === graphKey ? review.result : null;
   const inspectorOptions = useMemo(
-    () => (reviewed ? { ...options, toolEffects: reviewed.tool_effects, toolOrigins: reviewed.tool_origins, toolMarked: reviewed.tool_marked } : options),
+    () => (reviewed ? { ...options, toolEffects: reviewed.tool_effects, toolOrigins: reviewed.tool_origins, toolMarked: reviewed.tool_marked, agentCalls: reviewed.agent_calls } : options),
     [options, reviewed],
   );
 

@@ -164,11 +164,36 @@
     },
     "tools": {
       "type": "array",
-      "description": "MCP 도구 소스다. 런타임이 MultiServerMCPClient(streamable_http) 로 읽고 allow 로 이름을 거른다. ref 는 문서 안에서 유일해야 한다.",
+      "description": "도구 소스다. MCP 소스는 런타임이 MultiServerMCPClient(streamable_http) 로 읽고 allow 로 이름을 거른다. Agent 소스(source.kind 가 agent, 기능 agent_tools)는 목록을 읽지 않고 이 항목으로 Tool 하나를 만든다. ref 는 문서 안에서 유일해야 한다.",
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["ref", "source", "url", "transport", "auth", "allow", "approval", "timeouts"],
+        "required": ["ref", "source", "url", "allow", "approval", "timeouts"],
+        "if": {
+          "properties": { "source": { "properties": { "kind": { "const": "agent" } }, "required": ["kind"] } },
+          "required": ["source"]
+        },
+        "then": {
+          "$comment": "Agent 소스다. Tool 은 allow 의 이름 하나이고 설명과 제한 시간이 항목에 박혀 있다. 결과는 늘 바깥 내용이고 호출은 늘 쓰기라 inside·read 를 받지 않는다.",
+          "required": ["description", "timeout_seconds"],
+          "properties": {
+            "transport": false,
+            "auth": false,
+            "web": false,
+            "inside": false,
+            "read": false,
+            "allow": {
+              "minItems": 1,
+              "maxItems": 1,
+              "items": { "pattern": "^ask_[a-z0-9_]+$", "maxLength": 36 }
+            },
+            "timeouts": { "maxProperties": 0 }
+          }
+        },
+        "else": {
+          "required": ["transport", "auth"],
+          "properties": { "description": false, "timeout_seconds": false }
+        },
         "properties": {
           "ref": {
             "type": "string",
@@ -182,8 +207,8 @@
             "description": "이 소스가 가리키는 플랫폼 리소스다. 관측 이벤트와 화면 표시에 쓰고 런타임은 url 로만 붙는다.",
             "properties": {
               "kind": {
-                "enum": ["gateway_instance", "mcp_instance"],
-                "description": "Gateway Instance(vMCP) 또는 MCP Instance 다."
+                "enum": ["gateway_instance", "mcp_instance", "agent"],
+                "description": "Gateway Instance(vMCP), MCP Instance 또는 Tool 로 부르는 다른 Agent 다(기능 agent_tools). agent 면 id 와 name 은 호출받는 Agent 의 것이다."
               },
               "id": { "type": "string", "minLength": 1, "description": "리소스 id 다." },
               "name": { "type": "string", "minLength": 1, "description": "리소스 name 이다." }
@@ -193,7 +218,7 @@
             "type": "string",
             "format": "uri",
             "minLength": 1,
-            "description": "MCP 엔드포인트 URL 이다. 클러스터 안 Service 주소이며 compile 이 해석해 넣는다."
+            "description": "MCP 엔드포인트 URL 이다. 클러스터 안 Service 주소이며 compile 이 해석해 넣는다. Agent 소스면 그 Agent 를 부르는 플랫폼의 호출 경로다. 런타임은 여기에 호출을 시작하고 그 아래 runs/{run_id} 와 runs/{run_id}/cancel 을 부른다."
           },
           "transport": {
             "const": "streamable_http",
@@ -204,7 +229,18 @@
             "type": "array",
             "uniqueItems": true,
             "items": { "type": "string", "minLength": 1 },
-            "description": "허용 툴 이름이다. 비어 있으면 tools/list 가 주는 전부를 쓴다."
+            "description": "허용 툴 이름이다. 비어 있으면 tools/list 가 주는 전부를 쓴다. Agent 소스면 그 소스의 Tool 이름 하나다."
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024,
+            "description": "Agent 소스의 Tool 설명이다. 배포 때 박힌 것이고 부르는 모델이 읽는다."
+          },
+          "timeout_seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Agent 소스의 호출 하나가 답을 기다리는 시간(초)이다. 넘으면 런타임이 호출을 멈추고 호출받은 Agent 의 실행을 취소한다. 부르는 턴의 남은 시간이 더 짧으면 그 시간이다."
           },
           "approval": {
             "$ref": "#/$defs/decision_map",
@@ -497,6 +533,24 @@
         "properties": {
           "tools": { "items": { "properties": { "inside": false, "read": false } } },
           "knowledge": { "items": { "properties": { "outside": false } } }
+        }
+      }
+    },
+    {
+      "$comment": "기능 agent_tools. Agent 소스는 features 에 그 이름이 있을 때만 받는다.",
+      "if": {
+        "properties": { "features": { "contains": { "const": "agent_tools" } } },
+        "required": ["features"]
+      },
+      "else": {
+        "properties": {
+          "tools": {
+            "items": {
+              "properties": {
+                "source": { "properties": { "kind": { "enum": ["gateway_instance", "mcp_instance"] } } }
+              }
+            }
+          }
         }
       }
     },

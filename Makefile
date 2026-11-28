@@ -96,6 +96,11 @@
 #                            부른다. 소속 아님·계정 막기의 끊김, 개인 토큰과 내부 홉(e2e-install-extra 의 같은 실행이 같은 Gateway 에
 #                            e2e-pat 을 먼저 돌았으면 건너뛴다). E2E_TARGET=install 은 노출해 둔 Gateway 를 읽기만 하고 CIMD 도 본다. E2E_OAUTH_WAIT=full
 #                            이면 끊은 연결의 접근 토큰이 401 이 되기까지 잰다)
+#   make e2e-agent-calls     P46 Agent 호출 e2e 11단계 (로컬 클러스터는 header 모드 그대로, E2E_TARGET=install 은 설치본.
+#                            스텁 provider 허용을 이 게이트 동안만 ConfigMap 에 두고 되돌린다. Agent 넷을 게시해 서로 Tool 로
+#                            붙이고, 호출이 호출받은 Agent 의 실행으로 돌아 답을 돌려주는 것, Gateway 감사의 사람(설치본),
+#                            순환과 넷째 Agent 의 거절(설치본), viewer 의 호출(설치본), 부른 턴의 중지가 실행을 취소하는 것,
+#                            호출받은 Agent 의 승인, 실행 목록의 부른 Agent 와 토큰, 게시 해제, 호출을 끈 플랫폼을 본다)
 #   make e2e-runs            P41 (D94) 자동 실행 e2e 10단계 (설치본만, E2E_INSTALL_USER 는 e2e-install 과 같은 관리자·키체인 항목.
 #                            스텁 provider 허용을 이 게이트 동안만 ConfigMap 에 두고 되돌린다. 지금 실행, MongoDB 에서 당긴 일정의
 #                            울림 하나, 서명한 웹훅과 그 거절, 둘째 developer 의 받은 결정함 승인, TTL 120초의 마감 거절과 그 뒤
@@ -168,7 +173,7 @@
 #                            돌아오는지도 본다. 값은 설치 값 파일(~/.config/daegam/install.env, 예시 deploy/install.env.example)이다.
 #                            E2E_TAG=<후보 태그> 면 그 후보의 e2e-install-extra 가 e2e-runs 를 돌 때 STEP 8r 을 건너뛴다
 #   make e2e-install-extra E2E_TAG=<후보 태그>  그 태그의 e2e: 줄이 고른 설치본 게이트(e2e-web-tools, e2e-skills, e2e-telemetry,
-#                            e2e-ui-serving, e2e-pat, e2e-oauth, e2e-runs, e2e-sandbox 가운데)를 하나씩 차례로 돈다(scripts/run_e2e_install_extra.sh).
+#                            e2e-ui-serving, e2e-pat, e2e-oauth, e2e-runs, e2e-agent-calls, e2e-sandbox 가운데)를 하나씩 차례로 돈다(scripts/run_e2e_install_extra.sh).
 #                            E2E_INSTALL_EXTRA="이름 ..." 이면 태그 대신 그 이름들이다. 하나가 실패해도 나머지를 돌고, 실패한
 #                            이름을 찍은 뒤 1 로 끝난다. 릴리스 후보의 e2e-install 다음에 돈다
 #   make llm-gateway-uninstall  LLM 게이트웨이 네임스페이스를 지운다 (P38 3절). 네임스페이스와 플랫폼의 Role 은 대감 차트가
@@ -335,7 +340,7 @@ DEPLOY_LOCAL = KUBE_CONTEXT=$(KUBE_CONTEXT) PLATFORM_NS=$(PLATFORM_NS) PLATFORM_
 	HELM_FLAGS="$(HELM_FLAGS)" bash scripts/deploy-local.sh
 HELM    := helm --kube-context $(KUBE_CONTEXT)
 
-.PHONY: cpython-record base-pins base-pins-check deps-audit base-scan cluster-up operator-install cert-manager-up cert-manager-clean image image-s2o image-runtime image-agent image-mock-oidc image-web-tools image-sandbox image-lab lab-up lab-clean test test-gate lint lint-scripts verify verify-changed verify-ui verify-ui-links verify-runtime-links verify-docs verify-platform verify-runtime check-types check-locks run db-up db-down runtime-db-up runtime-db-down image-platform deploy-local undeploy-local llm-provider-local e2e-instance e2e-gateway e2e-agent e2e-agent-oidc e2e-agent-redis e2e-assistant e2e-assistant-oidc e2e-knowledge e2e-chat e2e-chat-redis e2e-telemetry e2e-netpol e2e-okta ui-install ui-dev ui-build ui-types ui-test ui-e2e-install e2e-ui-smoke e2e-ui-full e2e-mcp-auth e2e-oidc-platform image-ui deploy-ui-local e2e-ui-serving push-images image-report registry-pull-secret e2e-install e2e-install-extra web-ca-local e2e-agent-local e2e-pat e2e-oauth e2e-web-tools e2e-skills e2e-runs e2e-sandbox e2e-provisioning e2e-exchange e2e-evaluation e2e-llm-gateway llm-gateway-uninstall mirror-images hub-mirror hub-resign
+.PHONY: cpython-record base-pins base-pins-check deps-audit base-scan cluster-up operator-install cert-manager-up cert-manager-clean image image-s2o image-runtime image-agent image-mock-oidc image-web-tools image-sandbox image-lab lab-up lab-clean test test-gate lint lint-scripts verify verify-changed verify-ui verify-ui-links verify-runtime-links verify-docs verify-platform verify-runtime check-types check-locks run db-up db-down runtime-db-up runtime-db-down image-platform deploy-local undeploy-local llm-provider-local e2e-instance e2e-gateway e2e-agent e2e-agent-oidc e2e-agent-redis e2e-assistant e2e-assistant-oidc e2e-knowledge e2e-chat e2e-chat-redis e2e-telemetry e2e-netpol e2e-okta ui-install ui-dev ui-build ui-types ui-test ui-e2e-install e2e-ui-smoke e2e-ui-full e2e-mcp-auth e2e-oidc-platform image-ui deploy-ui-local e2e-ui-serving push-images image-report registry-pull-secret e2e-install e2e-install-extra web-ca-local e2e-agent-local e2e-pat e2e-oauth e2e-web-tools e2e-skills e2e-runs e2e-agent-calls e2e-sandbox e2e-provisioning e2e-exchange e2e-evaluation e2e-llm-gateway llm-gateway-uninstall mirror-images hub-mirror hub-resign
 
 cluster-up:
 	@if [ "$$(orb config get k8s.enable)" != "true" ]; then \
@@ -715,6 +720,12 @@ e2e-oauth:
 # e2e-install-extra 가 돌린다
 e2e-runs:
 	PLATFORM_NS=$(PLATFORM_NS) INSTALL_CONTEXT=$(INSTALL_CONTEXT) E2E_INSTALL_USER=$(E2E_INSTALL_USER) bash scripts/e2e_runs.sh
+
+# P46. Agent 가 게시한 다른 Agent 를 Tool 로 부른다. 로컬 클러스터(태그의 클러스터 e2e 잡의 agent 조각, deploy-local 과
+# lab-up 뒤)와 설치본(E2E_TARGET=install) 둘이다. 로컬은 header 모드 그대로 돌아 사람을 보는 단계와 사슬을 조건부로 건너뛴다.
+# 릴리스 후보의 e2e: 줄이 고르면 k3d 의 agent 조각과 e2e-install-extra 가 돌린다
+e2e-agent-calls:
+	$(E2E_ENV) E2E_TARGET=$(E2E_TARGET) INSTALL_CONTEXT=$(INSTALL_CONTEXT) E2E_INSTALL_USER=$(E2E_INSTALL_USER) bash scripts/e2e_agent_calls.sh
 
 # P40 (D95) 코드 실행 샌드박스. 로컬 클러스터(태그의 클러스터 e2e 잡이 만든 k3d)와 설치본(E2E_TARGET=install) 둘이다. 로컬은
 # deploy-local·lab-up 뒤이고 노드에 make image-sandbox 의 이미지가 있어야 한다. 릴리스 후보의 e2e: 줄이 고르면 k3d 의 sandbox

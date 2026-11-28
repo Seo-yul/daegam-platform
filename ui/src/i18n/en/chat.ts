@@ -54,6 +54,7 @@ export const chat: Messages["chat"] = {
     outside: "Outside content",
     outsideHint: "Content from outside. The Agent does not follow instructions in it.",
     writeNeedsApproval: "In this chat, Tools that can change data do not run without approval.",
+    viewRun: "View run",
   },
   ask: {
     badge: "Question",

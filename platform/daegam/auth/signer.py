@@ -16,7 +16,9 @@
 세 갈래의 audience 는 겹치지 않는다. 제어면 `daegam-api`, 데이터 플레인 `mcp_audience`(기본
 `daegam-mcp`), 내부 홉 `daegam-internal:<tenant>`(테넌트마다 다르고 그것이 테넌트 격리다). 겹치면 한
 토큰이 두 경계를 지나므로 Settings 가 기동에서 거절한다. 내부 홉에는 서버 하나만 받는
-`daegam-internal:<tenant>:<서버 id>` 도 있다 (P50 9절, `server_audience`).
+`daegam-internal:<tenant>:<서버 id>` 도 있다 (P50 9절, `server_audience`). 다른 Agent 를 Tool 로
+부르는 호출의 `daegam-agent-call:<tenant>:<Agent id>` 는 내부 홉 밖의 다섯째 갈래이고 플랫폼의 호출
+경로만 받는다 (`agent_call_audience`).
 """
 
 from __future__ import annotations
@@ -44,6 +46,9 @@ ALG = "RS256"
 ACCESS_TOKEN_TYP = "at+jwt"
 CONTROL_PLANE_AUDIENCE = "daegam-api"
 INTERNAL_AUDIENCE_PREFIX = "daegam-internal:"
+# 다른 Agent 를 Tool 로 부르는 호출의 audience 접두사다. 내부 홉의 접두사 밖이라 서버 audience 를
+# 읽는 쪽(`audience_server_id`)이 Agent id 를 서버 id 로 읽지 않는다
+AGENT_CALL_AUDIENCE_PREFIX = "daegam-agent-call:"
 # LLM 게이트웨이가 사용량을 보낼 때의 서비스 토큰 audience (P37 8절)
 TELEMETRY_AUDIENCE = "daegam-telemetry"
 # LLM 게이트웨이가 받는 부르는 쪽 토큰의 audience (P38 5절). 다른 어느 경계도 이 값을 받지 않고
@@ -134,6 +139,13 @@ def internal_audience(tenant: str) -> str:
     if not tenant:
         raise ValueError("internal audience needs a tenant")
     return f"{INTERNAL_AUDIENCE_PREFIX}{tenant}"
+
+
+def agent_call_audience(tenant: str, agent_id: str) -> str:
+    """호출받는 Agent 하나의 호출 경로만 받는 audience `daegam-agent-call:<tenant>:<Agent id>`."""
+    if not tenant or not agent_id:
+        raise ValueError("agent call audience needs a tenant and an agent id")
+    return f"{AGENT_CALL_AUDIENCE_PREFIX}{tenant}:{agent_id}"
 
 
 def server_audience(tenant: str, server_id: str) -> str:

@@ -354,6 +354,24 @@ class TurnCalls:
 _CURRENT: ContextVar[TurnCalls | None] = ContextVar("daegam_turn_calls")
 
 
+@dataclass(frozen=True)
+class TurnRef:
+    """지금 도는 턴의 세션과 시도 id 다. 위임 토큰 없이 플랫폼을 부르는 Tool 이 제 턴을 이것으로
+    알린다(agent_calls.py)."""
+
+    session_id: str
+    turn_id: str
+
+
+# 지금 도는 턴이다. `_CURRENT` 와 같이 턴이 그래프를 돌리기 전에 정하고 그래프의 태스크가 물려받는다
+_TURN: ContextVar[TurnRef | None] = ContextVar("daegam_turn_ref", default=None)
+
+
+def current_turn() -> TurnRef | None:
+    """지금 도는 Tool 호출의 턴이다. 턴 밖이거나 턴이 알리지 않았으면 None 이다."""
+    return _TURN.get()
+
+
 class TurnGrants:
     """이 파드에 열린 턴의 위임이다. 턴마다 객체 하나이고, 턴은 문맥 변수로 제 것을 찾는다."""
 
@@ -378,10 +396,15 @@ class TurnGrants:
         return self._http
 
     def open(
-        self, grant: TurnGrant | None, *, on_refused: Callable[[int], None] | None = None
+        self,
+        grant: TurnGrant | None,
+        *,
+        on_refused: Callable[[int], None] | None = None,
+        turn: TurnRef | None = None,
     ) -> TurnCalls | None:
         """이 턴의 위임을 열어 지금 문맥에 둔다. 위임 없는 턴은 None 을 두어 이 문맥이 턴 안이고
-        위임이 없음을 적는다. on_refused 는 갱신이 거절된 상태 코드를 받는다."""
+        위임이 없음을 적는다. on_refused 는 갱신이 거절된 상태 코드를 받는다. turn 은 이 턴의
+        세션과 시도이고 같은 문맥에 둔다(`current_turn`)."""
         calls = None
         if grant is not None:
             credentials = TurnCredentials(
@@ -396,6 +419,7 @@ class TurnGrants:
             calls = TurnCalls(credentials)
             self.open_calls.add(calls)
         _CURRENT.set(calls)
+        _TURN.set(turn)
         return calls
 
     async def close(self, calls: TurnCalls | None, reason: str) -> None:

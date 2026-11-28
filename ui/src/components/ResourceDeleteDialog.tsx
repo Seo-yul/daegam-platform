@@ -40,7 +40,7 @@ export function ResourceDeleteDialog({
   onDeleted?: () => void;
   /** 확인 단추의 말이고 제목에도 들어간다. 기본은 삭제이고 허브 게시 항목은 게시 해제다. */
   confirmLabel?: string;
-  /** 규칙표의 설명을 대신할 문장. */
+  /** 규칙표의 설명을 대신할 문장. 빈 글이면 설명 문단을 그리지 않는다. */
   description?: string;
   /** 설명 아래에 끼우는 추가 안내 (예: MCP Server 삭제 시 참조 중인 Gateway 경고). */
   extra?: ReactNode;
@@ -48,6 +48,7 @@ export function ResourceDeleteDialog({
   const t = useT();
   const text = t.resources.delete;
   const rule = DELETE_RULES[resource];
+  const sentence = description ?? text.description[resource];
   const action = confirmLabel ?? t.common.delete;
   const queryClient = useQueryClient();
   // 다른 작업이 문서를 쥐고 있으면 서버는 상태만 "삭제 중" 으로 옮기고 그 작업이 이어서 지운다 (P66).
@@ -98,7 +99,7 @@ export function ResourceDeleteDialog({
             <p className="font-medium text-heading" data-testid="confirm-target">
               {target?.name}
             </p>
-            <p>{description ?? text.description[resource]}</p>
+            {sentence ? <p>{sentence}</p> : null}
             {extra}
             <ReferencesNotice resource={resource} id={target?.id} open={target !== null} testId="delete-references" />
           </>

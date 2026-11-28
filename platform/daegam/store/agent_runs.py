@@ -4,7 +4,9 @@ agent_runs {_id, tenant, agent_id, source, source_id?, scheduled_for?, delivery_
             message?, input_bytes, input_sha256, session_id?, turn_id?, grant_id?, status,
             reason?, attempts, next_attempt_at?, lease?, last_event_at, event_at?,
             stop_requested_at?, stop_reason?, created_at, started_at?, ended_at?, deadline?,
-            expires_at, count?, first_at?, last_at?}
+            expires_at, count?, first_at?, last_at?,
+            caller?: {agent_id, session_id?, turn_id?, grant_id?, chain, long_bound, untrusted,
+                      timeout_at}}
 
 실행 하나는 플랫폼이 묶인 사람으로 새 세션에서 여는 턴 하나와 그 뒤의 기록이다. `scheduled_for` 는
 스케줄의 울림 시각이고 `delivery_id` 는 웹훅 호출의 id 다. 둘 다 있을 때만 문서에 적어 부분 유일
@@ -13,12 +15,18 @@ agent_runs {_id, tenant, agent_id, source, source_id?, scheduled_for?, delivery_
 지금 실행의 본문(`message`)만은 시작 워커가 집을 때까지 둔다. 끝나는 이동이 지우고, 시작 워커가
 `running` 으로 옮길 때 지운다(P41 12절). TTL 인덱스가 전사 보존 기간(30일) 뒤에 지운다.
 
-`source` 는 글자 그대로 읽는다. 뒤 판이 더한 출처(P46 의 `agent`)의 기록도 목록·읽기·이벤트·
-중지에서 터지지 않는다. 시작과 지켜보기 워커는 이 판이 아는 출처(`RUN_SOURCES`)의 기록만 잡고
-나머지는 그 판의 워커에 둔다. 다만 지켜보기 워커는 중지 표시가 남은 조용한 `running` 기록을 출처와
-상관없이 잡아 그 까닭으로 끝낸다. 그 판의 워커가 없는 동안 끝을 알리지 않은 턴을 아무도 끝내지
-못하기 때문이다. 실행 상한도 이 판이 아는 출처만 센다. 뒤 판의 출처에는 그 판의 상한이 따로 있다
+`source` 는 글자 그대로 읽는다. 뒤 판이 더한 출처의 기록도 목록·읽기·이벤트·중지에서 터지지
+않는다. 시작과 지켜보기 워커는 이 판이 아는 출처(`RUN_SOURCES`)의 기록만 잡고 나머지는 그 판의
+워커에 둔다. 다만 지켜보기 워커는 중지 표시가 남은 조용한 `running` 기록을 출처와 상관없이 잡아 그
+까닭으로 끝낸다. 그 판의 워커가 없는 동안 끝을 알리지 않은 턴을 아무도 끝내지 못하기 때문이다
 (P46 A0).
+
+출처 `agent` 는 다른 Agent 가 Tool 로 부른 실행이다 (P46 6.3절). `caller` 가 부른 쪽을 적는다. 부른
+Agent, 그 세션과 턴의 위임(위임 없는 턴은 파드가 댄 턴 id), 뿌리부터 부른 Agent 까지의 사슬
+(`chain`), 뿌리 턴의 한도 종류(`long_bound`), 입력을 믿지 않는 실행인지(`untrusted`), 호출이 답을
+기다리는 끝(`timeout_at`)이다. 호출은 스케줄·웹훅·지금 실행의 상한(`RUN_CAP_SOURCES`)과 따로 센다.
+부른 턴이 끝나면 아직 첫 턴인 실행을 취소한다. 첫 턴은 `starting` 이나 `running` 이고 마감
+(`deadline`)이 한 번도 적히지 않은 기록이다. 승인을 기다린 적이 있는 실행은 마감이 남는다.
 
 `starting` 과 `waiting_approval` 에서 나가는 이동은 모두 조건부 갱신이다. 같은 초에 만난 결정·마감·
 중지가 결과 하나만 남긴다. 시작 워커는 `starting` 기록 하나에 리스(`lease`)를 걸고 시작하며, 다시 할
@@ -55,9 +63,13 @@ AGENT_RUNS = "agent_runs"
 # 전사 보존 기간과 같다 (agent-runtime 의 DAEGAM_TRANSCRIPT_RETENTION_DAYS 기본값)
 RUN_RETENTION = timedelta(days=30)
 
-RunSource = Literal["schedule", "webhook", "manual"]
-# 이 판이 시작하고 지켜보고 상한에 세는 출처 (P46 A0)
+RunSource = Literal["schedule", "webhook", "manual", "agent"]
+# 이 판이 시작하고 지켜보는 출처 (P46 A0)
 RUN_SOURCES: tuple[RunSource, ...] = get_args(RunSource)
+# 다른 Agent 가 Tool 로 부른 실행의 출처 (P46 6.3절)
+CALL_SOURCE: RunSource = "agent"
+# Agent 하나의 실행 상한이 세는 출처. 호출은 제 상한으로 따로 센다
+RUN_CAP_SOURCES: tuple[RunSource, ...] = tuple(s for s in RUN_SOURCES if s != CALL_SOURCE)
 RunStatus = Literal[
     "starting",
     "running",
@@ -79,7 +91,9 @@ STOPPED = "stopped"
 # 실행이 되지 않은 울림의 까닭 (3절)
 SkipReason = Literal["missed", "previous_running", "agent_run_limit"]
 # 없을 때 문서에서 빼는 칸. 부분 유일 인덱스가 칸의 있음으로 거른다
-_OMIT_WHEN_NONE = ("scheduled_for", "delivery_id", "source_id")
+_OMIT_WHEN_NONE = ("scheduled_for", "delivery_id", "source_id", "caller")
+# 첫 턴인 열린 실행을 고르는 조건이다(모듈 머리)
+_FIRST_TURN: dict[str, Any] = {"status": {"$in": MOVING_STATUSES}, "deadline": None}
 
 
 class ActsAs(BaseModel):
@@ -93,6 +107,23 @@ class ActsAs(BaseModel):
     tv: int | None = None
     kind: Literal["person", "agent"] = "person"
     cause: str | None = None
+
+
+class RunCaller(BaseModel):
+    """다른 Agent 가 Tool 로 부른 실행의 부른 쪽이다 (P46 6.3·6.5절). agent_id 는 부른 Agent(미리
+    보기는 원본)이고 chain 은 뿌리부터 그 Agent 까지다. grant_id 는 부른 턴의 위임이고, 위임 없는
+    턴(header 모드)은 없어 session_id 와 turn_id 가 그 턴을 가린다."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    agent_id: str
+    session_id: str | None = None
+    turn_id: str | None = None
+    grant_id: str | None = None
+    chain: list[str]
+    long_bound: bool = False
+    untrusted: bool = True
+    timeout_at: UtcDatetime | None = None
 
 
 class AgentRun(Document):
@@ -129,6 +160,14 @@ class AgentRun(Document):
     count: int | None = None
     first_at: UtcDatetime | None = None
     last_at: UtcDatetime | None = None
+    # 출처가 `agent` 인 실행만 쓴다
+    caller: RunCaller | None = None
+
+    @property
+    def long_bound(self) -> bool | None:
+        """이 실행의 턴에 여는 위임이 싣는 뿌리 턴의 한도 종류다 (P46 6.4절). 다른 Agent 가 부른
+        실행만 싣고 그 밖은 None 이다."""
+        return self.caller.long_bound if self.caller is not None else None
 
     def to_doc(self) -> dict[str, Any]:
         d = super().to_doc()
@@ -267,6 +306,12 @@ class MongoAgentRunStore:
         await self.coll.create_index(
             [("tenant", ASCENDING), ("agent_id", ASCENDING), ("session_id", ASCENDING)],
             name="ix_agent_session",
+        )
+        # 부른 턴의 위임이 끝났을 때 그 턴이 시작한 호출을 찾는다 (P46 6.5절)
+        await self.coll.create_index(
+            [("caller.grant_id", ASCENDING), ("status", ASCENDING)],
+            name="ix_caller_grant",
+            partialFilterExpression={"caller.grant_id": {"$exists": True}},
         )
         await ensure_ttl_index(self.coll, "expires_at", 0, "ttl_expires_at")
 
@@ -636,6 +681,41 @@ class MongoAgentRunStore:
         """Agent 를 지울 때 그 Agent 의 열린 실행을 소스와 상관없이 중지처럼 끝낸다."""
         return await self._cancel_open({"tenant": tenant, "agent_id": agent_id}, reason, now)
 
+    async def first_turn_caller_grants(self) -> list[str]:
+        """아직 첫 턴인 호출을 시작한 위임의 id 다. 지켜보기가 그 위임이 끝났는지 본다."""
+        return await self.coll.distinct(
+            "caller.grant_id", {"caller.grant_id": {"$type": "string"}, **_FIRST_TURN}
+        )
+
+    async def cancel_first_turn_for_grants(
+        self, grant_ids: Collection[str], reason: str, now: datetime
+    ) -> list[AgentRun]:
+        """grant_ids 의 위임이 시작한 호출 가운데 아직 첫 턴이고 중지 표시가 없는 것을 중지처럼
+        끝낸다. 이번에 표시를 남긴 도는 실행만 돌려준다. 이미 표시가 남은 실행은 건드리지 않는다.
+        끝난 위임은 틱마다 다시 오므로, 건드리면 `last_event_at` 이 새로 적혀 지켜보기가 그 실행을
+        조용하다고 보지 못한다. 승인을 기다리거나 기다린 적이 있는 실행은 두고, 그 실행은 제 마감이
+        끝낸다 (P46 6.5절)."""
+        if not grant_ids:
+            return []
+        query = {"caller.grant_id": {"$in": list(grant_ids)}, **_FIRST_TURN}
+        unmarked = {**query, "stop_requested_at": None}
+        ids = [d["_id"] async for d in self.coll.find(unmarked, {"_id": 1})]
+        marked = [
+            run_id
+            for run_id in ids
+            if await self._mark_unmarked({"_id": run_id, **unmarked}, reason, now)
+        ]
+        await self.coll.update_many(
+            {**query, "status": "starting"}, {"$set": end_fields("cancelled", now, reason)}
+        )
+        # 표시를 남긴 뒤에 읽는다. 그사이 시작돼 running 이 된 실행도 돌려준다
+        cursor = self.coll.find({"_id": {"$in": marked}, "status": "running"})
+        return [AgentRun.from_doc(d) async for d in cursor]
+
+    async def _mark_unmarked(self, query: dict[str, Any], reason: str, now: datetime) -> bool:
+        result = await self.coll.update_one(query, _first_stop(now, reason))
+        return result.modified_count == 1
+
     async def _cancel_open(
         self, query: dict[str, Any], reason: str, now: datetime
     ) -> list[AgentRun]:
@@ -653,8 +733,10 @@ class MongoAgentRunStore:
 
 __all__ = [
     "AGENT_RUNS",
+    "CALL_SOURCE",
     "MOVING_STATUSES",
     "OPEN_STATUSES",
+    "RUN_CAP_SOURCES",
     "RUN_RETENTION",
     "RUN_SOURCES",
     "STOPPED",
@@ -662,6 +744,7 @@ __all__ = [
     "ActsAs",
     "AgentRun",
     "MongoAgentRunStore",
+    "RunCaller",
     "RunSource",
     "RunStatus",
     "SkipReason",
