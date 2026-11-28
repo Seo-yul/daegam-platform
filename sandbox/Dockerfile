@@ -3,7 +3,7 @@
 # it. The build stage follows platform/Dockerfile so the image carries the same CPython; the last stage is Debian slim
 # because commands need /bin/sh, coreutils and GNU grep (deepagents' BaseSandbox calls them).
 # 빌드 단계는 다른 CPython 이미지 넷과 같다(platform/tests/test_python_image_copy.py 가 맞댄다)
-FROM python:3.12-slim-trixie@sha256:191083cdf6c7bda8c76158983163ead5d5cf7b77cf3033e805bb0f5296f51b4b AS build
+FROM python:3.12-slim-trixie@sha256:5b5fe805d367f8f5a359ded6ab2652b7f9a206453ee6ee789c0045ba6ec15016 AS build
 # 사내 방화벽 CA (선택). make 의 DAEGAM_CA_FILE 이 빌드 비밀 daegam_ca 로 오면, 받기 단계만 시스템 CA 묶음에 그 CA 를
 # 더한 묶음을 tmpfs 에 만들어 믿는다. 이미지 층에는 CA 도 묶음도 남지 않는다. 비밀이 없으면 받기는 그대로다
 # (docs/guide/images.md 3절)
